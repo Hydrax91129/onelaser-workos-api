@@ -28,7 +28,7 @@ test('admin invites a non-DingTalk member; invitee sets a password, signs in, ap
  const {app,call,anon,db}=await setup();
  try{
   assert.equal((await call('m2','POST','/org/invites',{displayName:'Mike',email:'mike@example.com'})).statusCode,403,'only admins invite');
-  const inv=await call('m1','POST','/org/invites',{displayName:'Mike Chen',email:'Mike@Example.com',title:'US warehouse lead',managerId:'m1',role:'employee',grants:['products']});
+  const inv=await call('m1','POST','/org/invites',{displayName:'Mike Chen',email:'Mike@Example.com',title:'US warehouse lead',location:'Lake Forest, CA',managerId:'m1',role:'employee',grants:['products']});
   assert.equal(inv.statusCode,201,inv.body);const body=inv.json();
   assert.ok(body.url.startsWith('https://craftos.example/#invite/'));assert.equal(body.email,'mike@example.com');assert.equal(body.status,'pending');
   const list=(await call('m1','GET','/org/invites')).json();assert.equal(list.items[0].email,'mike@example.com');assert.ok(!('url' in list.items[0])&&!('token_hash' in list.items[0]),'links are shown once only');
@@ -39,7 +39,7 @@ test('admin invites a non-DingTalk member; invitee sets a password, signs in, ap
   assert.equal(accept.statusCode,200,accept.body);assert.match(String(accept.headers['set-cookie']),/workos_session=/);
   assert.equal((await anon('POST','/auth/invite/'+token+'/accept',{password:'warehouse-2026!'})).statusCode,404,'single use');
   const user=(await db.query("SELECT * FROM users WHERE login_email='mike@example.com'")).rows[0];
-  assert.equal(user.manager_id,'m1');assert.equal(user.title,'US warehouse lead');assert.deepEqual(user.grants,['products']);assert.equal(user.department_id,'marketing');
+  assert.equal(user.manager_id,'m1');assert.equal(user.title,'US warehouse lead');assert.equal(user.location,'Lake Forest, CA');assert.deepEqual(user.grants,['products']);assert.equal(user.department_id,'marketing');
   const chart=(await call('m2','GET','/org/chart')).json().items;assert.ok(chart.some((u:any)=>u.id===user.id),'invitee is on the org chart');
   const bad=await anon('POST','/auth/password',{email:'mike@example.com',password:'wrong-password'});assert.equal(bad.statusCode,401);
   const good=await anon('POST','/auth/password',{email:'MIKE@example.com',password:'warehouse-2026!'});assert.equal(good.statusCode,200,good.body);

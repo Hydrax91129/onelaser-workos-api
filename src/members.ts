@@ -26,9 +26,10 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS invited_by text;
 CREATE UNIQUE INDEX IF NOT EXISTS users_login_email ON users(lower(login_email)) WHERE login_email<>'';
 CREATE TABLE IF NOT EXISTS member_invites(
   id text PRIMARY KEY, org_id text NOT NULL, token_hash text NOT NULL UNIQUE, email text NOT NULL, display_name text NOT NULL,
-  title text NOT NULL DEFAULT '', department_id text NOT NULL, manager_id text, role text NOT NULL DEFAULT 'employee',
+  title text NOT NULL DEFAULT '', location text NOT NULL DEFAULT '', department_id text NOT NULL, manager_id text, role text NOT NULL DEFAULT 'employee',
   grants jsonb NOT NULL DEFAULT '[]', created_by text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
   expires_at timestamptz NOT NULL, accepted_at timestamptz, accepted_user_id text, revoked_at timestamptz, emailed boolean NOT NULL DEFAULT false);
+ALTER TABLE member_invites ADD COLUMN IF NOT EXISTS location text NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS member_invites_org ON member_invites(org_id,created_at);
 CREATE TABLE IF NOT EXISTS login_codes(email text PRIMARY KEY, code_hash text NOT NULL, expires_at timestamptz NOT NULL, attempts integer NOT NULL DEFAULT 0, created_at timestamptz NOT NULL DEFAULT now());
 `;
@@ -157,11 +158,11 @@ export async function registerMemberRoutes(app: FastifyInstance, db: Database, o
 
   // ---- Invites ----------------------------------------------------------------
   const inviteInput = z.object({
-    displayName: z.string().trim().min(1).max(80), email, title: z.string().trim().max(80).optional(),
+    displayName: z.string().trim().min(1).max(80), email, title: z.string().trim().max(80).optional(), location: z.string().trim().max(80).optional(),
     managerId: id.nullable().optional(), role: z.enum(['employee', 'manager']).optional(),
     grants: z.array(z.enum(GRANTS)).max(GRANTS.length).optional(), sendEmail: z.boolean().optional(),
   }).strict();
-  const publicInvite = (r: any) => ({ id: r.id, email: r.email, displayName: r.display_name, title: r.title, managerId: r.manager_id, role: r.role, grants: r.grants, createdAt: r.created_at, expiresAt: r.expires_at, acceptedAt: r.accepted_at, revokedAt: r.revoked_at, emailed: r.emailed, status: r.revoked_at ? 'revoked' : r.accepted_at ? 'accepted' : new Date(r.expires_at).getTime() < Date.now() ? 'expired' : 'pending' });
+  const publicInvite = (r: any) => ({ id: r.id, email: r.email, displayName: r.display_name, title: r.title, location: r.location, managerId: r.manager_id, role: r.role, grants: r.grants, createdAt: r.created_at, expiresAt: r.expires_at, acceptedAt: r.accepted_at, revokedAt: r.revoked_at, emailed: r.emailed, status: r.revoked_at ? 'revoked' : r.accepted_at ? 'accepted' : new Date(r.expires_at).getTime() < Date.now() ? 'expired' : 'pending' });
 
   app.get('/org/invites', async req => {
     const user = requireAdmin(req);
@@ -184,9 +185,9 @@ export async function registerMemberRoutes(app: FastifyInstance, db: Database, o
         departmentId = manager.department_id;
       }
       await tx.query("UPDATE member_invites SET revoked_at=now() WHERE org_id=$1 AND email=$2 AND accepted_at IS NULL AND revoked_at IS NULL", [user.org_id, input.email]);
-      const row = (await tx.query(`INSERT INTO member_invites(id,org_id,token_hash,email,display_name,title,department_id,manager_id,role,grants,created_by,expires_at)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
-        [randomUUID(), user.org_id, hash(token), input.email, input.displayName, input.title || '', departmentId, input.managerId || null, input.role || 'employee', JSON.stringify([...new Set(input.grants || [])]), user.id, new Date(Date.now() + INVITE_DAYS * 864e5).toISOString()])).rows[0];
+      const row = (await tx.query(`INSERT INTO member_invites(id,org_id,token_hash,email,display_name,title,department_id,manager_id,role,grants,created_by,expires_at,location)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
+        [randomUUID(), user.org_id, hash(token), input.email, input.displayName, input.title || '', departmentId, input.managerId || null, input.role || 'employee', JSON.stringify([...new Set(input.grants || [])]), user.id, new Date(Date.now() + INVITE_DAYS * 864e5).toISOString(), input.location || ''])).rows[0];
       await audit(tx, user, 'org.member_invited', row.id, { email: input.email, role: row.role, grants: row.grants });
       return row;
     });
@@ -240,8 +241,8 @@ export async function registerMemberRoutes(app: FastifyInstance, db: Database, o
       if (manager && !(await tx.query('SELECT id FROM users WHERE id=$1 AND org_id=$2 AND active=true', [manager, row.org_id])).rows[0]) manager = null;
       const newId = 'inv_' + randomUUID().replace(/-/g, '').slice(0, 20);
       await tx.query('INSERT INTO users(id,org_id,department_id,display_name,role) VALUES($1,$2,$3,$4,$5)', [newId, row.org_id, row.department_id, input.displayName || row.display_name, row.role]);
-      await tx.query(`UPDATE users SET title=$2,email=$3,login_email=$3,password_hash=$4,manager_id=$5,role_override=$6,grants=$7,invited_by=$8 WHERE id=$1`,
-        [newId, row.title, row.email, passwordHash, manager, row.role, JSON.stringify(row.grants || []), row.created_by]);
+      await tx.query(`UPDATE users SET title=$2,email=$3,login_email=$3,password_hash=$4,manager_id=$5,role_override=$6,grants=$7,invited_by=$8,location=$9 WHERE id=$1`,
+        [newId, row.title, row.email, passwordHash, manager, row.role, JSON.stringify(row.grants || []), row.created_by, row.location || '']);
       await tx.query('UPDATE member_invites SET accepted_at=now(),accepted_user_id=$2 WHERE id=$1', [row.id, newId]);
       await audit(tx, { id: newId, org_id: row.org_id, department_id: row.department_id }, 'org.invite_accepted', row.id, { email: row.email });
       return newId;

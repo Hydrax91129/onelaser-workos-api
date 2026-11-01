@@ -52,7 +52,7 @@ const attachmentInput = z.object({ name: z.string().trim().min(1).max(200), mime
 const insightInput = z.object({ board: z.enum(['home', 'okr', 'project', 'task', 'supply', 'quality']), lang: z.enum(['zh', 'en']).default('zh'), facts: z.record(z.string(), z.union([z.string().max(300), z.number(), z.null(), z.array(z.string().max(300)).max(8), z.array(z.union([z.string().max(120), z.number()])).max(4)])).refine(f => Object.keys(f).length <= 30, 'Too many facts') }).strict();
 
 /** Minimal JSON-schema chat call against the configured OpenAI-compatible provider (xAI by default). */
-export type JsonModel = { model: string; json: (system: string, user: string, schema: object, name: string) => Promise<any> };
+export type JsonModel = { model: string; json: (system: string, user: string, schema: object, name: string, maxTokens?: number) => Promise<any> };
 export function jsonModel(config: { apiKey?: string; model?: string; baseUrl?: string } | undefined, fetcher: typeof fetch = fetch): JsonModel | undefined {
   const apiKey=config?.apiKey?.trim(), model=config?.model?.trim();
   if (!apiKey || !model) return undefined;
@@ -62,9 +62,9 @@ export function jsonModel(config: { apiKey?: string; model?: string; baseUrl?: s
   const endpoint = base.toString().replace(/\/$/, '') + '/chat/completions';
   return {
     model,
-    async json(system, user, schema, name) {
+    async json(system, user, schema, name, maxTokens = 800) {
       const r = await fetcher(endpoint, { method: 'POST', headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(30000),
-        body: JSON.stringify({ model, stream: false, max_tokens: 800, response_format: { type: 'json_schema', json_schema: { name, strict: true, schema } }, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }) });
+        body: JSON.stringify({ model, stream: false, max_tokens: Math.max(100, Math.min(8000, maxTokens)), response_format: { type: 'json_schema', json_schema: { name, strict: true, schema } }, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }) });
       if (!r.ok) throw new Error('AI_UPSTREAM_FAILED');
       const text = await r.text(); if (text.length > 256 * 1024) throw new Error('AI_UPSTREAM_FAILED');
       const choice = JSON.parse(text).choices?.[0];

@@ -50,6 +50,7 @@ const avatarInput = z.object({ dataUrl: z.string().max(400_000) }).strict();
 const memberPatch = z.object({
   managerId: id.nullable().optional(),
   title: text(80).optional(),
+  location: text(80).optional(),
   role: z.enum(['employee', 'manager']).optional(),
   isAdmin: z.boolean().optional(),
   grants: z.array(z.enum(GRANTS)).max(GRANTS.length).optional(),
@@ -79,6 +80,8 @@ export async function reportsOf(db: Queryable, orgId: string, userId: string) {
 export async function registerOrgRoutes(app: FastifyInstance, db: Database, o: OrgOptions) {
   app.patch('/me/profile', async req => {
     const user = actorOf(req), input = profileInput.parse(req.body);
+    // Work location is part of the org record: only administrators set it (Organization & permissions).
+    if (input.location !== undefined && !isAdmin(user as any, o)) deny(403, 'LOCATION_ADMIN_ONLY', 'Your work location is set by an administrator');
     const sets: string[] = [], values: unknown[] = [user.id];
     for (const [key, value] of Object.entries(input)) { values.push(value); sets.push(`${key}=$${values.length}`); }
     const row = (await db.query(`UPDATE users SET ${sets.join(',')} WHERE id=$1 RETURNING ${PUBLIC_USER_COLUMNS}`, values)).rows[0];
@@ -147,8 +150,8 @@ export async function registerOrgRoutes(app: FastifyInstance, db: Database, o: O
       const role = input.role ?? member.role, override = input.role ?? member.role_override;
       const grants = input.grants ? [...new Set(input.grants)] : member.grants;
       if (input.grants?.includes('product_cost_detail') && !input.grants.includes('products')) deny(400, 'GRANT_DEPENDENCY', 'Cost details require product area access');
-      const row = (await tx.query(`UPDATE users SET manager_id=$2,title=$3,role=$4,role_override=$5,is_admin=$6,grants=$7 WHERE id=$1 RETURNING ${PUBLIC_USER_COLUMNS},active,is_admin,role_override,grants`,
-        [member.id, manager, input.title ?? member.title, role, override, input.isAdmin ?? member.is_admin, JSON.stringify(grants)])).rows[0];
+      const row = (await tx.query(`UPDATE users SET manager_id=$2,title=$3,role=$4,role_override=$5,is_admin=$6,grants=$7,location=$8 WHERE id=$1 RETURNING ${PUBLIC_USER_COLUMNS},active,is_admin,role_override,grants`,
+        [member.id, manager, input.title ?? member.title, role, override, input.isAdmin ?? member.is_admin, JSON.stringify(grants), input.location ?? member.location])).rows[0];
       await audit(tx, user, 'org.member_updated', member.id, input, member.id);
       return { ...row, executive: o.executiveUserIds.includes(row.id), admin: o.executiveUserIds.includes(row.id) || row.is_admin === true };
     });

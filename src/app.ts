@@ -7,6 +7,7 @@ import { registerShopifyRoutes, type ShopifyOptions } from './shopify.js';
 import { registerOkrRoutes } from './okr.js';
 import { registerOkrCollabRoutes } from './okr-collab.js';
 import { registerCompletionRoutes, jsonModel, type JsonModel } from './completions.js';
+import { registerTranslateRoutes } from './translate.js';
 import { registerMemberRoutes, isPublicMemberPath, mailerFromEnv, type Mailer } from './members.js';
 import { registerOrgRoutes, isAdmin as isOrgAdmin } from './org.js';
 import { executiveSummary } from './executive.js';
@@ -36,7 +37,7 @@ const taskInput = z.object({
 const submissionInput = z.object({ expectedVersion, title:z.string().trim().min(3).max(200), description:z.string().trim().min(30).max(30000), evidenceUrl:evidenceUrl.optional() }).strict();
 const reviewInput = z.object({ expectedVersion, submissionVersion:z.number().int().min(1), decision:z.enum(['accept','return']), quality:z.number().int().min(0).max(100).optional(), note:z.string().trim().min(5).max(4000), verifiedCurrentSubmission:z.boolean().optional() }).strict();
 const measurementInput = z.object({ expectedVersion, actual:z.number().finite(), source:z.string().trim().min(3).max(2000), note:z.string().trim().min(5).max(4000) }).strict();
-export type AppOptions = { mailer?:Mailer|null; completionModel?:JsonModel|null; fxFetcher?:typeof fetch; db:Database; environment?:string; allowDevLogin?:boolean; devLoginSecret?:string; closeDatabase?:boolean; integrations?:IntegrationOptions; support?:SupportOptions; publicWiki?:PublicWikiOptions; shopify?:ShopifyOptions; caldock?:CaldockOptions; studio?:StudioOptions };
+export type AppOptions = { translationModel?:JsonModel|null; mailer?:Mailer|null; completionModel?:JsonModel|null; fxFetcher?:typeof fetch; db:Database; environment?:string; allowDevLogin?:boolean; devLoginSecret?:string; closeDatabase?:boolean; integrations?:IntegrationOptions; support?:SupportOptions; publicWiki?:PublicWikiOptions; shopify?:ShopifyOptions; caldock?:CaldockOptions; studio?:StudioOptions };
 
 function actor(req: FastifyRequest): User { return req.actor || deny(401,'UNAUTHENTICATED','Authentication is required'); }
 function scope(user: User) {
@@ -116,7 +117,7 @@ export async function buildApp(options:AppOptions) {
     catch { return reply.code(503).send({status:'unavailable',service:'onelaser-workos-api'}); }
     return {status:'ok',service:'onelaser-workos-api',version:'0.1.0',database:db.kind,productionReady:false};
   });
-  app.get('/capabilities',async()=>({passwordLogin:true,emailCodeLogin:!!mailer,memberInvites:true,memberDisable:true,taskCompletion:true,aiCompletionScore:!!completionModel,aiInsights:!!completionModel,liveFx:true,aiAssessmentRequired:aiAssessmentRequired(),tasks:true,objectives:true,okrCollaboration:true,orgProfiles:true,submissions:true,humanReviews:true,audit:true,devLogin:devEnabled,dingtalk:integrations.dingtalk?'configured':'not_integrated',aiReview:(integrations.aiReviewMode==='bot'?(integrations.bot&&(!(integrations.botMcpAuthMode==='oauth')||!!(integrations.botOAuth?.publicUrl&&integrations.botOAuth.orgId&&integrations.botOAuth.redirectUris.length))):integrations.ai)?'configured':'not_integrated',aiReviewMode:integrations.aiReviewMode||'api',botMcpAuthMode:integrations.botMcpAuthMode||'bearer',notificationDelivery:integrations.notificationsEnabled&&integrations.dingtalk?'configured':'not_integrated',employeeDecisions:'not_supported',frontendConnected:integrations.frontendConnected===true,teamMode:integrations.teamMode||'department',auth:{provider:'dingtalk',loginEnabled:!!integrations.dingtalk,session:'httpOnlyCookie',csrfHeader:'X-CSRF-Token'},setup:integrations.setup||null}));
+  app.get('/capabilities',async()=>({passwordLogin:true,emailCodeLogin:!!mailer,memberInvites:true,memberDisable:true,autoTranslate:true,taskCompletion:true,aiCompletionScore:!!completionModel,aiInsights:!!completionModel,liveFx:true,aiAssessmentRequired:aiAssessmentRequired(),tasks:true,objectives:true,okrCollaboration:true,orgProfiles:true,submissions:true,humanReviews:true,audit:true,devLogin:devEnabled,dingtalk:integrations.dingtalk?'configured':'not_integrated',aiReview:(integrations.aiReviewMode==='bot'?(integrations.bot&&(!(integrations.botMcpAuthMode==='oauth')||!!(integrations.botOAuth?.publicUrl&&integrations.botOAuth.orgId&&integrations.botOAuth.redirectUris.length))):integrations.ai)?'configured':'not_integrated',aiReviewMode:integrations.aiReviewMode||'api',botMcpAuthMode:integrations.botMcpAuthMode||'bearer',notificationDelivery:integrations.notificationsEnabled&&integrations.dingtalk?'configured':'not_integrated',employeeDecisions:'not_supported',frontendConnected:integrations.frontendConnected===true,teamMode:integrations.teamMode||'department',auth:{provider:'dingtalk',loginEnabled:!!integrations.dingtalk,session:'httpOnlyCookie',csrfHeader:'X-CSRF-Token'},setup:integrations.setup||null}));
   const attempts=new Map<string,{count:number;until:number}>();
   app.post('/auth/dev-login',async(req,reply)=>{
     if(!devEnabled) deny(404,'DEV_LOGIN_DISABLED','Development login is disabled');
@@ -227,6 +228,7 @@ export async function buildApp(options:AppOptions) {
   await registerOkrCollabRoutes(app,db);
   await registerOrgRoutes(app,db,{executiveUserIds:integrations.executiveUserIds||[]});
   await registerMemberRoutes(app,db,{executiveUserIds:integrations.executiveUserIds||[],secureCookies:integrations.secureCookies,appPublicUrl:integrations.appPublicUrl,mailer,teamName:integrations.teamName});
+  await registerTranslateRoutes(app,db,{model:options.translationModel===undefined?(jsonModel({apiKey:process.env.AI_PROVIDER_API_KEY||process.env.XAI_API_KEY,model:process.env.AI_TRANSLATION_MODEL_ID||process.env.AI_SCORING_MODEL_ID||process.env.AI_MODEL_ID,baseUrl:process.env.AI_PROVIDER_BASE_URL})||null):options.translationModel});
   await registerCompletionRoutes(app,db,{model:completionModel,fxFetcher:options.fxFetcher,fxFallback:Number(process.env.FX_FALLBACK_CNY)||7.1});
   await registerIntegrationRoutes(app,db,integrations);
   if(options.closeDatabase!==false) app.addHook('onClose',async()=>db.close());

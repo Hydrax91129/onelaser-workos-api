@@ -17,7 +17,8 @@ async function setup(){
 test('employees edit their own contact info; invalid values are rejected; directory shows contacts',async()=>{
  const {app,call}=await setup();
  try{
-  const ok=await call('m2','PATCH','/me/profile',{title:'Content lead',phone:'+1 (949) 555-0100',email:'chen@example.com',wechat:'chen_yi',location:'Irvine, CA',timezone:'America/Los_Angeles'});
+  const locked=await call('m2','PATCH','/me/profile',{location:'Irvine, CA'});assert.equal(locked.statusCode,403,'employees cannot set their own work location');assert.equal(locked.json().error.code,'LOCATION_ADMIN_ONLY');
+  const ok=await call('m2','PATCH','/me/profile',{title:'Content lead',phone:'+1 (949) 555-0100',email:'chen@example.com',wechat:'chen_yi',timezone:'America/Los_Angeles'});
   assert.equal(ok.statusCode,200,ok.body);assert.equal(ok.json().email,'chen@example.com');
   assert.equal((await call('m2','PATCH','/me/profile',{email:'not-an-email'})).statusCode,400);
   assert.equal((await call('m2','PATCH','/me/profile',{phone:'call me'})).statusCode,400);
@@ -96,5 +97,15 @@ test('feature grants for the product area are admin-managed and visible on /me',
   assert.deepEqual((await call('m2','GET','/me')).json().grants,['products']);
   assert.equal((await call('m4','PATCH','/org/members/m2',{grants:['products','product_cost_detail']})).statusCode,403);
   assert.ok(!('grants' in (await call('m3','GET','/directory')).json().items[0]),'grants are not public');
+ }finally{await app.close();}
+});
+
+test('administrators set each member\'s work location; it shows on the org chart',async()=>{
+ const {app,call}=await setup();
+ try{
+  assert.equal((await call('m4','PATCH','/org/members/m2',{location:'武汉'})).statusCode,403);
+  const r=await call('m1','PATCH','/org/members/m2',{location:'武汉'});assert.equal(r.statusCode,200,r.body);assert.equal(r.json().location,'武汉');
+  assert.equal((await call('m3','GET','/org/chart')).json().items.find((u:any)=>u.id==='m2').location,'武汉');
+  assert.equal((await call('m1','PATCH','/me/profile',{location:'Irvine, CA'})).statusCode,200,'an admin may still set their own');
  }finally{await app.close();}
 });
