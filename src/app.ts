@@ -42,6 +42,16 @@ const taskInput = z.object({
 const submissionInput = z.object({ expectedVersion, title:z.string().trim().min(3).max(200), description:z.string().trim().min(30).max(30000), evidenceUrl:evidenceUrl.optional() }).strict();
 const reviewInput = z.object({ expectedVersion, submissionVersion:z.number().int().min(1), decision:z.enum(['accept','return']), quality:z.number().int().min(0).max(100).optional(), note:z.string().trim().min(5).max(4000), verifiedCurrentSubmission:z.boolean().optional() }).strict();
 const measurementInput = z.object({ expectedVersion, actual:z.number().finite(), source:z.string().trim().min(3).max(2000), note:z.string().trim().min(5).max(4000) }).strict();
+/** Besides the department rules, a person may read the OKRs of everyone in their reporting line,
+ * of peers who share their manager, and administrators read everyone's. Writing keeps the stricter rules. */
+async function okrListOwners(db:Database,user:User,executiveUserIds:string[]){
+  const rows=(await db.query('SELECT id,manager_id FROM users WHERE org_id=$1 AND active=true',[user.org_id])).rows as {id:string;manager_id:string|null}[];
+  if(isOrgAdmin(user as any,{executiveUserIds}))return new Set(rows.map(r=>r.id));
+  const out=new Set<string>(),children=new Map<string,string[]>();for(const r of rows)if(r.manager_id){if(!children.has(r.manager_id))children.set(r.manager_id,[]);children.get(r.manager_id)!.push(r.id);}
+  const queue=[...(children.get(user.id)||[])];while(queue.length){const c=queue.shift()!;if(out.has(c))continue;out.add(c);queue.push(...(children.get(c)||[]));}
+  const mine=rows.find(r=>r.id===user.id)?.manager_id;if(mine)for(const r of rows)if(r.manager_id===mine&&r.id!==user.id)out.add(r.id);
+  return out;
+}
 export type AppOptions = { clock?:()=>number; nudgeIntervalMs?:number; translationModel?:JsonModel|null; mailer?:Mailer|null; completionModel?:JsonModel|null; fxFetcher?:typeof fetch; db:Database; environment?:string; allowDevLogin?:boolean; devLoginSecret?:string; closeDatabase?:boolean; integrations?:IntegrationOptions; support?:SupportOptions; publicWiki?:PublicWikiOptions; shopify?:ShopifyOptions; caldock?:CaldockOptions; studio?:StudioOptions };
 
 function actor(req: FastifyRequest): User { return req.actor || deny(401,'UNAUTHENTICATED','Authentication is required'); }
@@ -207,15 +217,15 @@ export async function buildApp(options:AppOptions) {
     });return reply.code(201).send(result);
   });
   app.get('/objectives',async req=>{
-    const user=actor(req),rows=(await db.query('SELECT * FROM objectives WHERE org_id=$1 AND archived_at IS NULL ORDER BY id',[user.org_id])).rows;
-    const items=await attachOkrImportMetadata(db,'objective',rows.filter(o=>visibleObjective(user,o)));
+    const user=actor(req),rows=(await db.query('SELECT o.*,u.display_name AS owner_name,u.name_zh AS owner_name_zh,u.name_en AS owner_name_en FROM objectives o LEFT JOIN users u ON u.id=o.owner_id WHERE o.org_id=$1 AND o.archived_at IS NULL ORDER BY o.created_at,o.id',[user.org_id])).rows;
+    const extra=await okrListOwners(db,user,integrations.executiveUserIds||[]);const items=await attachOkrImportMetadata(db,'objective',rows.filter(o=>visibleObjective(user,o)||(o.owner_id&&extra.has(o.owner_id))));
     const scores=await scoresFor(db,items.map((o:any)=>o.id)),adminCheck=(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]});
     for(const o of items as any[]){o.scores=scores.get(o.id)||{};o.canLeadScore=await canLeadScore(db,user,o,adminCheck);}
     return {items};
   });
   app.get('/key-results',async req=>{
-    const user=actor(req),rows=(await db.query('SELECT k.*,o.org_id,o.department_id,o.owner_id,o.level FROM key_results k JOIN objectives o ON o.id=k.objective_id WHERE o.org_id=$1 AND k.archived_at IS NULL AND o.archived_at IS NULL ORDER BY k.id',[user.org_id])).rows;
-    const krs=await attachOkrImportMetadata(db,'key_result',rows.filter(o=>visibleObjective(user,o)).map(kr=>({...kr,progress:krProgress(kr)})));
+    const user=actor(req),rows=(await db.query('SELECT k.*,o.org_id,o.department_id,o.owner_id,o.level FROM key_results k JOIN objectives o ON o.id=k.objective_id WHERE o.org_id=$1 AND k.archived_at IS NULL AND o.archived_at IS NULL ORDER BY k.created_at,k.id',[user.org_id])).rows;
+    const extra=await okrListOwners(db,user,integrations.executiveUserIds||[]);const krs=await attachOkrImportMetadata(db,'key_result',rows.filter(o=>visibleObjective(user,o)||(o.owner_id&&extra.has(o.owner_id))).map(kr=>({...kr,progress:krProgress(kr)})));
     const krScores=await scoresFor(db,krs.map((k:any)=>k.id),'kr_scores');for(const k of krs as any[])k.scores=krScores.get(k.id)||{};const krTasks=new Map((await db.query('SELECT DISTINCT ON (t.kr_id) t.kr_id,t.id,t.owner_id FROM tasks t WHERE t.org_id=$1 AND t.kr_id=ANY($2::text[]) ORDER BY t.kr_id,t.created_at',[user.org_id,krs.map((k:any)=>k.id)])).rows.map((r:any)=>[r.kr_id,r])) as Map<string,any>;for(const k of krs as any[]){const t=krTasks.get(k.id);k.task_id=t&&t.owner_id===k.owner_id?t.id:null;}
     return {items:krs};
   });

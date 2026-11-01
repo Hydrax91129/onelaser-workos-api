@@ -27,11 +27,12 @@ CREATE INDEX IF NOT EXISTS task_nudges_cc ON task_nudges(cc_user_id,created_at);
 export const TASK_SOURCE_COLUMNS = `COALESCE(tasks.source, CASE WHEN tasks.kr_id IS NOT NULL THEN 'okr' WHEN tasks.created_by<>tasks.owner_id THEN 'direct' ELSE 'self' END) AS source_kind,
   COALESCE(tasks.assigned_by, CASE WHEN tasks.created_by<>tasks.owner_id THEN tasks.created_by END) AS assigned_by_id,
   (SELECT u.display_name FROM users u WHERE u.id=COALESCE(tasks.assigned_by, CASE WHEN tasks.created_by<>tasks.owner_id THEN tasks.created_by END)) AS assigned_by_name,
+  (SELECT json_build_object('zh',u.name_zh,'en',u.name_en) FROM users u WHERE u.id=COALESCE(tasks.assigned_by, CASE WHEN tasks.created_by<>tasks.owner_id THEN tasks.created_by END)) AS assigned_by_names,
   (SELECT k.title FROM key_results k WHERE k.id=tasks.kr_id) AS kr_title,
   (SELECT p.name FROM projects p WHERE p.id=tasks.project_id) AS project_name,
   (SELECT json_build_object('objectiveTitle', o.title,
-     'o', (SELECT count(*) FROM objectives o2 WHERE o2.org_id=o.org_id AND o2.archived_at IS NULL AND (o2.level='company')=(o.level='company') AND (o.level='company' OR o2.owner_id IS NOT DISTINCT FROM o.owner_id) AND COALESCE(o2.planning->>'period','')=COALESCE(o.planning->>'period','') AND o2.id<=o.id),
-     'kr', (SELECT count(*) FROM key_results k2 WHERE k2.objective_id=k.objective_id AND k2.archived_at IS NULL AND k2.id<=k.id))
+     'o', (SELECT count(*) FROM objectives o2 WHERE o2.org_id=o.org_id AND o2.archived_at IS NULL AND (o2.level='company')=(o.level='company') AND (o.level='company' OR o2.owner_id IS NOT DISTINCT FROM o.owner_id) AND COALESCE(o2.planning->>'period','')=COALESCE(o.planning->>'period','') AND (o2.created_at,o2.id)<=(o.created_at,o.id)),
+     'kr', (SELECT count(*) FROM key_results k2 WHERE k2.objective_id=k.objective_id AND k2.archived_at IS NULL AND (k2.created_at,k2.id)<=(k.created_at,k.id)))
    FROM key_results k JOIN objectives o ON o.id=k.objective_id WHERE k.id=tasks.kr_id) AS okr_ref`;
 
 export type Notifier = (userId: string, content: string) => Promise<boolean>;
@@ -166,7 +167,7 @@ export async function registerAssignRoutes(app: FastifyInstance, db: Database, o
   app.get('/tasks/assignments', async req => {
     const user = actorOf(req);
     const cols = `tasks.id,tasks.title,tasks.owner_id,tasks.reviewer_id,tasks.due_at,tasks.status,tasks.board_status,tasks.created_at,tasks.kr_id,${TASK_SOURCE_COLUMNS},
-      (SELECT u.display_name FROM users u WHERE u.id=tasks.owner_id) AS owner_name,(SELECT max(x.created_at) FROM task_updates x WHERE x.task_id=tasks.id) AS last_update_at,
+      (SELECT u.display_name FROM users u WHERE u.id=tasks.owner_id) AS owner_name,(SELECT json_build_object('zh',u.name_zh,'en',u.name_en) FROM users u WHERE u.id=tasks.owner_id) AS owner_names,(SELECT max(x.created_at) FROM task_updates x WHERE x.task_id=tasks.id) AS last_update_at,
       (SELECT json_build_object('ai_status',c.ai_status,'ai_score',c.ai_score) FROM task_completions c WHERE c.task_id=tasks.id AND c.superseded_at IS NULL ORDER BY c.created_at DESC LIMIT 1) AS completion`;
     const toMe = (await db.query(`SELECT ${cols} FROM tasks WHERE org_id=$1 AND owner_id=$2 AND COALESCE(tasks.source, CASE WHEN tasks.kr_id IS NOT NULL THEN 'okr' WHEN tasks.created_by<>tasks.owner_id THEN 'direct' ELSE 'self' END)<>'self' ORDER BY (tasks.status='accepted' OR tasks.board_status='done'),tasks.due_at LIMIT 100`, [user.org_id, user.id])).rows;
     const byMe = (await db.query(`SELECT ${cols} FROM tasks WHERE org_id=$1 AND COALESCE(tasks.assigned_by, CASE WHEN tasks.created_by<>tasks.owner_id THEN tasks.created_by END)=$2 ORDER BY (tasks.status='accepted' OR tasks.board_status='done'),tasks.due_at LIMIT 100`, [user.org_id, user.id])).rows;
@@ -175,10 +176,10 @@ export async function registerAssignRoutes(app: FastifyInstance, db: Database, o
 
   app.get('/nudges', async req => {
     const user = actorOf(req);
-    const rows = (await db.query(`SELECT n.*, t.title AS task_title, t.due_at, t.owner_id, (SELECT display_name FROM users WHERE id=t.owner_id) AS owner_name
+    const rows = (await db.query(`SELECT n.*, t.title AS task_title, t.due_at, t.owner_id, (SELECT display_name FROM users WHERE id=t.owner_id) AS owner_name, (SELECT json_build_object('zh',name_zh,'en',name_en) FROM users WHERE id=t.owner_id) AS owner_names
       FROM task_nudges n LEFT JOIN tasks t ON t.id=n.task_id WHERE n.org_id=$1 AND (n.user_id=$2 OR n.cc_user_id=$2) AND n.created_at>$3 ORDER BY n.created_at DESC LIMIT 50`,
       [user.org_id, user.id, new Date(now() - 30 * DAY).toISOString()])).rows;
-    return { items: rows.map((r: any) => ({ id: r.id, taskId: String(r.task_id).startsWith('okr:') ? null : r.task_id, okr: String(r.kind).startsWith('okr_'), taskTitle: r.task_title, kind: r.kind, message: r.message, createdAt: r.created_at, read: !!r.read_at || r.user_id !== user.id, role: r.user_id === user.id ? 'owner' : 'assigner', ownerId: r.owner_id, ownerName: r.owner_name, dueAt: r.due_at, channels: r.channels })), unread: rows.filter((r: any) => r.user_id === user.id && !r.read_at).length };
+    return { items: rows.map((r: any) => ({ id: r.id, taskId: String(r.task_id).startsWith('okr:') ? null : r.task_id, okr: String(r.kind).startsWith('okr_'), taskTitle: r.task_title, kind: r.kind, message: r.message, createdAt: r.created_at, read: !!r.read_at || r.user_id !== user.id, role: r.user_id === user.id ? 'owner' : 'assigner', ownerId: r.owner_id, ownerName: r.owner_name, ownerNames: r.owner_names, dueAt: r.due_at, channels: r.channels })), unread: rows.filter((r: any) => r.user_id === user.id && !r.read_at).length };
   });
 
   app.post('/nudges/read', async req => {

@@ -10,7 +10,24 @@ http://:{$PORT:10000} {
         ?Referrer-Policy no-referrer
         Permissions-Policy "camera=(), microphone=(), geolocation=()"
     }
-    @private_or_uncached not path /wiki/data/* /wiki/assets/* /caldock/assets/*
+    # App scripts and styles are requested with a ?v= version; a changed file gets a
+    # new version, so a cached copy can never be stale. Fonts and logos rarely change.
+    @app_versioned {
+        path *.js *.css
+        query v=*
+        not path /api/* /wiki/* /caldock/* /decision-studio/*
+    }
+    header @app_versioned Cache-Control "public, max-age=31536000, immutable"
+    @app_static path /fonts/* /assets/*
+    header @app_static Cache-Control "public, max-age=604800"
+    @private_or_uncached {
+        not path /wiki/data/* /wiki/assets/* /caldock/assets/* /fonts/* /assets/*
+        not {
+            path *.js *.css
+            query v=*
+            not path /api/* /wiki/* /caldock/* /decision-studio/*
+        }
+    }
     header @private_or_uncached Cache-Control no-store
     # The original public Wiki keeps its existing framing restriction. Every
     # other same-origin route retains DENY/none, including the employee app/API.

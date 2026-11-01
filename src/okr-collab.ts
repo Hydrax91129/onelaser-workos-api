@@ -29,6 +29,13 @@ ALTER TABLE key_results ADD COLUMN IF NOT EXISTS confidence text;
 ALTER TABLE key_results ADD COLUMN IF NOT EXISTS archived_at timestamptz;
 ALTER TABLE key_results ADD COLUMN IF NOT EXISTS updated_at timestamptz;
 CREATE INDEX IF NOT EXISTS objectives_parent ON objectives(parent_objective_id);
+-- Creation time keeps objectives and key results in the order they were written (ids are random).
+ALTER TABLE objectives ADD COLUMN IF NOT EXISTS created_at timestamptz;
+ALTER TABLE key_results ADD COLUMN IF NOT EXISTS created_at timestamptz;
+UPDATE objectives SET created_at=COALESCE((SELECT min(a.created_at) FROM audit_events a WHERE a.object_id=objectives.id AND a.action='objective.created'),updated_at,now()) WHERE created_at IS NULL;
+UPDATE key_results SET created_at=COALESCE((SELECT min(a.created_at) FROM audit_events a WHERE a.object_id=key_results.id AND a.action='kr.created'),updated_at,now()) WHERE created_at IS NULL;
+ALTER TABLE objectives ALTER COLUMN created_at SET DEFAULT now();
+ALTER TABLE key_results ALTER COLUMN created_at SET DEFAULT now();
 CREATE TABLE IF NOT EXISTS okr_updates(
  id text PRIMARY KEY, org_id text NOT NULL, objective_id text NOT NULL REFERENCES objectives(id),
  kr_id text REFERENCES key_results(id), author_id text NOT NULL REFERENCES users(id),

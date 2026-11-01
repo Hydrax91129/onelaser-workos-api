@@ -34,6 +34,7 @@ test('canonical origin switches only the approved Render host and retains health
   const configPath = resolve(root, 'Caddyfile');
   await writeFile(configPath, config);
   await writeFile(resolve(root, 'index.html'), 'workos frontend');
+  await writeFile(resolve(root, 'task-board.js'), '/* board */');
   const oldHost = 'onelaser-workos.onrender.com';
   try {
     for (const appUrl of ['', `https://${oldHost}`, 'https://elsewhere.example',
@@ -107,6 +108,10 @@ test('canonical origin switches only the approved Render host and retains health
           assert.equal((await get('craftos.app','/wiki/data/library.json')).cacheControl, 'public, max-age=300');
           assert.equal((await get('craftos.app','/wiki/assets/example.png')).cacheControl, 'public, max-age=86400');
           assert.equal((await get('craftos.app','/api/tasks')).cacheControl, 'no-store');
+          assert.equal((await get('craftos.app','/task-board.js?v=20261101-a')).cacheControl, 'public, max-age=31536000, immutable', 'versioned app scripts are cached');
+          assert.equal((await get('craftos.app','/task-board.js')).cacheControl, 'no-store', 'unversioned scripts are not');
+          assert.equal((await get('craftos.app','/api/tasks?v=1')).cacheControl, 'no-store', 'API never cached');
+          assert.equal((await get('craftos.app','/')).cacheControl, 'no-store', 'the page itself always loads fresh');
           const wikiCsp = new Map(wiki.csp.split(';').map(part => {
             const [name, ...sources] = part.trim().split(/\s+/);
             return [name, sources.join(' ')] as const;
