@@ -229,6 +229,6 @@ export async function seedDemo(db: Database) {
       ['t1','m2','m1','marketing','kr2','产品内容初稿'],
       ['t2','m3','m1','marketing','kr3','获客实验复盘'],
       ['t3','m5','m4','product','kr4','发布验证记录']
-    ]) await tx.query('INSERT INTO tasks(id,org_id,department_id,owner_id,reviewer_id,created_by,title,description,criteria,baseline_due_at,due_at,kr_id) VALUES($1,$2,$3,$4,$5,$5,$6,$7,$8,$9,$9,$10) ON CONFLICT DO NOTHING', [id,'demo',dept,owner,reviewer,title,'仅为 API 开发测试的虚构任务',JSON.stringify(['提供可核对的成果记录','逐项说明验收标准']), '2026-11-01T10:00:00Z',kr]);
+    ]) await tx.query('INSERT INTO tasks(id,org_id,department_id,owner_id,reviewer_id,created_by,title,description,criteria,baseline_due_at,due_at,kr_id) VALUES($1,$2,$3,$4,$5,$5,$6,$7,$8,$9,$9,$10) ON CONFLICT DO NOTHING', [id,'demo',dept,owner,reviewer,title,'仅为 API 开发测试的虚构任务',JSON.stringify(['提供可核对的成果记录','逐项说明验收标准']), new Date(Date.now()+14*864e5).toISOString(),kr]);
   });
 }
