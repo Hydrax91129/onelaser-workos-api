@@ -109,3 +109,15 @@ test('administrators set each member\'s work location; it shows on the org chart
   assert.equal((await call('m1','PATCH','/me/profile',{location:'Irvine, CA'})).statusCode,200,'an admin may still set their own');
  }finally{await app.close();}
 });
+
+test('everyone fills in a Chinese and an English name; admins can complete them; the org chart returns both',async()=>{
+ const {app,call}=await setup();
+ try{
+  const r=await call('m2','PATCH','/me/profile',{nameZh:'陈一',nameEn:'Yi Chen'});assert.equal(r.statusCode,200,r.body);assert.equal(r.json().name_en,'Yi Chen');
+  assert.equal((await call('m2','PATCH','/me/profile',{nameEn:'陈一'})).statusCode,400,'English name uses Latin letters');
+  assert.equal((await call('m1','PATCH','/org/members/m3',{nameZh:'许夏',nameEn:'Xia Xu'})).json().name_en,'Xia Xu');
+  assert.equal((await call('m4','PATCH','/org/members/m3',{nameEn:'X'})).statusCode,403);
+  const chart=(await call('m5','GET','/org/chart')).json().items;assert.equal(chart.find((u:any)=>u.id==='m3').name_en,'Xia Xu');assert.equal(chart.find((u:any)=>u.id==='m2').name_zh,'陈一');
+  assert.equal((await call('m2','GET','/me')).json().name_zh,'陈一');
+ }finally{await app.close();}
+});

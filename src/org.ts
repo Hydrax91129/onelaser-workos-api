@@ -27,18 +27,22 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_version integer NOT NULL DEFAU
 ALTER TABLE users ADD COLUMN IF NOT EXISTS grants jsonb NOT NULL DEFAULT '[]';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS dingtalk_title text NOT NULL DEFAULT '';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS dingtalk_location text NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS name_zh text NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS name_en text NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS users_manager ON users(manager_id);
 CREATE TABLE IF NOT EXISTS user_avatars(user_id text PRIMARY KEY REFERENCES users(id), content_type text NOT NULL, data text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now());
 `;
 
 /** Columns safe to show colleagues (contact directory). */
-export const PUBLIC_USER_COLUMNS = 'id,display_name,department_id,role,title,phone,email,wechat,location,timezone,manager_id,avatar_version';
+export const PUBLIC_USER_COLUMNS = 'id,display_name,name_zh,name_en,department_id,role,title,phone,email,wechat,location,timezone,manager_id,avatar_version';
 
 /** Feature grants an admin can give in the app. `products` opens the product test area; `product_cost_detail` shows how prices are calculated. */
 export const GRANTS = ['products', 'product_cost_detail'] as const;
 const id = z.string().min(1).max(100).regex(/^[A-Za-z0-9_-]+$/);
 const text = (max: number) => z.string().trim().max(max);
 const profileInput = z.object({
+  nameZh: text(40).optional(),
+  nameEn: text(60).regex(/^[A-Za-z0-9 .'\-]*$/, 'Use Latin letters').optional(),
   title: text(80).optional(),
   phone: text(40).regex(/^[0-9+()\-.\s]*$/, 'Invalid phone').optional(),
   email: z.union([z.literal(''), z.string().trim().max(200).email()]).optional(),
@@ -51,6 +55,8 @@ const memberPatch = z.object({
   managerId: id.nullable().optional(),
   title: text(80).optional(),
   location: text(80).optional(),
+  nameZh: text(40).optional(),
+  nameEn: text(60).optional(),
   role: z.enum(['employee', 'manager']).optional(),
   isAdmin: z.boolean().optional(),
   grants: z.array(z.enum(GRANTS)).max(GRANTS.length).optional(),
@@ -83,7 +89,8 @@ export async function registerOrgRoutes(app: FastifyInstance, db: Database, o: O
     // Work location is part of the org record: only administrators set it (Organization & permissions).
     if (input.location !== undefined && !isAdmin(user as any, o)) deny(403, 'LOCATION_ADMIN_ONLY', 'Your work location is set by an administrator');
     const sets: string[] = [], values: unknown[] = [user.id];
-    for (const [key, value] of Object.entries(input)) { values.push(value); sets.push(`${key}=$${values.length}`); }
+    const column: Record<string, string> = { nameZh: 'name_zh', nameEn: 'name_en' };
+    for (const [key, value] of Object.entries(input)) { values.push(value); sets.push(`${column[key] || key}=$${values.length}`); }
     const row = (await db.query(`UPDATE users SET ${sets.join(',')} WHERE id=$1 RETURNING ${PUBLIC_USER_COLUMNS}`, values)).rows[0];
     await audit(db, user, 'profile.updated', user.id, { fields: Object.keys(input) });
     return row;
@@ -126,7 +133,7 @@ export async function registerOrgRoutes(app: FastifyInstance, db: Database, o: O
   // Contact details stay in the department directory and the admin member list.
   app.get('/org/chart', async req => {
     const user = actorOf(req);
-    const rows = (await db.query(`SELECT id,display_name,department_id,title,location,timezone,manager_id,avatar_version,role FROM users WHERE org_id=$1 AND active=true ORDER BY display_name,id`, [user.org_id])).rows;
+    const rows = (await db.query(`SELECT id,display_name,name_zh,name_en,department_id,title,location,timezone,manager_id,avatar_version,role FROM users WHERE org_id=$1 AND active=true ORDER BY display_name,id`, [user.org_id])).rows;
     return { items: rows };
   });
 
@@ -150,8 +157,8 @@ export async function registerOrgRoutes(app: FastifyInstance, db: Database, o: O
       const role = input.role ?? member.role, override = input.role ?? member.role_override;
       const grants = input.grants ? [...new Set(input.grants)] : member.grants;
       if (input.grants?.includes('product_cost_detail') && !input.grants.includes('products')) deny(400, 'GRANT_DEPENDENCY', 'Cost details require product area access');
-      const row = (await tx.query(`UPDATE users SET manager_id=$2,title=$3,role=$4,role_override=$5,is_admin=$6,grants=$7,location=$8 WHERE id=$1 RETURNING ${PUBLIC_USER_COLUMNS},active,is_admin,role_override,grants`,
-        [member.id, manager, input.title ?? member.title, role, override, input.isAdmin ?? member.is_admin, JSON.stringify(grants), input.location ?? member.location])).rows[0];
+      const row = (await tx.query(`UPDATE users SET manager_id=$2,title=$3,role=$4,role_override=$5,is_admin=$6,grants=$7,location=$8,name_zh=$9,name_en=$10 WHERE id=$1 RETURNING ${PUBLIC_USER_COLUMNS},active,is_admin,role_override,grants`,
+        [member.id, manager, input.title ?? member.title, role, override, input.isAdmin ?? member.is_admin, JSON.stringify(grants), input.location ?? member.location, input.nameZh ?? member.name_zh, input.nameEn ?? member.name_en])).rows[0];
       await audit(tx, user, 'org.member_updated', member.id, input, member.id);
       return { ...row, executive: o.executiveUserIds.includes(row.id), admin: o.executiveUserIds.includes(row.id) || row.is_admin === true };
     });

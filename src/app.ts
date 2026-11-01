@@ -9,6 +9,7 @@ import { registerOkrCollabRoutes } from './okr-collab.js';
 import { registerCompletionRoutes, jsonModel, type JsonModel } from './completions.js';
 import { registerTranslateRoutes } from './translate.js';
 import { registerAssignRoutes, TASK_SOURCE_COLUMNS } from './assign.js';
+import { registerOkrScoreRoutes, scoresFor, canLeadScore } from './okr-scores.js';
 import { registerMemberRoutes, isPublicMemberPath, mailerFromEnv, type Mailer } from './members.js';
 import { registerOrgRoutes, isAdmin as isOrgAdmin } from './org.js';
 import { executiveSummary } from './executive.js';
@@ -118,7 +119,7 @@ export async function buildApp(options:AppOptions) {
     catch { return reply.code(503).send({status:'unavailable',service:'onelaser-workos-api'}); }
     return {status:'ok',service:'onelaser-workos-api',version:'0.1.0',database:db.kind,productionReady:false};
   });
-  app.get('/capabilities',async()=>({passwordLogin:true,emailCodeLogin:!!mailer,memberInvites:true,memberDisable:true,autoTranslate:true,assignTasks:true,taskCompletion:true,aiCompletionScore:!!completionModel,aiInsights:!!completionModel,liveFx:true,aiAssessmentRequired:aiAssessmentRequired(),tasks:true,objectives:true,okrCollaboration:true,orgProfiles:true,submissions:true,humanReviews:true,audit:true,devLogin:devEnabled,dingtalk:integrations.dingtalk?'configured':'not_integrated',aiReview:(integrations.aiReviewMode==='bot'?(integrations.bot&&(!(integrations.botMcpAuthMode==='oauth')||!!(integrations.botOAuth?.publicUrl&&integrations.botOAuth.orgId&&integrations.botOAuth.redirectUris.length))):integrations.ai)?'configured':'not_integrated',aiReviewMode:integrations.aiReviewMode||'api',botMcpAuthMode:integrations.botMcpAuthMode||'bearer',notificationDelivery:integrations.notificationsEnabled&&integrations.dingtalk?'configured':'not_integrated',employeeDecisions:'not_supported',frontendConnected:integrations.frontendConnected===true,teamMode:integrations.teamMode||'department',auth:{provider:'dingtalk',loginEnabled:!!integrations.dingtalk,session:'httpOnlyCookie',csrfHeader:'X-CSRF-Token'},setup:integrations.setup||null}));
+  app.get('/capabilities',async()=>({passwordLogin:true,emailCodeLogin:!!mailer,memberInvites:true,memberDisable:true,autoTranslate:true,assignTasks:true,simpleOkrScores:true,bilingualNames:true,taskCompletion:true,aiCompletionScore:!!completionModel,aiInsights:!!completionModel,liveFx:true,aiAssessmentRequired:aiAssessmentRequired(),tasks:true,objectives:true,okrCollaboration:true,orgProfiles:true,submissions:true,humanReviews:true,audit:true,devLogin:devEnabled,dingtalk:integrations.dingtalk?'configured':'not_integrated',aiReview:(integrations.aiReviewMode==='bot'?(integrations.bot&&(!(integrations.botMcpAuthMode==='oauth')||!!(integrations.botOAuth?.publicUrl&&integrations.botOAuth.orgId&&integrations.botOAuth.redirectUris.length))):integrations.ai)?'configured':'not_integrated',aiReviewMode:integrations.aiReviewMode||'api',botMcpAuthMode:integrations.botMcpAuthMode||'bearer',notificationDelivery:integrations.notificationsEnabled&&integrations.dingtalk?'configured':'not_integrated',employeeDecisions:'not_supported',frontendConnected:integrations.frontendConnected===true,teamMode:integrations.teamMode||'department',auth:{provider:'dingtalk',loginEnabled:!!integrations.dingtalk,session:'httpOnlyCookie',csrfHeader:'X-CSRF-Token'},setup:integrations.setup||null}));
   const attempts=new Map<string,{count:number;until:number}>();
   app.post('/auth/dev-login',async(req,reply)=>{
     if(!devEnabled) deny(404,'DEV_LOGIN_DISABLED','Development login is disabled');
@@ -201,7 +202,10 @@ export async function buildApp(options:AppOptions) {
   });
   app.get('/objectives',async req=>{
     const user=actor(req),rows=(await db.query('SELECT * FROM objectives WHERE org_id=$1 AND archived_at IS NULL ORDER BY id',[user.org_id])).rows;
-    return {items:await attachOkrImportMetadata(db,'objective',rows.filter(o=>visibleObjective(user,o)))};
+    const items=await attachOkrImportMetadata(db,'objective',rows.filter(o=>visibleObjective(user,o)));
+    const scores=await scoresFor(db,items.map((o:any)=>o.id)),adminCheck=(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]});
+    for(const o of items as any[]){o.scores=scores.get(o.id)||{};o.canLeadScore=await canLeadScore(db,user,o,adminCheck);}
+    return {items};
   });
   app.get('/key-results',async req=>{
     const user=actor(req),rows=(await db.query('SELECT k.*,o.org_id,o.department_id,o.owner_id,o.level FROM key_results k JOIN objectives o ON o.id=k.objective_id WHERE o.org_id=$1 AND k.archived_at IS NULL AND o.archived_at IS NULL ORDER BY k.id',[user.org_id])).rows;
@@ -232,6 +236,7 @@ export async function buildApp(options:AppOptions) {
   await registerTranslateRoutes(app,db,{model:options.translationModel===undefined?(jsonModel({apiKey:process.env.AI_PROVIDER_API_KEY||process.env.XAI_API_KEY,model:process.env.AI_TRANSLATION_MODEL_ID||process.env.AI_SCORING_MODEL_ID||process.env.AI_MODEL_ID,baseUrl:process.env.AI_PROVIDER_BASE_URL})||null):options.translationModel});
   const dingNotify=integrations.dingtalk&&integrations.notificationsEnabled&&integrations.corpId?async(userId:string,content:string)=>{const ext=(await db.query('SELECT external_user_id FROM external_identities WHERE provider=$1 AND corp_id=$2 AND user_id=$3',['dingtalk',integrations.corpId,userId])).rows[0]?.external_user_id;if(!ext)return false;await integrations.dingtalk!.sendWorkNotification([ext],content);return true;}:null;
   await registerAssignRoutes(app,db,{model:completionModel||null,notify:dingNotify,intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0),isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
+  await registerOkrScoreRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),visible:visibleObjective});
   await registerCompletionRoutes(app,db,{model:completionModel,fxFetcher:options.fxFetcher,fxFallback:Number(process.env.FX_FALLBACK_CNY)||7.1});
   await registerIntegrationRoutes(app,db,integrations);
   if(options.closeDatabase!==false) app.addHook('onClose',async()=>db.close());
