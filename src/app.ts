@@ -12,6 +12,7 @@ import { registerAssignRoutes, TASK_SOURCE_COLUMNS } from './assign.js';
 import { registerOkrScoreRoutes, scoresFor, canLeadScore } from './okr-scores.js';
 import { registerProjectRoutes } from './projects.js';
 import { registerOkrCycle } from './okr-cycle.js';
+import { registerOkrPublish } from './okr-publish.js';
 import { registerMemberRoutes, isPublicMemberPath, mailerFromEnv, type Mailer } from './members.js';
 import { registerOrgRoutes, isAdmin as isOrgAdmin } from './org.js';
 import { executiveSummary } from './executive.js';
@@ -121,7 +122,7 @@ export async function buildApp(options:AppOptions) {
     catch { return reply.code(503).send({status:'unavailable',service:'onelaser-workos-api'}); }
     return {status:'ok',service:'onelaser-workos-api',version:'0.1.0',database:db.kind,productionReady:false};
   });
-  app.get('/capabilities',async()=>({passwordLogin:true,emailCodeLogin:!!mailer,memberInvites:true,memberDisable:true,autoTranslate:true,assignTasks:true,simpleOkrScores:true,bilingualNames:true,projectsLive:true,okrCycle:true,taskCompletion:true,aiCompletionScore:!!completionModel,aiInsights:!!completionModel,liveFx:true,aiAssessmentRequired:aiAssessmentRequired(),tasks:true,objectives:true,okrCollaboration:true,orgProfiles:true,submissions:true,humanReviews:true,audit:true,devLogin:devEnabled,dingtalk:integrations.dingtalk?'configured':'not_integrated',aiReview:(integrations.aiReviewMode==='bot'?(integrations.bot&&(!(integrations.botMcpAuthMode==='oauth')||!!(integrations.botOAuth?.publicUrl&&integrations.botOAuth.orgId&&integrations.botOAuth.redirectUris.length))):integrations.ai)?'configured':'not_integrated',aiReviewMode:integrations.aiReviewMode||'api',botMcpAuthMode:integrations.botMcpAuthMode||'bearer',notificationDelivery:integrations.notificationsEnabled&&integrations.dingtalk?'configured':'not_integrated',employeeDecisions:'not_supported',frontendConnected:integrations.frontendConnected===true,teamMode:integrations.teamMode||'department',auth:{provider:'dingtalk',loginEnabled:!!integrations.dingtalk,session:'httpOnlyCookie',csrfHeader:'X-CSRF-Token'},setup:integrations.setup||null}));
+  app.get('/capabilities',async()=>({passwordLogin:true,emailCodeLogin:!!mailer,memberInvites:true,memberDisable:true,autoTranslate:true,assignTasks:true,simpleOkrScores:true,bilingualNames:true,projectsLive:true,okrCycle:true,okrPublish:true,taskCompletion:true,aiCompletionScore:!!completionModel,aiInsights:!!completionModel,liveFx:true,aiAssessmentRequired:aiAssessmentRequired(),tasks:true,objectives:true,okrCollaboration:true,orgProfiles:true,submissions:true,humanReviews:true,audit:true,devLogin:devEnabled,dingtalk:integrations.dingtalk?'configured':'not_integrated',aiReview:(integrations.aiReviewMode==='bot'?(integrations.bot&&(!(integrations.botMcpAuthMode==='oauth')||!!(integrations.botOAuth?.publicUrl&&integrations.botOAuth.orgId&&integrations.botOAuth.redirectUris.length))):integrations.ai)?'configured':'not_integrated',aiReviewMode:integrations.aiReviewMode||'api',botMcpAuthMode:integrations.botMcpAuthMode||'bearer',notificationDelivery:integrations.notificationsEnabled&&integrations.dingtalk?'configured':'not_integrated',employeeDecisions:'not_supported',frontendConnected:integrations.frontendConnected===true,teamMode:integrations.teamMode||'department',auth:{provider:'dingtalk',loginEnabled:!!integrations.dingtalk,session:'httpOnlyCookie',csrfHeader:'X-CSRF-Token'},setup:integrations.setup||null}));
   const attempts=new Map<string,{count:number;until:number}>();
   app.post('/auth/dev-login',async(req,reply)=>{
     if(!devEnabled) deny(404,'DEV_LOGIN_DISABLED','Development login is disabled');
@@ -140,6 +141,7 @@ export async function buildApp(options:AppOptions) {
   app.get('/me',async req=>({...actor(req),isAdmin:isOrgAdmin(actor(req) as any,{executiveUserIds:integrations.executiveUserIds||[]}),executiveAccess:isExecutive(actor(req)),supportAccess:supportPermissions(actor(req),options.support||{},integrations.executiveUserIds||[])}));
   app.get('/executive/summary',async req=>{const user=actor(req);if(!isExecutive(user))deny(403,'FORBIDDEN','Executive access is required');return db.transaction(tx=>executiveSummary(tx,user.org_id,integrations.teamMode));});
   registerSupportRoutes(app,db,options.support,integrations.executiveUserIds);
+  await registerOkrPublish(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
   await registerCaldockRoutes(app,db,{...options.caldock,secureCookies:environment==='production'||options.caldock?.secureCookies===true});
   await registerCaldockStudio(app,db,{publicUrl:options.caldock?.publicUrl||integrations.appPublicUrl,...options.studio,
     dingtalk:integrations.dingtalk&&integrations.corpId&&integrations.appPublicUrl&&(integrations.allowedDepartmentIds?.length||integrations.teamMode==='company'&&integrations.additionalUserIds?.length)?{

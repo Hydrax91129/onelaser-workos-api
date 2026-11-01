@@ -22,8 +22,10 @@ test('daily reminders, automatic 0 self score after the deadline, leader reminde
   // KR → task for the owner, definition locked for the owner
   const o=(await call('m2','POST','/objectives',{title:'Hydra 产品页转化率提升',level:'personal',planning:{period:'2026-11',weight:100,scoringDueDate:'2026-12-03'}})).json();
   const kr=(await call('m2','POST',`/objectives/${o.id}/key-results`,{title:'转化率到 3%',baseline:0,target:3,direction:'increase',unit:'%',planning:{weight:100,targetText:'3%'}})).json();
+  assert.ok(!(await call('m2','GET','/task-board')).json().items.some((t:any)=>t.kr_id===kr.id),'drafts do not create tasks');
+  assert.equal((await call('m2','POST','/okr/publish',{period:'2026-11'})).statusCode,201);
   const task=(await call('m2','GET','/task-board')).json().items.find((t:any)=>t.kr_id===kr.id);
-  assert.ok(task,'own KR becomes a task');assert.equal(task.source_kind,'okr');assert.equal(task.owner_id,'m2');assert.notEqual(task.reviewer_id,'m2');
+  assert.ok(task,'own KR becomes a task once the OKR is published');assert.equal(task.source_kind,'okr');assert.equal(task.owner_id,'m2');assert.notEqual(task.reviewer_id,'m2');
   const locked=await call('m2','POST',`/tasks/${task.id}/board`,{expectedVersion:task.version,title:'改个名字吧'});assert.equal(locked.statusCode,403);assert.equal(locked.json().error.code,'TASK_DEFINITION_LOCKED');
   assert.equal((await call('m2','POST',`/tasks/${task.id}/board`,{expectedVersion:task.version,status:'working'})).statusCode,200,'status updates are still allowed');
  }finally{await app.close();}

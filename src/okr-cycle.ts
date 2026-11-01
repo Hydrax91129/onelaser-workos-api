@@ -74,8 +74,10 @@ export async function registerOkrCycle(app: FastifyInstance, db: Database, o: Cy
       // 1. Setting next month's OKR.
       if (today >= c.setupFrom && today <= c.setupUntil) {
         const users = (await db.query(`SELECT u.id,u.org_id,COALESCE((SELECT sum((o.planning->>'weight')::numeric) FROM objectives o WHERE o.owner_id=u.id AND o.archived_at IS NULL AND o.planning->>'period'=$1 AND o.level<>'company'),0) AS pts
-          FROM users u WHERE u.active=true`, [p])).rows;
-        for (const u of users) if (Number(u.pts) < 100) out.setup += await remind(u.org_id, u.id, `okr:${p}:setup:${u.id}`, 'okr_setup', today,
+          FROM users u WHERE u.active=true AND NOT EXISTS (SELECT 1 FROM okr_publications p WHERE p.org_id=u.org_id AND p.owner_id=u.id AND p.period=$1)`, [p])).rows;
+        // Daily until the OKR is published.
+        for (const u of users) if (Number(u.pts) >= 100) out.setup += await remind(u.org_id, u.id, `okr:${p}:setup:${u.id}`, 'okr_setup', today, `${label} OKR 已经填写，但还没有最终发布。请检查目标合计 100 分、每个目标的 KR 权重合计 100%，然后点击“最终发布”。发布后 KR 会变成你的任务。`);
+        else if (Number(u.pts) < 100) out.setup += await remind(u.org_id, u.id, `okr:${p}:setup:${u.id}`, 'okr_setup', today,
           Number(u.pts) > 0 ? `${label} OKR 还没设置完：目标分值合计 ${Number(u.pts)} 分，应为 100 分。请在 ${c.setupUntil.slice(5).replace('-', '/')} 前补齐目标和关键结果。` : `请设置你的${label} OKR：写好目标（合计 100 分）和关键结果（目标值写“完成”或明确数字）。设置完成后关键结果会自动进入你的任务中心。`);
       }
       const items = (today >= c.selfFrom && today <= c.leadUntil) || today > c.selfUntil ? await scorables(p) : [];

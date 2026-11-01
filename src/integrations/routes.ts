@@ -7,7 +7,7 @@ import { z } from 'zod';
 import type { Database, Queryable } from '../db.js';
 import { cookie, hash, issueSession, oauthCookieName, readCookie, sameSecret, sessionCookieName, type User } from '../auth.js';
 import { ApiError, deny } from '../errors.js';
-import { createAssignedTask } from '../assign.js';
+import { createKrTask, isPublished } from '../okr-publish.js';
 import { visibleObjective, visibleTask, krProgress } from '../domain.js';
 import { DingTalkClient, DingTalkError, type DingTalkProfile } from './dingtalk.js';
 import { AiIntegrationError, GrokReviewer, type ReviewInput } from './grok.js';
@@ -202,12 +202,9 @@ export async function registerIntegrationRoutes(app:FastifyInstance,db:Database,
     if(!visibleObjective(user,objective)||objective.department_id!==user.department_id||(user.role!=='manager'&&(objective.level!=='personal'||objective.owner_id!==user.id)))deny(404,'NOT_FOUND','Key result not found');
     if(krProgress({...input,actual:input.actual??input.baseline})===null)deny(400,'METRIC_INVALID','Metric target must differ from baseline in the declared direction');
     const result=await db.transaction(async tx=>{await assertKrWeight(tx,objectiveId,input.planning?.weight);const kr=(await tx.query('INSERT INTO key_results(id,objective_id,title,baseline,target,actual,direction,unit,planning) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *',[randomUUID(),objectiveId,input.title,input.baseline,input.target,input.actual??input.baseline,input.direction,input.unit,JSON.stringify(input.planning||{})])).rows[0];await audit(tx,user,'kr.created',kr.id,{},objective.owner_id||user.id);
-      // Every key result becomes a task in the objective owner's task center (source: OKR).
-      if(objective.owner_id){const owner=(await tx.query('SELECT * FROM users WHERE id=$1 AND active=true',[objective.owner_id])).rows[0];
-        if(owner){const reviewerId=[user.id!==owner.id?user.id:null,owner.manager_id,(await tx.query("SELECT id FROM users WHERE org_id=$1 AND department_id=$2 AND role='manager' AND active=true AND id<>$3 ORDER BY id LIMIT 1",[owner.org_id,owner.department_id,owner.id])).rows[0]?.id].find(x=>x&&x!==owner.id)||owner.id;
-          const by=reviewerId===user.id?user:(await tx.query('SELECT * FROM users WHERE id=$1',[reviewerId])).rows[0];const m=/^(\d{4})-(\d{2})$/.exec(objective.planning?.period||'');const due=m?new Date(Date.UTC(+m[1],+m[2],0,23,0)):new Date(Date.now()+30*864e5);if(due.getTime()<Date.now()+864e5)due.setTime(Date.now()+7*864e5);
-          const created=await createAssignedTask(tx,by,owner,{title:('推进 KR：'+kr.title).slice(0,200),description:`目标：${objective.title}\n关键结果：${kr.title}（目标值 ${kr.target ?? ''} ${kr.unit}）\n请在周期内推进这条关键结果，并定期更新进展。`,criteria:[`${kr.title} 达到目标值（${kr.planning?.targetText||((kr.target??'')+' '+kr.unit)}）`],dueAt:due.toISOString(),krId:kr.id,source:'okr'});
-          await tx.query('UPDATE tasks SET created_by=$2,updated_by=$2 WHERE id=$1',[created.id,user.id]);}}
+      // Key results become tasks when the OKR is published; once it is published (a leader adding a KR), right away.
+      // (Objectives without a monthly cycle have no publish step and keep creating tasks right away.)
+      if(!objective.planning?.period||await isPublished(tx,objective.org_id,objective.owner_id,objective.planning.period))await createKrTask(tx,user,objective,kr);
       return {...kr,progress:krProgress(kr)};});return reply.code(201).send(result);
   });
   app.get<{Params:{id:string}}>('/tasks/:id/evaluations',async req=>{const task=await loadTask(db,currentUser(req),id.parse(req.params.id));return {items:(await db.query('SELECT * FROM ai_evaluations WHERE task_id=$1 ORDER BY created_at DESC,id',[task.id])).rows};});
