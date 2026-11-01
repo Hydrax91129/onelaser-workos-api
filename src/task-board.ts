@@ -137,7 +137,7 @@ export function registerTaskBoardRoutes(app:FastifyInstance,db:Database){
    // Tasks that come from an OKR, a project or a direct assignment keep their definition: the assignee updates
    // status and progress but cannot rewrite the title, due date, owner, reviewer or priority.
    const source=task.source||(task.kr_id?'okr':task.created_by!==task.owner_id?'direct':'self'),definer=task.assigned_by||task.created_by;
-   if(source!=='self'&&user.id===task.owner_id&&user.id!==task.reviewer_id&&user.id!==definer&&(v.title!==undefined||v.dueAt!==undefined||v.ownerId!==undefined||v.reviewerId!==undefined||v.priority!==undefined))deny(403,'TASK_DEFINITION_LOCKED','This task comes from an OKR, a project or an assignment; only the person who set it can change its definition');
+   if(source!=='self'&&user.id===task.owner_id&&user.id!==task.reviewer_id&&user.id!==definer&&(v.title!==undefined||v.dueAt!==undefined||v.ownerId!==undefined||v.reviewerId!==undefined||v.priority!==undefined))deny(403,'TASK_DEFINITION_LOCKED','This task comes from an OKR, a project or an assignment; only the person who set it can change its definition','这条任务来自 OKR、项目或他人下达，只有设定任务的人可以修改名称、截止日期、优先级和负责人。');
    let owner=task.owner_id,reviewer=task.reviewer_id;
    if((v.ownerId&&v.ownerId!==task.owner_id||v.reviewerId&&v.reviewerId!==task.reviewer_id)&&task.submission_version>0)deny(409,'TASK_REASSIGNMENT_LOCKED','Tasks with submitted evidence keep their original owner and reviewer');
    if(v.ownerId||v.reviewerId){if(user.role!=='manager')deny(403,'FORBIDDEN','A manager must reassign tasks');owner=v.ownerId||owner;reviewer=v.reviewerId||reviewer;

@@ -110,7 +110,7 @@ export async function buildApp(options:AppOptions) {
   });
   app.setErrorHandler((error,req,reply)=>{
     if(error instanceof ZodError) return reply.code(400).send({error:{code:'VALIDATION_ERROR',message:message('Invalid request data',req.language),fields:error.issues.map(i=>({path:i.path.join('.'),code:i.code,message:message('Invalid value',req.language)}))}});
-    if(error instanceof ApiError) return reply.code(error.status).send({error:{code:error.code,message:message(error.message,req.language)}});
+    if(error instanceof ApiError) return reply.code(error.status).send({error:{code:error.code,message:error.zh&&req.language!=='en'?error.zh:message(error.message,req.language)}});
     if((error as any).statusCode===413) return reply.code(413).send({error:{code:'BODY_TOO_LARGE',message:message('Request body exceeds limit',req.language)}});
     if((error as any).statusCode===400) return reply.code(400).send({error:{code:'INVALID_JSON',message:message('Invalid JSON request',req.language)}});
     return reply.code(500).send({error:{code:'INTERNAL_ERROR',message:message('The request could not be completed',req.language)}});

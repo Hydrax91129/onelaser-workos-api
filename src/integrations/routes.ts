@@ -1,4 +1,5 @@
 import { objectivePlanning, krPlanning } from '../okr.js';
+import { assertKrWeight, assertObjectivePoints } from '../okr-weights.js';
 import { PUBLIC_USER_COLUMNS } from '../org.js';
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
@@ -191,7 +192,7 @@ export async function registerIntegrationRoutes(app:FastifyInstance,db:Database,
     const owner=(await db.query<User>('SELECT * FROM users WHERE id=$1 AND active=true',[ownerId])).rows[0];
     if(!owner||owner.org_id!==user.org_id||owner.department_id!==user.department_id)deny(400,'INVALID_OWNER','Owner must be an active member of the current department');
     if(input.parentObjectiveId){const parent=(await db.query('SELECT * FROM objectives WHERE id=$1 AND archived_at IS NULL',[input.parentObjectiveId])).rows[0];if(!visibleObjective(user,parent))deny(400,'INVALID_PARENT','Select a visible objective to align with');}
-    const result=await db.transaction(async tx=>{const objective=(await tx.query('INSERT INTO objectives(id,org_id,department_id,owner_id,level,title,planning,parent_objective_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *',[randomUUID(),user.org_id,user.department_id,ownerId,input.level,input.title,JSON.stringify(input.planning||{}),input.parentObjectiveId||null])).rows[0];await audit(tx,user,'objective.created',objective.id,{},ownerId);return objective;});
+    const result=await db.transaction(async tx=>{await assertObjectivePoints(tx,{org_id:user.org_id,owner_id:ownerId,level:input.level,period:input.planning?.period},input.planning?.weight);const objective=(await tx.query('INSERT INTO objectives(id,org_id,department_id,owner_id,level,title,planning,parent_objective_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *',[randomUUID(),user.org_id,user.department_id,ownerId,input.level,input.title,JSON.stringify(input.planning||{}),input.parentObjectiveId||null])).rows[0];await audit(tx,user,'objective.created',objective.id,{},ownerId);return objective;});
     return reply.code(201).send(result);
   });
   const krInput=z.object({title:z.string().trim().min(1).max(300),baseline:z.number().finite(),target:z.number().finite(),actual:z.number().finite().optional(),direction:z.enum(['increase','decrease']),unit:z.string().trim().min(1).max(30),planning:krPlanning.optional()}).strict();
@@ -200,7 +201,7 @@ export async function registerIntegrationRoutes(app:FastifyInstance,db:Database,
     const objective=(await db.query('SELECT * FROM objectives WHERE id=$1 AND archived_at IS NULL',[objectiveId])).rows[0];
     if(!visibleObjective(user,objective)||objective.department_id!==user.department_id||(user.role!=='manager'&&(objective.level!=='personal'||objective.owner_id!==user.id)))deny(404,'NOT_FOUND','Key result not found');
     if(krProgress({...input,actual:input.actual??input.baseline})===null)deny(400,'METRIC_INVALID','Metric target must differ from baseline in the declared direction');
-    const result=await db.transaction(async tx=>{const kr=(await tx.query('INSERT INTO key_results(id,objective_id,title,baseline,target,actual,direction,unit,planning) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *',[randomUUID(),objectiveId,input.title,input.baseline,input.target,input.actual??input.baseline,input.direction,input.unit,JSON.stringify(input.planning||{})])).rows[0];await audit(tx,user,'kr.created',kr.id,{},objective.owner_id||user.id);
+    const result=await db.transaction(async tx=>{await assertKrWeight(tx,objectiveId,input.planning?.weight);const kr=(await tx.query('INSERT INTO key_results(id,objective_id,title,baseline,target,actual,direction,unit,planning) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *',[randomUUID(),objectiveId,input.title,input.baseline,input.target,input.actual??input.baseline,input.direction,input.unit,JSON.stringify(input.planning||{})])).rows[0];await audit(tx,user,'kr.created',kr.id,{},objective.owner_id||user.id);
       // Every key result becomes a task in the objective owner's task center (source: OKR).
       if(objective.owner_id){const owner=(await tx.query('SELECT * FROM users WHERE id=$1 AND active=true',[objective.owner_id])).rows[0];
         if(owner){const reviewerId=[user.id!==owner.id?user.id:null,owner.manager_id,(await tx.query("SELECT id FROM users WHERE org_id=$1 AND department_id=$2 AND role='manager' AND active=true AND id<>$3 ORDER BY id LIMIT 1",[owner.org_id,owner.department_id,owner.id])).rows[0]?.id].find(x=>x&&x!==owner.id)||owner.id;

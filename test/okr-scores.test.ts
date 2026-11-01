@@ -17,7 +17,7 @@ test('key results: six score levels, final = 50% self + 50% leader, leader can v
  const {app,call}=await setup();
  try{
   const o=(await call('m2','POST','/objectives',{title:'Hydra 产品页转化率提升',level:'personal',planning:{period,weight:40,scoringDueDate:due}})).json();
-  const kr=await call('m2','POST',`/objectives/${o.id}/key-results`,{title:'转化率到 3%',baseline:0,target:1,direction:'increase',unit:'完成',planning:{weight:25,targetText:'完成'}});assert.equal(kr.statusCode,201,kr.body);assert.equal(kr.json().planning.targetText,'完成');
+  const kr=await call('m2','POST',`/objectives/${o.id}/key-results`,{title:'转化率到 3%',baseline:0,target:1,direction:'increase',unit:'完成',planning:{weight:100,targetText:'完成'}});assert.equal(kr.statusCode,201,kr.body);assert.equal(kr.json().planning.targetText,'完成');
   const id=kr.json().id;
   assert.equal((await call('m2','POST',`/key-results/${id}/scores`,{kind:'self',score:80})).statusCode,400,'only the six levels');
   const bare=await call('m2','POST',`/key-results/${id}/scores`,{kind:'self',score:125,comment:'超额完成'});assert.equal(bare.statusCode,400,'a short note is not enough');assert.equal(bare.json().error.code,'SELF_SCORE_EVIDENCE_REQUIRED');

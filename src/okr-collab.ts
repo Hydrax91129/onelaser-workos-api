@@ -15,6 +15,7 @@ import { z } from 'zod';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
+import { assertKrWeight, assertObjectivePoints } from './okr-weights.js';
 import { deny } from './errors.js';
 import { visibleObjective, krProgress, hasKrMetric } from './domain.js';
 
@@ -114,6 +115,7 @@ export async function registerOkrCollabRoutes(app: FastifyInstance, db: Database
           await assertNoCycle(tx, o.id, parent);
         }
       }
+      await assertObjectivePoints(tx, { id: o.id, org_id: o.org_id, owner_id: o.owner_id, level: o.level, period: o.planning?.period }, input.weight, o.planning?.weight);
       const planning = { ...(o.planning || {}) };
       if (input.weight !== undefined) planning.weight = input.weight;
       if (input.description !== undefined) planning.description = input.description;
@@ -145,6 +147,7 @@ export async function registerOkrCollabRoutes(app: FastifyInstance, db: Database
       const kr = await loadKr(tx, user, krId, true);
       if (!canEditObjective(user, kr)) deny(403,'FORBIDDEN','Only the owner or a department manager can edit this key result');
       if (kr.meta_version !== input.expectedMetaVersion) deny(409,'VERSION_CONFLICT','Key result changed; reload before saving');
+      await assertKrWeight(tx, kr.objective_id, input.weight, { id: kr.id, weight: kr.planning?.weight });
       const planning = { ...(kr.planning || {}) };
       if (input.weight !== undefined) planning.weight = input.weight;
       if (input.description !== undefined) planning.description = input.description;

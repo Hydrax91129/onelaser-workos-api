@@ -10,6 +10,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
 import { deny } from './errors.js';
+import { assertKrWeightsComplete } from './okr-weights.js';
 
 export const okrScoreSchema = `
 CREATE TABLE IF NOT EXISTS objective_scores(
@@ -62,14 +63,14 @@ export async function registerOkrScoreRoutes(app: FastifyInstance, db: Database,
     if (v.kind === 'self' && objective.owner_id !== user.id) deny(403, 'FORBIDDEN', 'Only the owner gives the self score');
     if (v.kind === 'manager' && !(await canLeadScore(db, user, objective, o.isAdmin))) deny(403, 'FORBIDDEN', 'Only the owner’s leader gives the leader score');
     if (v.veto && v.kind !== 'manager') deny(400, 'VETO_LEADER_ONLY', 'Only the leader can mark a self score as untrue');
-    if (v.kind === 'self' && (v.comment || '').length < MIN_COMMENT && !(v.attachmentIds || []).length) deny(400, 'SELF_SCORE_EVIDENCE_REQUIRED', 'Explain your self score in at least 10 characters or upload a file');
+    if (v.kind === 'self' && (v.comment || '').length < MIN_COMMENT && !(v.attachmentIds || []).length) deny(400, 'SELF_SCORE_EVIDENCE_REQUIRED', 'Explain your self score in at least 10 characters or upload a file', '自评需要写清楚完成情况（至少 10 个字），或上传证明文件。');
   };
   /* Files must be attachments of this key result's own task, uploaded by the scorer. */
   const evidenceFor = async (user: User, krId: string | null, ids: string[] = []) => {
     if (!ids.length) return [];
     if (!krId) deny(400, 'EVIDENCE_INVALID', 'Files can be attached to key results only');
     const rows = (await db.query('SELECT a.id,a.name,a.mime,a.size,a.task_id FROM task_attachments a JOIN tasks t ON t.id=a.task_id WHERE a.id=ANY($1::text[]) AND t.kr_id=$2 AND a.uploader_id=$3 AND a.org_id=$4', [ids, krId, user.id, user.org_id])).rows;
-    if (rows.length !== new Set(ids).size) deny(400, 'EVIDENCE_INVALID', 'Upload files to this key result before scoring');
+    if (rows.length !== new Set(ids).size) deny(400, 'EVIDENCE_INVALID', 'Upload files to this key result before scoring', '请先把证明文件上传到这条 KR，再提交自评。');
     return rows.map((r: any) => ({ id: r.id, name: r.name, mime: r.mime, size: r.size, taskId: r.task_id }));
   };
   const audit = (user: User, objective: any, action: string, target: string, details: unknown) => db.query('INSERT INTO audit_events(id,org_id,department_id,owner_id,actor_id,action,object_id,details) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',
@@ -78,6 +79,7 @@ export async function registerOkrScoreRoutes(app: FastifyInstance, db: Database,
     const user = actorOf(req), v = input.parse(req.body), id = z.string().min(1).max(100).parse(req.params.id);
     const kr = (await db.query('SELECT k.*,o.org_id,o.department_id,o.owner_id,o.level FROM key_results k JOIN objectives o ON o.id=k.objective_id WHERE k.id=$1 AND k.archived_at IS NULL AND o.archived_at IS NULL', [id])).rows[0];
     await check(user, kr, v);
+    await assertKrWeightsComplete(db, kr.objective_id);
     const score = v.veto ? 0 : v.score, evidence = await evidenceFor(user, id, v.attachmentIds);
     await db.query('INSERT INTO kr_scores(id,kr_id,kind,score,comment,veto,author_id,evidence) VALUES($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), id, v.kind, score, v.comment || '', !!v.veto, user.id, JSON.stringify(evidence)]);
     await audit(user, kr, 'kr.scored', id, { kind: v.kind, score, veto: !!v.veto });
