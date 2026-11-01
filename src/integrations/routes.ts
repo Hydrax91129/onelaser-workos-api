@@ -6,6 +6,7 @@ import { z } from 'zod';
 import type { Database, Queryable } from '../db.js';
 import { cookie, hash, issueSession, oauthCookieName, readCookie, sameSecret, sessionCookieName, type User } from '../auth.js';
 import { ApiError, deny } from '../errors.js';
+import { createAssignedTask } from '../assign.js';
 import { visibleObjective, visibleTask, krProgress } from '../domain.js';
 import { DingTalkClient, DingTalkError, type DingTalkProfile } from './dingtalk.js';
 import { AiIntegrationError, GrokReviewer, type ReviewInput } from './grok.js';
@@ -199,7 +200,12 @@ export async function registerIntegrationRoutes(app:FastifyInstance,db:Database,
     const objective=(await db.query('SELECT * FROM objectives WHERE id=$1 AND archived_at IS NULL',[objectiveId])).rows[0];
     if(!visibleObjective(user,objective)||objective.department_id!==user.department_id||(user.role!=='manager'&&(objective.level!=='personal'||objective.owner_id!==user.id)))deny(404,'NOT_FOUND','Key result not found');
     if(krProgress({...input,actual:input.actual??input.baseline})===null)deny(400,'METRIC_INVALID','Metric target must differ from baseline in the declared direction');
-    const result=await db.transaction(async tx=>{const kr=(await tx.query('INSERT INTO key_results(id,objective_id,title,baseline,target,actual,direction,unit,planning) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *',[randomUUID(),objectiveId,input.title,input.baseline,input.target,input.actual??input.baseline,input.direction,input.unit,JSON.stringify(input.planning||{})])).rows[0];await audit(tx,user,'kr.created',kr.id,{},objective.owner_id||user.id);return {...kr,progress:krProgress(kr)};});return reply.code(201).send(result);
+    const result=await db.transaction(async tx=>{const kr=(await tx.query('INSERT INTO key_results(id,objective_id,title,baseline,target,actual,direction,unit,planning) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *',[randomUUID(),objectiveId,input.title,input.baseline,input.target,input.actual??input.baseline,input.direction,input.unit,JSON.stringify(input.planning||{})])).rows[0];await audit(tx,user,'kr.created',kr.id,{},objective.owner_id||user.id);
+      // A key result added to someone else's objective becomes a task in that person's task center.
+      if(objective.owner_id&&objective.owner_id!==user.id){const owner=(await tx.query('SELECT * FROM users WHERE id=$1 AND active=true',[objective.owner_id])).rows[0];
+        if(owner){const m=/^(\d{4})-(\d{2})$/.exec(objective.planning?.period||'');const due=m?new Date(Date.UTC(+m[1],+m[2],0,23,0)):new Date(Date.now()+30*864e5);if(due.getTime()<Date.now()+864e5)due.setTime(Date.now()+7*864e5);
+          await createAssignedTask(tx,user,owner,{title:('推进 KR：'+kr.title).slice(0,200),description:`目标：${objective.title}\n关键结果：${kr.title}（目标值 ${kr.target ?? ''} ${kr.unit}）\n请在周期内推进这条关键结果，并定期更新进展。`,criteria:[`${kr.title} 达到目标值`],dueAt:due.toISOString(),krId:kr.id,source:'okr'});}}
+      return {...kr,progress:krProgress(kr)};});return reply.code(201).send(result);
   });
   app.get<{Params:{id:string}}>('/tasks/:id/evaluations',async req=>{const task=await loadTask(db,currentUser(req),id.parse(req.params.id));return {items:(await db.query('SELECT * FROM ai_evaluations WHERE task_id=$1 ORDER BY created_at DESC,id',[task.id])).rows};});
   const runningAssessments=new Map<string,Promise<unknown>>();

@@ -5,6 +5,7 @@ import type { FastifyInstance } from 'fastify';
 import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
 import { visibleTask, reviewerAllowed } from './domain.js';
+import { TASK_SOURCE_COLUMNS } from './assign.js';
 import { deny } from './errors.js';
 
 export const boardSchema = `
@@ -66,7 +67,7 @@ export function registerTaskBoardRoutes(app:FastifyInstance,db:Database){
  app.get('/task-board',async req=>{
   const user=actor(req.actor),config=await boardConfig(db,user);
   // Scope before any parent/group calculation: hidden tasks never contribute names or counts.
-  const tasks=(await db.query('SELECT tasks.*,CASE WHEN tasks.status=\'accepted\' THEN (SELECT r.created_at FROM reviews r WHERE r.task_id=tasks.id AND r.submission_version=tasks.submission_version AND r.decision=\'accept\' ORDER BY r.created_at DESC,r.id DESC LIMIT 1) ELSE NULL END AS accepted_at,(SELECT count(*)::int FROM task_updates u WHERE u.task_id=tasks.id AND u.org_id=tasks.org_id) AS update_count,(SELECT json_build_object(\'ai_status\',c.ai_status,\'ai_score\',c.ai_score,\'ai_summary\',c.ai_summary) FROM task_completions c WHERE c.task_id=tasks.id AND c.superseded_at IS NULL ORDER BY c.created_at DESC LIMIT 1) AS completion,(SELECT max(u.created_at) FROM task_updates u WHERE u.task_id=tasks.id) AS last_update_at,(SELECT count(*)::int FROM task_attachments a WHERE a.task_id=tasks.id) AS attachment_count FROM tasks WHERE org_id=$1 AND department_id=$2 ORDER BY created_at,id LIMIT 1000',[user.org_id,user.department_id])).rows.filter((t:any)=>visibleTask(user,t));
+  const tasks=(await db.query('SELECT tasks.*,CASE WHEN tasks.status=\'accepted\' THEN (SELECT r.created_at FROM reviews r WHERE r.task_id=tasks.id AND r.submission_version=tasks.submission_version AND r.decision=\'accept\' ORDER BY r.created_at DESC,r.id DESC LIMIT 1) ELSE NULL END AS accepted_at,(SELECT count(*)::int FROM task_updates u WHERE u.task_id=tasks.id AND u.org_id=tasks.org_id) AS update_count,(SELECT json_build_object(\'ai_status\',c.ai_status,\'ai_score\',c.ai_score,\'ai_summary\',c.ai_summary) FROM task_completions c WHERE c.task_id=tasks.id AND c.superseded_at IS NULL ORDER BY c.created_at DESC LIMIT 1) AS completion,(SELECT max(u.created_at) FROM task_updates u WHERE u.task_id=tasks.id) AS last_update_at,(SELECT count(*)::int FROM task_attachments a WHERE a.task_id=tasks.id) AS attachment_count,'+TASK_SOURCE_COLUMNS+' FROM tasks WHERE org_id=$1 AND (department_id=$2 OR owner_id=$3 OR reviewer_id=$3) ORDER BY created_at,id LIMIT 1000',[user.org_id,user.department_id,user.id])).rows.filter((t:any)=>visibleTask(user,t));
   const allChildren=(await db.query('SELECT parent_task_id,board_status,board_done_at FROM tasks WHERE org_id=$1 AND department_id=$2 AND parent_task_id IS NOT NULL',[user.org_id,user.department_id])).rows;
   const now=Date.now(),items=tasks.map(t=>({...t,effective_group_id:effectiveGroup(t,allChildren,now)}));
   const view=(await db.query('SELECT data FROM task_board_views WHERE user_id=$1 AND org_id=$2',[user.id,user.org_id])).rows[0]?.data;
