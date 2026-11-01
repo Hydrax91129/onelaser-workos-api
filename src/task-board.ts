@@ -30,15 +30,24 @@ const id=z.string().min(1).max(100).regex(/^[A-Za-z0-9_-]+$/);
 const color=z.string().regex(/^#[0-9a-fA-F]{6}$/);
 const label=z.object({id:z.string().max(80).regex(/^[A-Za-z0-9_-]*$/),en:z.string().trim().min(1).max(80),zh:z.string().trim().min(1).max(80),color}).strict();
 const group=z.object({id,en:z.string().trim().min(1).max(100),zh:z.string().trim().min(1).max(100),color}).strict();
-const statusIds=['working','hold','review','done','not_started'];
+const statusIds=['working','hold','review','done','not_started','overdue','abandoned'];
 const priorityIds=['urgent','high','medium','low',''];
+// Status rules: Not started is automatic; the first progress update moves a task to Working; past the due date
+// Not started / Working tasks become Overdue (On hold never does); 15 days without any update means Abandoned.
+const STATUS_LABELS=[{id:'not_started',en:'Not started',zh:'未开始',color:'#797e93'},{id:'working',en:'Working on it',zh:'进行中',color:'#fdbc65'},{id:'hold',en:'Paused',zh:'被暂停',color:'#df7689'},{id:'review',en:'Awaiting approval',zh:'待审批',color:'#b483d7'},{id:'done',en:'Done',zh:'完成',color:'#34d391'},{id:'overdue',en:'Overdue',zh:'延期',color:'#e2445c'},{id:'abandoned',en:'Abandoned',zh:'放弃',color:'#4b4f5c'}];
+export async function applyAutoStatus(db:Queryable,orgId?:string){
+ const scope=orgId?' AND org_id=$1':'',params=orgId?[orgId]:[];
+ await db.query(`UPDATE tasks SET board_status='overdue',version=version+1,updated_at=now() WHERE board_status IN ('not_started','working') AND status<>'accepted' AND due_at<now()${scope}`,params);
+ await db.query(`UPDATE tasks SET board_status='abandoned',version=version+1,updated_at=now() WHERE board_status IN ('not_started','working','overdue') AND status<>'accepted'
+   AND COALESCE((SELECT max(u.created_at) FROM task_updates u WHERE u.task_id=tasks.id),tasks.created_at)<now()-interval '15 days'${scope}`,params);
+}
 export const defaultBoardConfig=()=>({
  groups:[{id:'todo',en:'To-Do',zh:'待办任务',color:'#579bfc'},{id:'completed',en:'Completed',zh:'已完成',color:'#00c875'}],
- status:[{id:'working',en:'Working on it',zh:'进行中',color:'#fdbc65'},{id:'hold',en:'On-Hold',zh:'暂缓',color:'#df7689'},{id:'review',en:'Review',zh:'待检查',color:'#b483d7'},{id:'done',en:'Done',zh:'完成',color:'#34d391'},{id:'not_started',en:'Not Started',zh:'未开始',color:'#797e93'}],
+ status:STATUS_LABELS.map(x=>({...x})),
  priority:[{id:'urgent',en:'Urgent',zh:'紧急',color:'#ff7cd1'},{id:'high',en:'High',zh:'高',color:'#6646aa'},{id:'medium',en:'Medium',zh:'中',color:'#8581df'},{id:'low',en:'Low',zh:'低',color:'#8eb8f9'},{id:'',en:'Unassigned',zh:'未设置',color:'#797e93'}],
  category:[{id:'hr',en:'B-HR',zh:'B-人事',color:'#ff8358'},{id:'finance',en:'B-Finance',zh:'B-财务',color:'#e96a7d'},{id:'legal',en:'B-Legal',zh:'B-法务',color:'#349ecd'},{id:'operations',en:'B-Operations',zh:'B-运营',color:'#ca5d77'},{id:'marketing',en:'B-Marketing',zh:'B-市场',color:'#ffd533'},{id:'personal',en:'Personal',zh:'个人事务',color:'#ff44a1'}]
 });
-const configInput=z.object({expectedVersion:z.number().int().positive(),groups:z.array(group).min(2).max(40),status:z.array(label).length(5),priority:z.array(label).length(5),category:z.array(label).max(40)}).strict().superRefine((v,c)=>{
+const configInput=z.object({expectedVersion:z.number().int().positive(),groups:z.array(group).min(2).max(40),status:z.array(label).min(5).max(7),priority:z.array(label).length(5),category:z.array(label).max(40)}).strict().superRefine((v,c)=>{
  for(const k of ['groups','status','priority','category'] as const)if(new Set(v[k].map(x=>x.id)).size!==v[k].length)c.addIssue({code:'custom',path:[k],message:'Duplicate labels'});
  if(!['todo','completed'].every(x=>v.groups.some(g=>g.id===x)))c.addIssue({code:'custom',path:['groups'],message:'Default groups required'});
  if(!statusIds.every(x=>v.status.some(g=>g.id===x))||!priorityIds.every(x=>v.priority.some(g=>g.id===x)))c.addIssue({code:'custom',path:['status'],message:'Stable label identifiers required'});
@@ -46,10 +55,16 @@ const configInput=z.object({expectedVersion:z.number().int().positive(),groups:z
 });
 const width=z.number().int().min(64).max(700);
 const viewInput=z.object({sort:z.array(z.object({field:z.enum(['priority','due','category','title','updated','status']),direction:z.enum(['asc','desc'])}).strict()).max(5),groupBy:z.enum(['group','priority','status','category','owner','due']),hidden:z.array(z.enum(['owner','priority','status','category','due','notes','updated'])).max(7),collapsed:z.array(id).max(200),display:z.enum(['table','kanban','calendar','dashboard']).optional(),scope:z.enum(['team','mine']).optional(),showWeekends:z.boolean().optional(),widths:z.object({title:z.number().int().min(180).max(700).optional(),owner:width.optional(),priority:width.optional(),status:width.optional(),category:width.optional(),due:width.optional(),notes:width.optional(),updated:width.optional()}).strict().optional()}).strict();
-const patchInput=z.object({expectedVersion:z.number().int().positive(),title:z.string().trim().min(3).max(200).optional(),priority:z.string().max(80).optional(),status:z.enum(['working','hold','review','done','not_started']).optional(),category:z.string().max(80).optional(),groupId:id.optional(),notes:z.string().max(10000).optional(),dueAt:z.string().datetime({offset:true}).optional(),ownerId:id.optional(),reviewerId:id.optional()}).strict().refine(v=>Object.keys(v).length>1);
+const patchInput=z.object({expectedVersion:z.number().int().positive(),title:z.string().trim().min(3).max(200).optional(),priority:z.string().max(80).optional(),status:z.enum(['working','hold','review','done','not_started','overdue','abandoned']).optional(),category:z.string().max(80).optional(),groupId:id.optional(),notes:z.string().max(10000).optional(),dueAt:z.string().datetime({offset:true}).optional(),ownerId:id.optional(),reviewerId:id.optional()}).strict().refine(v=>Object.keys(v).length>1);
 export async function boardConfig(tx:Queryable,user:User){
  await tx.query('INSERT INTO task_board_config(org_id,department_id,data) VALUES($1,$2,$3) ON CONFLICT DO NOTHING',[user.org_id,user.department_id,JSON.stringify(defaultBoardConfig())]);
- return (await tx.query('SELECT * FROM task_board_config WHERE org_id=$1 AND department_id=$2',[user.org_id,user.department_id])).rows[0];
+ const row=(await tx.query('SELECT * FROM task_board_config WHERE org_id=$1 AND department_id=$2',[user.org_id,user.department_id])).rows[0];
+ // Older boards had five statuses: add Overdue / Abandoned and adopt the new names for untouched defaults.
+ if(row&&!['overdue','abandoned'].every(id=>row.data.status.some((x:any)=>x.id===id))){
+  const renamed:Record<string,string>={暂缓:'被暂停',待检查:'待审批'},data={...row.data,status:STATUS_LABELS.map(d=>{const old=row.data.status.find((x:any)=>x.id===d.id);return old?{...old,zh:renamed[old.zh]||old.zh,en:old.en==='On-Hold'?'Paused':old.en==='Review'?'Awaiting approval':old.en}:{...d};})};
+  const up=(await tx.query('UPDATE task_board_config SET data=$3,version=version+1 WHERE org_id=$1 AND department_id=$2 RETURNING *',[user.org_id,user.department_id,JSON.stringify(data)])).rows[0];return up;
+ }
+ return row;
 }
 export async function validateBoardCreation(tx:Queryable,user:User,input:any){
  const config=(await boardConfig(tx,user)).data;
@@ -65,7 +80,7 @@ export function effectiveGroup(task:any,tasks:any[],now=Date.now()){
 export function registerTaskBoardRoutes(app:FastifyInstance,db:Database){
  const actor=(u:User|null)=>u||deny(401,'UNAUTHENTICATED','Authentication is required');
  app.get('/task-board',async req=>{
-  const user=actor(req.actor),config=await boardConfig(db,user);
+  const user=actor(req.actor);await applyAutoStatus(db,user.org_id);const config=await boardConfig(db,user);
   // Scope before any parent/group calculation: hidden tasks never contribute names or counts.
   const tasks=(await db.query('SELECT tasks.*,CASE WHEN tasks.status=\'accepted\' THEN (SELECT r.created_at FROM reviews r WHERE r.task_id=tasks.id AND r.submission_version=tasks.submission_version AND r.decision=\'accept\' ORDER BY r.created_at DESC,r.id DESC LIMIT 1) ELSE NULL END AS accepted_at,(SELECT count(*)::int FROM task_updates u WHERE u.task_id=tasks.id AND u.org_id=tasks.org_id) AS update_count,(SELECT json_build_object(\'ai_status\',c.ai_status,\'ai_score\',c.ai_score,\'ai_summary\',c.ai_summary) FROM task_completions c WHERE c.task_id=tasks.id AND c.superseded_at IS NULL ORDER BY c.created_at DESC LIMIT 1) AS completion,(SELECT max(u.created_at) FROM task_updates u WHERE u.task_id=tasks.id) AS last_update_at,(SELECT count(*)::int FROM task_attachments a WHERE a.task_id=tasks.id) AS attachment_count,'+TASK_SOURCE_COLUMNS+' FROM tasks WHERE org_id=$1 AND (department_id=$2 OR owner_id=$3 OR reviewer_id=$3) ORDER BY created_at,id LIMIT 1000',[user.org_id,user.department_id,user.id])).rows.filter((t:any)=>visibleTask(user,t));
   const allChildren=(await db.query('SELECT parent_task_id,board_status,board_done_at FROM tasks WHERE org_id=$1 AND department_id=$2 AND parent_task_id IS NOT NULL',[user.org_id,user.department_id])).rows;
@@ -102,6 +117,8 @@ export function registerTaskBoardRoutes(app:FastifyInstance,db:Database){
    if(old){if(old.task_id!==taskId||old.org_id!==user.org_id||old.actor_id!==user.id||old.body!==v.body)deny(409,'VERSION_CONFLICT','Update request already used');return {id:old.id,stored:true,notificationsSent:false};}
    // Updates are an append-only log: post as many as needed, even while others edit the task.
    await tx.query('INSERT INTO task_updates(id,task_id,org_id,actor_id,body) VALUES($1,$2,$3,$4,$5)',[v.requestId,taskId,user.org_id,user.id,v.body]);
+   // The owner's first progress update starts the task; an update also revives an abandoned one.
+   if(user.id===task.owner_id&&['not_started','abandoned'].includes(task.board_status))await tx.query("UPDATE tasks SET board_status=CASE WHEN due_at<now() THEN 'overdue' ELSE 'working' END,version=version+1,updated_at=now() WHERE id=$1",[taskId]);
    await log(tx,user,'task.update.posted',taskId,{updateId:v.requestId,acceptanceUnchanged:true},task.owner_id);
    reply.code(201);return {id:v.requestId,stored:true,notificationsSent:false};
   });
@@ -117,6 +134,10 @@ export function registerTaskBoardRoutes(app:FastifyInstance,db:Database){
    if(v.groupId&&(!config.groups.some((x:any)=>x.id===v.groupId)||v.groupId==='completed'))deny(400,'INVALID_BOARD_GROUP','Completed is managed by the three-day completion rule');
    if(v.groupId&&user.role!=='manager'&&(await tx.query('SELECT id FROM tasks WHERE parent_task_id=$1 AND owner_id<>$2 LIMIT 1',[taskId,user.id])).rows.length)deny(403,'FORBIDDEN','A manager must move a parent with other owners');
    if(v.groupId&&task.parent_task_id)deny(400,'INVALID_BOARD_GROUP','Move the parent task to move its subitems');
+   // Tasks that come from an OKR, a project or a direct assignment keep their definition: the assignee updates
+   // status and progress but cannot rewrite the title, due date, owner, reviewer or priority.
+   const source=task.source||(task.kr_id?'okr':task.created_by!==task.owner_id?'direct':'self'),definer=task.assigned_by||task.created_by;
+   if(source!=='self'&&user.id===task.owner_id&&user.id!==task.reviewer_id&&user.id!==definer&&(v.title!==undefined||v.dueAt!==undefined||v.ownerId!==undefined||v.reviewerId!==undefined||v.priority!==undefined))deny(403,'TASK_DEFINITION_LOCKED','This task comes from an OKR, a project or an assignment; only the person who set it can change its definition');
    let owner=task.owner_id,reviewer=task.reviewer_id;
    if((v.ownerId&&v.ownerId!==task.owner_id||v.reviewerId&&v.reviewerId!==task.reviewer_id)&&task.submission_version>0)deny(409,'TASK_REASSIGNMENT_LOCKED','Tasks with submitted evidence keep their original owner and reviewer');
    if(v.ownerId||v.reviewerId){if(user.role!=='manager')deny(403,'FORBIDDEN','A manager must reassign tasks');owner=v.ownerId||owner;reviewer=v.reviewerId||reviewer;

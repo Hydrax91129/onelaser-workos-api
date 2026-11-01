@@ -14,7 +14,7 @@ export const objectivePlanning=z.object({
   type:z.enum(['mandatory','bonus']).default('mandatory'), bonusIncluded:z.boolean().default(false),
   scoringDueDate:date
 }).strict();
-export const krPlanning=z.object({weight,description:z.string().trim().max(4000).default('')}).strict();
+export const krPlanning=z.object({weight,description:z.string().trim().max(4000).default(''),targetText:z.string().trim().max(120).optional()}).strict();
 const score=z.number().int().refine(n=>[0,20,40,60,80,100].includes(n));
 const id=z.string().min(1).max(100).regex(/^[A-Za-z0-9_-]+$/);
 const base={expectedVersion:z.number().int().positive(),score,note:z.string().trim().min(5).max(4000)};

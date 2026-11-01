@@ -52,6 +52,7 @@ const krPatch = z.object({
   title: z.string().trim().min(1).max(300).optional(),
   weight: weight.optional(),
   description: z.string().trim().max(4000).optional(),
+  targetText: z.string().trim().max(120).optional(),
   confidence: confidence.nullable().optional(),
   metric: z.object({
     expectedVersion: z.number().int().positive(),
@@ -147,6 +148,7 @@ export async function registerOkrCollabRoutes(app: FastifyInstance, db: Database
       const planning = { ...(kr.planning || {}) };
       if (input.weight !== undefined) planning.weight = input.weight;
       if (input.description !== undefined) planning.description = input.description;
+      if (input.targetText !== undefined) planning.targetText = input.targetText;
       let metric = { baseline: kr.baseline, target: kr.target, direction: kr.direction, unit: kr.unit, version: kr.version };
       if (input.metric) {
         if (kr.version !== input.metric.expectedVersion) deny(409,'VERSION_CONFLICT','Key result changed; reload before saving');

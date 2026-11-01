@@ -1,5 +1,5 @@
 import { registerCaldockStudio, type StudioOptions } from './caldock-studio.js';
-import { registerTaskBoardRoutes, validateBoardCreation } from './task-board.js';
+import { registerTaskBoardRoutes, validateBoardCreation, applyAutoStatus } from './task-board.js';
 import { registerCaldockRoutes, type CaldockOptions } from './caldock.js';
 import { registerSupportRoutes, supportPermissions, type SupportOptions } from './support.js';
 import { registerPublicWikiRoutes, PUBLIC_WIKI_PATHS, type PublicWikiOptions } from './public-wiki.js';
@@ -10,6 +10,8 @@ import { registerCompletionRoutes, jsonModel, type JsonModel } from './completio
 import { registerTranslateRoutes } from './translate.js';
 import { registerAssignRoutes, TASK_SOURCE_COLUMNS } from './assign.js';
 import { registerOkrScoreRoutes, scoresFor, canLeadScore } from './okr-scores.js';
+import { registerProjectRoutes } from './projects.js';
+import { registerOkrCycle } from './okr-cycle.js';
 import { registerMemberRoutes, isPublicMemberPath, mailerFromEnv, type Mailer } from './members.js';
 import { registerOrgRoutes, isAdmin as isOrgAdmin } from './org.js';
 import { executiveSummary } from './executive.js';
@@ -39,7 +41,7 @@ const taskInput = z.object({
 const submissionInput = z.object({ expectedVersion, title:z.string().trim().min(3).max(200), description:z.string().trim().min(30).max(30000), evidenceUrl:evidenceUrl.optional() }).strict();
 const reviewInput = z.object({ expectedVersion, submissionVersion:z.number().int().min(1), decision:z.enum(['accept','return']), quality:z.number().int().min(0).max(100).optional(), note:z.string().trim().min(5).max(4000), verifiedCurrentSubmission:z.boolean().optional() }).strict();
 const measurementInput = z.object({ expectedVersion, actual:z.number().finite(), source:z.string().trim().min(3).max(2000), note:z.string().trim().min(5).max(4000) }).strict();
-export type AppOptions = { nudgeIntervalMs?:number; translationModel?:JsonModel|null; mailer?:Mailer|null; completionModel?:JsonModel|null; fxFetcher?:typeof fetch; db:Database; environment?:string; allowDevLogin?:boolean; devLoginSecret?:string; closeDatabase?:boolean; integrations?:IntegrationOptions; support?:SupportOptions; publicWiki?:PublicWikiOptions; shopify?:ShopifyOptions; caldock?:CaldockOptions; studio?:StudioOptions };
+export type AppOptions = { clock?:()=>number; nudgeIntervalMs?:number; translationModel?:JsonModel|null; mailer?:Mailer|null; completionModel?:JsonModel|null; fxFetcher?:typeof fetch; db:Database; environment?:string; allowDevLogin?:boolean; devLoginSecret?:string; closeDatabase?:boolean; integrations?:IntegrationOptions; support?:SupportOptions; publicWiki?:PublicWikiOptions; shopify?:ShopifyOptions; caldock?:CaldockOptions; studio?:StudioOptions };
 
 function actor(req: FastifyRequest): User { return req.actor || deny(401,'UNAUTHENTICATED','Authentication is required'); }
 function scope(user: User) {
@@ -119,7 +121,7 @@ export async function buildApp(options:AppOptions) {
     catch { return reply.code(503).send({status:'unavailable',service:'onelaser-workos-api'}); }
     return {status:'ok',service:'onelaser-workos-api',version:'0.1.0',database:db.kind,productionReady:false};
   });
-  app.get('/capabilities',async()=>({passwordLogin:true,emailCodeLogin:!!mailer,memberInvites:true,memberDisable:true,autoTranslate:true,assignTasks:true,simpleOkrScores:true,bilingualNames:true,taskCompletion:true,aiCompletionScore:!!completionModel,aiInsights:!!completionModel,liveFx:true,aiAssessmentRequired:aiAssessmentRequired(),tasks:true,objectives:true,okrCollaboration:true,orgProfiles:true,submissions:true,humanReviews:true,audit:true,devLogin:devEnabled,dingtalk:integrations.dingtalk?'configured':'not_integrated',aiReview:(integrations.aiReviewMode==='bot'?(integrations.bot&&(!(integrations.botMcpAuthMode==='oauth')||!!(integrations.botOAuth?.publicUrl&&integrations.botOAuth.orgId&&integrations.botOAuth.redirectUris.length))):integrations.ai)?'configured':'not_integrated',aiReviewMode:integrations.aiReviewMode||'api',botMcpAuthMode:integrations.botMcpAuthMode||'bearer',notificationDelivery:integrations.notificationsEnabled&&integrations.dingtalk?'configured':'not_integrated',employeeDecisions:'not_supported',frontendConnected:integrations.frontendConnected===true,teamMode:integrations.teamMode||'department',auth:{provider:'dingtalk',loginEnabled:!!integrations.dingtalk,session:'httpOnlyCookie',csrfHeader:'X-CSRF-Token'},setup:integrations.setup||null}));
+  app.get('/capabilities',async()=>({passwordLogin:true,emailCodeLogin:!!mailer,memberInvites:true,memberDisable:true,autoTranslate:true,assignTasks:true,simpleOkrScores:true,bilingualNames:true,projectsLive:true,okrCycle:true,taskCompletion:true,aiCompletionScore:!!completionModel,aiInsights:!!completionModel,liveFx:true,aiAssessmentRequired:aiAssessmentRequired(),tasks:true,objectives:true,okrCollaboration:true,orgProfiles:true,submissions:true,humanReviews:true,audit:true,devLogin:devEnabled,dingtalk:integrations.dingtalk?'configured':'not_integrated',aiReview:(integrations.aiReviewMode==='bot'?(integrations.bot&&(!(integrations.botMcpAuthMode==='oauth')||!!(integrations.botOAuth?.publicUrl&&integrations.botOAuth.orgId&&integrations.botOAuth.redirectUris.length))):integrations.ai)?'configured':'not_integrated',aiReviewMode:integrations.aiReviewMode||'api',botMcpAuthMode:integrations.botMcpAuthMode||'bearer',notificationDelivery:integrations.notificationsEnabled&&integrations.dingtalk?'configured':'not_integrated',employeeDecisions:'not_supported',frontendConnected:integrations.frontendConnected===true,teamMode:integrations.teamMode||'department',auth:{provider:'dingtalk',loginEnabled:!!integrations.dingtalk,session:'httpOnlyCookie',csrfHeader:'X-CSRF-Token'},setup:integrations.setup||null}));
   const attempts=new Map<string,{count:number;until:number}>();
   app.post('/auth/dev-login',async(req,reply)=>{
     if(!devEnabled) deny(404,'DEV_LOGIN_DISABLED','Development login is disabled');
@@ -148,7 +150,7 @@ export async function buildApp(options:AppOptions) {
   registerShopifyRoutes(app,db,options.shopify,options.support,integrations.executiveUserIds);
   registerTaskBoardRoutes(app,db);
   app.get('/tasks',async req=>{
-    const user=actor(req),[where,params]=scope(user);
+    const user=actor(req),[where,params]=scope(user);await applyAutoStatus(db,user.org_id);
     return {items:(await db.query(`SELECT tasks.*,CASE WHEN tasks.status='accepted' THEN (SELECT r.created_at FROM reviews r WHERE r.task_id=tasks.id AND r.submission_version=tasks.submission_version AND r.decision='accept' ORDER BY r.created_at DESC,r.id DESC LIMIT 1) ELSE NULL END AS accepted_at,(SELECT json_build_object('ai_status',c.ai_status,'ai_score',c.ai_score) FROM task_completions c WHERE c.task_id=tasks.id AND c.superseded_at IS NULL ORDER BY c.created_at DESC LIMIT 1) AS completion,${TASK_SOURCE_COLUMNS} FROM tasks WHERE ${where} ORDER BY created_at,id LIMIT 100`,[...params])).rows,limit:100};
   });
   app.get<{Params:{id:string}}>('/tasks/:id',async req=>taskDetail(db,await loadTask(db,actor(req),identifier.parse(req.params.id))));
@@ -209,7 +211,9 @@ export async function buildApp(options:AppOptions) {
   });
   app.get('/key-results',async req=>{
     const user=actor(req),rows=(await db.query('SELECT k.*,o.org_id,o.department_id,o.owner_id,o.level FROM key_results k JOIN objectives o ON o.id=k.objective_id WHERE o.org_id=$1 AND k.archived_at IS NULL AND o.archived_at IS NULL ORDER BY k.id',[user.org_id])).rows;
-    return {items:await attachOkrImportMetadata(db,'key_result',rows.filter(o=>visibleObjective(user,o)).map(kr=>({...kr,progress:krProgress(kr)})))};
+    const krs=await attachOkrImportMetadata(db,'key_result',rows.filter(o=>visibleObjective(user,o)).map(kr=>({...kr,progress:krProgress(kr)})));
+    const krScores=await scoresFor(db,krs.map((k:any)=>k.id),'kr_scores');for(const k of krs as any[])k.scores=krScores.get(k.id)||{};
+    return {items:krs};
   });
   app.post<{Params:{id:string}}>('/key-results/:id/measurements',async(req,reply)=>{
     const user=actor(req),input=measurementInput.parse(req.body),id=identifier.parse(req.params.id);
@@ -236,6 +240,8 @@ export async function buildApp(options:AppOptions) {
   await registerTranslateRoutes(app,db,{model:options.translationModel===undefined?(jsonModel({apiKey:process.env.AI_PROVIDER_API_KEY||process.env.XAI_API_KEY,model:process.env.AI_TRANSLATION_MODEL_ID||process.env.AI_SCORING_MODEL_ID||process.env.AI_MODEL_ID,baseUrl:process.env.AI_PROVIDER_BASE_URL})||null):options.translationModel});
   const dingNotify=integrations.dingtalk&&integrations.notificationsEnabled&&integrations.corpId?async(userId:string,content:string)=>{const ext=(await db.query('SELECT external_user_id FROM external_identities WHERE provider=$1 AND corp_id=$2 AND user_id=$3',['dingtalk',integrations.corpId,userId])).rows[0]?.external_user_id;if(!ext)return false;await integrations.dingtalk!.sendWorkNotification([ext],content);return true;}:null;
   await registerAssignRoutes(app,db,{model:completionModel||null,notify:dingNotify,intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0),isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
+  await registerOkrCycle(app,db,{now:options.clock,notify:dingNotify,timeZone:process.env.OKR_TIMEZONE||'America/Los_Angeles',intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0),isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
+  await registerProjectRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
   await registerOkrScoreRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),visible:visibleObjective});
   await registerCompletionRoutes(app,db,{model:completionModel,fxFetcher:options.fxFetcher,fxFallback:Number(process.env.FX_FALLBACK_CNY)||7.1});
   await registerIntegrationRoutes(app,db,integrations);

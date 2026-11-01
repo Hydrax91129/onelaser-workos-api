@@ -4,23 +4,43 @@ import {createDatabase,schema,seedDemo} from '../src/db.js';
 import {buildApp} from '../src/app.js';
 import {issueSession} from '../src/auth.js';
 
-test('owner self-scores, the leader gives the final score; others cannot',async()=>{
- const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+async function setup(){
+ const db=await createDatabase();await db.exec(schema);await db.exec(schema);await seedDemo(db);
  const app=await buildApp({db,integrations:{executiveUserIds:['m4']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
  const tokens:Record<string,string>={};
  const call=async(who:string,method:'GET'|'POST'|'PATCH',url:string,payload?:any)=>{tokens[who]??=(await issueSession(db,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who]}});};
+ return {app,call};
+}
+const period=new Date().toISOString().slice(0,7),due=new Date(Date.now()+20*864e5).toISOString().slice(0,10);
+
+test('key results: six score levels, final = 50% self + 50% leader, leader can veto an untrue self score',async()=>{
+ const {app,call}=await setup();
  try{
-  const period=new Date().toISOString().slice(0,7),due=new Date(Date.now()+20*864e5).toISOString().slice(0,10);
-  const o=await call('m2','POST','/objectives',{title:'把 Hydra 产品页转化率提升到 3%',level:'personal',planning:{period,weight:100,scoringDueDate:due}});assert.equal(o.statusCode,201,o.body);
-  const id=o.json().id;
-  assert.equal((await call('m3','POST',`/objectives/${id}/scores`,{kind:'self',score:80})).statusCode,404,'colleague cannot see a personal objective');
-  assert.equal((await call('m1','POST',`/objectives/${id}/scores`,{kind:'self',score:80})).statusCode,403,'only the owner self-scores');
-  const s=await call('m2','POST',`/objectives/${id}/scores`,{kind:'self',score:85,comment:'转化率做到 3.2%'});assert.equal(s.statusCode,201,s.body);assert.equal(s.json().scores.self.score,85);
-  assert.equal((await call('m2','POST',`/objectives/${id}/scores`,{kind:'manager',score:100})).statusCode,403,'cannot give your own final score');
-  const m=await call('m1','POST',`/objectives/${id}/scores`,{kind:'manager',score:80,comment:'达成，但移动端还要优化'});assert.equal(m.statusCode,201,m.body);
-  const row=(await call('m2','GET','/objectives')).json().items.find((x:any)=>x.id===id);
-  assert.equal(row.scores.self.score,85);assert.equal(row.scores.manager.score,80);assert.equal(row.scores.manager.authorName,'林楠');assert.equal(row.canLeadScore,false);
-  assert.equal((await call('m1','GET','/objectives')).json().items.find((x:any)=>x.id===id).canLeadScore,true);
-  assert.equal((await call('m2','POST',`/objectives/${id}/scores`,{kind:'self',score:120})).statusCode,400);
+  const o=(await call('m2','POST','/objectives',{title:'Hydra 产品页转化率提升',level:'personal',planning:{period,weight:40,scoringDueDate:due}})).json();
+  const kr=await call('m2','POST',`/objectives/${o.id}/key-results`,{title:'转化率到 3%',baseline:0,target:1,direction:'increase',unit:'完成',planning:{weight:25,targetText:'完成'}});assert.equal(kr.statusCode,201,kr.body);assert.equal(kr.json().planning.targetText,'完成');
+  const id=kr.json().id;
+  assert.equal((await call('m2','POST',`/key-results/${id}/scores`,{kind:'self',score:80})).statusCode,400,'only the six levels');
+  assert.equal((await call('m2','POST',`/key-results/${id}/scores`,{kind:'self',score:125,comment:'超额完成'})).statusCode,201);
+  assert.equal((await call('m2','POST',`/key-results/${id}/scores`,{kind:'manager',score:100})).statusCode,403,'no self leader score');
+  assert.equal((await call('m2','POST',`/key-results/${id}/scores`,{kind:'self',score:0,veto:true})).statusCode,400,'veto is the leader’s');
+  await call('m1','POST',`/key-results/${id}/scores`,{kind:'manager',score:75});
+  let row=(await call('m2','GET','/key-results')).json().items.find((k:any)=>k.id===id);
+  assert.equal(row.scores.self.score,125);assert.equal(row.scores.manager.score,75);assert.equal(row.scores.final,100);
+  await call('m1','POST',`/key-results/${id}/scores`,{kind:'manager',score:100,veto:true,comment:'自评不实'});
+  row=(await call('m2','GET','/key-results')).json().items.find((k:any)=>k.id===id);
+  assert.equal(row.scores.manager.veto,true);assert.equal(row.scores.final,0);
+ }finally{await app.close();}
+});
+
+test('objectives without key results are scored directly, up to 125',async()=>{
+ const {app,call}=await setup();
+ try{
+  const o=(await call('m2','POST','/objectives',{title:'建立新人培训体系',level:'personal',planning:{period,weight:60,scoringDueDate:due}})).json();
+  assert.equal((await call('m3','POST',`/objectives/${o.id}/scores`,{kind:'self',score:100})).statusCode,404);
+  assert.equal((await call('m2','POST',`/objectives/${o.id}/scores`,{kind:'self',score:100})).statusCode,201);
+  assert.equal((await call('m1','POST',`/objectives/${o.id}/scores`,{kind:'manager',score:125})).statusCode,201);
+  const row=(await call('m2','GET','/objectives')).json().items.find((x:any)=>x.id===o.id);
+  assert.equal(row.scores.final,112.5);assert.equal(row.canLeadScore,false);
+  assert.equal((await call('m1','GET','/objectives')).json().items.find((x:any)=>x.id===o.id).canLeadScore,true);
  }finally{await app.close();}
 });

@@ -10,6 +10,7 @@ import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
 import type { JsonModel } from './completions.js';
 import { deny } from './errors.js';
+import { applyAutoStatus } from './task-board.js';
 
 export const assignSchema = `
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS source text;
@@ -110,6 +111,7 @@ export async function registerAssignRoutes(app: FastifyInstance, db: Database, o
   /** One pass of the follow-up loop. Idempotent per task, kind and day. */
   async function runFollowUps() {
     const t = now();
+    await applyAutoStatus(db);
     const rows = (await db.query(`SELECT t.*, o.display_name AS owner_name, a.display_name AS assigner_name,
         (SELECT max(u.created_at) FROM task_updates u WHERE u.task_id=t.id) AS last_update_at
       FROM tasks t JOIN users o ON o.id=t.owner_id AND o.active=true
@@ -169,9 +171,9 @@ export async function registerAssignRoutes(app: FastifyInstance, db: Database, o
   app.get('/nudges', async req => {
     const user = actorOf(req);
     const rows = (await db.query(`SELECT n.*, t.title AS task_title, t.due_at, t.owner_id, (SELECT display_name FROM users WHERE id=t.owner_id) AS owner_name
-      FROM task_nudges n JOIN tasks t ON t.id=n.task_id WHERE n.org_id=$1 AND (n.user_id=$2 OR n.cc_user_id=$2) AND n.created_at>$3 ORDER BY n.created_at DESC LIMIT 50`,
+      FROM task_nudges n LEFT JOIN tasks t ON t.id=n.task_id WHERE n.org_id=$1 AND (n.user_id=$2 OR n.cc_user_id=$2) AND n.created_at>$3 ORDER BY n.created_at DESC LIMIT 50`,
       [user.org_id, user.id, new Date(now() - 30 * DAY).toISOString()])).rows;
-    return { items: rows.map((r: any) => ({ id: r.id, taskId: r.task_id, taskTitle: r.task_title, kind: r.kind, message: r.message, createdAt: r.created_at, read: !!r.read_at || r.user_id !== user.id, role: r.user_id === user.id ? 'owner' : 'assigner', ownerName: r.owner_name, dueAt: r.due_at, channels: r.channels })), unread: rows.filter((r: any) => r.user_id === user.id && !r.read_at).length };
+    return { items: rows.map((r: any) => ({ id: r.id, taskId: String(r.task_id).startsWith('okr:') ? null : r.task_id, okr: String(r.kind).startsWith('okr_'), taskTitle: r.task_title, kind: r.kind, message: r.message, createdAt: r.created_at, read: !!r.read_at || r.user_id !== user.id, role: r.user_id === user.id ? 'owner' : 'assigner', ownerName: r.owner_name, dueAt: r.due_at, channels: r.channels })), unread: rows.filter((r: any) => r.user_id === user.id && !r.read_at).length };
   });
 
   app.post('/nudges/read', async req => {

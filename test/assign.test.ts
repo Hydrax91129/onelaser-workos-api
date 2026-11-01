@@ -55,6 +55,6 @@ test('a key result added to someone else’s objective becomes a task in their t
   assert.ok(task,'task created for the objective owner');assert.equal(task.source_kind,'okr');assert.equal(task.kr_title,'有效询盘 30 条');assert.equal(task.reviewer_id,'m1');
   const own=await call('m2','POST','/objectives',{title:'自己的目标',level:'personal'});
   await call('m2','POST',`/objectives/${own.json().id}/key-results`,{title:'自己的 KR',baseline:0,target:5,direction:'increase',unit:'个'});
-  assert.ok(!(await call('m2','GET','/tasks')).json().items.some((x:any)=>x.kr_title==='自己的 KR'),'own KRs do not create tasks');
+  assert.ok((await call('m2','GET','/tasks')).json().items.some((x:any)=>x.kr_title==='自己的 KR'&&x.source_kind==='okr'),'every KR becomes a task for its owner');
  }finally{await app.close();}
 });
