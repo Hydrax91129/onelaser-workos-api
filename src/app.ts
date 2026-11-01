@@ -212,7 +212,7 @@ export async function buildApp(options:AppOptions) {
   app.get('/key-results',async req=>{
     const user=actor(req),rows=(await db.query('SELECT k.*,o.org_id,o.department_id,o.owner_id,o.level FROM key_results k JOIN objectives o ON o.id=k.objective_id WHERE o.org_id=$1 AND k.archived_at IS NULL AND o.archived_at IS NULL ORDER BY k.id',[user.org_id])).rows;
     const krs=await attachOkrImportMetadata(db,'key_result',rows.filter(o=>visibleObjective(user,o)).map(kr=>({...kr,progress:krProgress(kr)})));
-    const krScores=await scoresFor(db,krs.map((k:any)=>k.id),'kr_scores');for(const k of krs as any[])k.scores=krScores.get(k.id)||{};
+    const krScores=await scoresFor(db,krs.map((k:any)=>k.id),'kr_scores');for(const k of krs as any[])k.scores=krScores.get(k.id)||{};const krTasks=new Map((await db.query('SELECT DISTINCT ON (t.kr_id) t.kr_id,t.id,t.owner_id FROM tasks t WHERE t.org_id=$1 AND t.kr_id=ANY($2::text[]) ORDER BY t.kr_id,t.created_at',[user.org_id,krs.map((k:any)=>k.id)])).rows.map((r:any)=>[r.kr_id,r])) as Map<string,any>;for(const k of krs as any[]){const t=krTasks.get(k.id);k.task_id=t&&t.owner_id===k.owner_id?t.id:null;}
     return {items:krs};
   });
   app.post<{Params:{id:string}}>('/key-results/:id/measurements',async(req,reply)=>{

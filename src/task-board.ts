@@ -34,7 +34,7 @@ const statusIds=['working','hold','review','done','not_started','overdue','aband
 const priorityIds=['urgent','high','medium','low',''];
 // Status rules: Not started is automatic; the first progress update moves a task to Working; past the due date
 // Not started / Working tasks become Overdue (On hold never does); 15 days without any update means Abandoned.
-const STATUS_LABELS=[{id:'not_started',en:'Not started',zh:'未开始',color:'#797e93'},{id:'working',en:'Working on it',zh:'进行中',color:'#fdbc65'},{id:'hold',en:'Paused',zh:'被暂停',color:'#df7689'},{id:'review',en:'Awaiting approval',zh:'待审批',color:'#b483d7'},{id:'done',en:'Done',zh:'完成',color:'#34d391'},{id:'overdue',en:'Overdue',zh:'延期',color:'#e2445c'},{id:'abandoned',en:'Abandoned',zh:'放弃',color:'#4b4f5c'}];
+const STATUS_LABELS=[{id:'not_started',en:'Not started',zh:'未开始',color:'#797e93'},{id:'working',en:'Working',zh:'进行中',color:'#fdbc65'},{id:'hold',en:'Paused',zh:'被暂停',color:'#df7689'},{id:'review',en:'In review',zh:'待审批',color:'#b483d7'},{id:'done',en:'Done',zh:'完成',color:'#34d391'},{id:'overdue',en:'Overdue',zh:'延期',color:'#e2445c'},{id:'abandoned',en:'Abandoned',zh:'放弃',color:'#4b4f5c'}];
 export async function applyAutoStatus(db:Queryable,orgId?:string){
  const scope=orgId?' AND org_id=$1':'',params=orgId?[orgId]:[];
  await db.query(`UPDATE tasks SET board_status='overdue',version=version+1,updated_at=now() WHERE board_status IN ('not_started','working') AND status<>'accepted' AND due_at<now()${scope}`,params);
@@ -61,7 +61,7 @@ export async function boardConfig(tx:Queryable,user:User){
  const row=(await tx.query('SELECT * FROM task_board_config WHERE org_id=$1 AND department_id=$2',[user.org_id,user.department_id])).rows[0];
  // Older boards had five statuses: add Overdue / Abandoned and adopt the new names for untouched defaults.
  if(row&&!['overdue','abandoned'].every(id=>row.data.status.some((x:any)=>x.id===id))){
-  const renamed:Record<string,string>={暂缓:'被暂停',待检查:'待审批'},data={...row.data,status:STATUS_LABELS.map(d=>{const old=row.data.status.find((x:any)=>x.id===d.id);return old?{...old,zh:renamed[old.zh]||old.zh,en:old.en==='On-Hold'?'Paused':old.en==='Review'?'Awaiting approval':old.en}:{...d};})};
+  const renamed:Record<string,string>={暂缓:'被暂停',待检查:'待审批'},data={...row.data,status:STATUS_LABELS.map(d=>{const old=row.data.status.find((x:any)=>x.id===d.id);return old?{...old,zh:renamed[old.zh]||old.zh,en:({'On-Hold':'Paused','Review':'In review','Awaiting approval':'In review','Working on it':'Working'} as Record<string,string>)[old.en]||old.en}:{...d};})};
   const up=(await tx.query('UPDATE task_board_config SET data=$3,version=version+1 WHERE org_id=$1 AND department_id=$2 RETURNING *',[user.org_id,user.department_id,JSON.stringify(data)])).rows[0];return up;
  }
  return row;
