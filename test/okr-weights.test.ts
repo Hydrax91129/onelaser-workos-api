@@ -27,3 +27,27 @@ test('KR weights under one objective add up to exactly 100%; objectives in a cyc
   const en=await app.inject({method:'POST',url:`/key-results/${k1.id}/scores`,payload:{kind:'self',score:100,comment:'五门课程全部上线并完成首轮培训'},headers:{authorization:'Bearer '+tokens.m2,'accept-language':'en'}});assert.match(en.json().error.message,/exactly 100%/);
  }finally{await app.close();}
 });
+
+test('rebalance: adding a KR or objective scales the others so the total stays exactly 100',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ const app=await buildApp({db,integrations:{executiveUserIds:['m1']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
+ const tokens:Record<string,string>={};
+ const call=async(who:string,method:'GET'|'POST'|'PATCH',url:string,payload?:any)=>{tokens[who]??=(await issueSession(db,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who]}});};
+ const period=new Date().toISOString().slice(0,7),due=new Date(Date.now()+20*864e5).toISOString().slice(0,10);
+ try{
+  const o1=(await call('m2','POST','/objectives',{title:'目标一',level:'personal',planning:{period,weight:100,scoringDueDate:due},rebalance:true})).json();
+  const o2=await call('m2','POST','/objectives',{title:'目标二',level:'personal',planning:{period,weight:60,scoringDueDate:due},rebalance:true});assert.equal(o2.statusCode,201,o2.body);
+  const objs=(await call('m2','GET','/objectives')).json().items.filter((o:any)=>o.owner_id==='m2'&&o.planning?.period===period);
+  assert.equal(objs.find((o:any)=>o.id===o1.id).planning.weight,40,'first objective drops to 40');
+  const kr=(title:string,weight:number)=>call('m2','POST',`/objectives/${o1.id}/key-results`,{title,baseline:0,target:1,direction:'increase',unit:'完成',planning:{weight},rebalance:true});
+  const k1=(await kr('KR 一',100)).json();
+  assert.equal((await kr('KR 二',40)).statusCode,201);
+  let ks=(await call('m2','GET','/key-results')).json().items.filter((k:any)=>k.objective_id===o1.id);
+  assert.equal(ks.find((k:any)=>k.id===k1.id).planning.weight,60,'first KR becomes 60%');
+  assert.equal((await kr('KR 三',50)).statusCode,201);
+  ks=(await call('m2','GET','/key-results')).json().items.filter((k:any)=>k.objective_id===o1.id);
+  assert.equal(Math.round(ks.reduce((s:number,k:any)=>s+k.planning.weight,0)*100)/100,100,'still exactly 100%');
+  assert.deepEqual(ks.map((k:any)=>k.planning.weight).sort((a:number,b:number)=>a-b),[20,30,50]);
+  const full=await kr('KR 四',99);assert.equal(full.statusCode,400,'others keep at least 1% each');
+ }finally{await app.close();}
+});

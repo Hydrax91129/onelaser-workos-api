@@ -36,3 +36,19 @@ test('final publish: needs 100 points and 100% KRs, creates KR tasks, locks the 
   assert.equal((await call('m3','PATCH',`/key-results/${k1.id}`,{expectedMetaVersion:(k1.meta_version||1)+2,title:'别人改'})).statusCode,403,'peers cannot');
  }finally{await app.close();}
 });
+
+test('task board: nobody browses their superiors’ tasks unless they assigned or review them',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ await db.query("UPDATE users SET manager_id='m1' WHERE id IN ('m2','m3')");await db.query("UPDATE users SET role='manager' WHERE id='m2'");
+ const app=await buildApp({db,integrations:{executiveUserIds:['m4']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
+ const tokens:Record<string,string>={};
+ const call=async(who:string,method:'GET'|'POST',url:string,payload?:any)=>{tokens[who]??=(await issueSession(db,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who]}});};
+ try{
+  await db.query("INSERT INTO tasks(id,org_id,department_id,owner_id,reviewer_id,created_by,title,description,criteria,baseline_due_at,due_at) VALUES('boss-own','demo','marketing','m1','m1','m1','上级自己的任务','上级自己的任务说明','[]',now()+interval '3 days',now()+interval '3 days')");
+  const mine={id:'boss-own'};
+  const r=await call('m2','POST','/tasks/assign',{assigneeId:'m1',title:'下属给上级下达的任务',dueAt:new Date(Date.now()+3*864e5).toISOString(),description:'请上级在周五前确认下季度的推广预算',criteria:['确认预算']});assert.equal(r.statusCode,201,r.body);const toBoss=r.json();
+  const board=(await call('m2','GET','/task-board')).json().items.map((t:any)=>t.id);
+  assert.ok(!board.includes(mine.id),'the boss’s own task is hidden from the report');
+  assert.ok(board.includes(toBoss.id),'a task the report assigned to the boss stays visible');
+ }finally{await app.close();}
+});

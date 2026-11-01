@@ -51,3 +51,39 @@ export async function assertKrWeightsComplete(db: Queryable, objectiveId: string
     deny(409, 'KR_WEIGHTS_INCOMPLETE', `Set every KR weight so they add up to exactly 100% before scoring (now ${fmt(total)}%${missing ? `, ${missing} without a weight` : ''}).`,
       `评分前，请先把这个目标下每条 KR 的权重填好，合计正好 100%（现在是 ${fmt(total)}%${missing ? `，有 ${missing} 条没填权重` : ''}）。`);
 }
+
+/* Automatic rebalancing ("其他自动调整"): when a weight is set with rebalance on, the other
+ * key results of the objective (or the owner's other objectives in the cycle) are scaled
+ * proportionally so the total stays exactly 100. Others without a weight share equally. */
+const round2 = (n: number) => Math.round(n * 100) / 100;
+function spread(others: { id: string; w: number }[], target: number) {
+  const sum = others.reduce((s, o) => s + o.w, 0);
+  const next = others.map(o => ({ id: o.id, w: round2(sum > 0 ? o.w * target / sum : target / others.length) }));
+  const diff = round2(target - next.reduce((s, o) => s + o.w, 0));
+  if (next.length && diff) { const big = next.reduce((a, b) => (b.w > a.w ? b : a)); big.w = round2(big.w + diff); }
+  return next;
+}
+function checkRoom(weight: number, count: number, zhUnit: string, enUnit: string) {
+  if (count && 100 - weight < count * 1 - EPS)
+    deny(400, 'WEIGHT_NO_ROOM', `Leave at least 1${enUnit} for each of the other ${count}`, `其他 ${count} 项每项至少要保留 1${zhUnit}，这一项最多只能填 ${fmt(100 - count)}${zhUnit}。`);
+}
+export async function rebalanceKrs(db: Queryable, objectiveId: string, weight: number, excludeKrId?: string) {
+  const rows = (await db.query('SELECT id,planning FROM key_results WHERE objective_id=$1 AND archived_at IS NULL', [objectiveId])).rows.filter((r: any) => r.id !== excludeKrId);
+  checkRoom(weight, rows.length, '%', '%');
+  for (const o of spread(rows.map((r: any) => ({ id: r.id, w: num(r.planning?.weight) })), 100 - weight)) {
+    const r = rows.find((x: any) => x.id === o.id);
+    if (Math.abs(num(r.planning?.weight) - o.w) < EPS) continue;
+    await db.query('UPDATE key_results SET planning=$2,meta_version=meta_version+1,updated_at=now() WHERE id=$1', [o.id, JSON.stringify({ ...(r.planning || {}), weight: o.w })]);
+  }
+}
+export async function rebalanceObjectives(db: Queryable, o: { id?: string; org_id: string; owner_id: string | null; level: string; period?: string }, weight: number) {
+  if (!o.period) return;
+  const rows = (await db.query(`SELECT id,planning FROM objectives WHERE org_id=$1 AND archived_at IS NULL AND COALESCE(planning->>'period','')=$2
+    AND ${o.level === 'company' ? "level='company'" : "level<>'company' AND owner_id IS NOT DISTINCT FROM $3"}`, o.level === 'company' ? [o.org_id, o.period] : [o.org_id, o.period, o.owner_id])).rows.filter((r: any) => r.id !== o.id);
+  checkRoom(weight, rows.length, ' 分', ' point');
+  for (const x of spread(rows.map((r: any) => ({ id: r.id, w: num(r.planning?.weight) })), 100 - weight)) {
+    const r = rows.find((y: any) => y.id === x.id);
+    if (Math.abs(num(r.planning?.weight) - x.w) < EPS) continue;
+    await db.query('UPDATE objectives SET planning=$2,version=version+1,updated_at=now() WHERE id=$1', [x.id, JSON.stringify({ ...(r.planning || {}), weight: x.w })]);
+  }
+}

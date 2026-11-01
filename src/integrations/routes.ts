@@ -1,6 +1,6 @@
 import { objectivePlanning, krPlanning } from '../okr.js';
-import { assertKrWeight, assertObjectivePoints } from '../okr-weights.js';
-import { PUBLIC_USER_COLUMNS } from '../org.js';
+import { assertKrWeight, assertObjectivePoints, rebalanceKrs, rebalanceObjectives } from '../okr-weights.js';
+import { PUBLIC_USER_COLUMNS, isAdmin as isOrgAdmin } from '../org.js';
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
@@ -185,23 +185,25 @@ export async function registerIntegrationRoutes(app:FastifyInstance,db:Database,
     });
     return {synchronized:sameDepartment.length,departmentId:user.department_id};
   });
-  const objectiveInput=z.object({title:z.string().trim().min(1).max(300),level:z.enum(['personal','department']),ownerId:id.optional(),planning:objectivePlanning.optional(),parentObjectiveId:id.optional()}).strict();
+  const objectiveInput=z.object({title:z.string().trim().min(1).max(300),level:z.enum(['personal','department','company']),ownerId:id.optional(),planning:objectivePlanning.optional(),parentObjectiveId:id.optional(),rebalance:z.boolean().optional()}).strict();
   app.post('/objectives',async(req,reply)=>{
-    const user=currentUser(req),input=objectiveInput.parse(req.body),ownerId=input.ownerId||user.id;
+    const user=currentUser(req),input=objectiveInput.parse(req.body),ownerId=input.level==='company'?user.id:(input.ownerId||user.id);
+    // The company OKR is the top leader's own OKR: only an administrator writes company objectives.
+    if(input.level==='company'&&!isOrgAdmin(user as any,{executiveUserIds:options.executiveUserIds||[]}))deny(403,'FORBIDDEN','Only an administrator can set company objectives');
     if(user.role!=='manager'&&(input.level!=='personal'||ownerId!==user.id))deny(403,'FORBIDDEN','Employees can create tasks only for themselves');
     const owner=(await db.query<User>('SELECT * FROM users WHERE id=$1 AND active=true',[ownerId])).rows[0];
     if(!owner||owner.org_id!==user.org_id||owner.department_id!==user.department_id)deny(400,'INVALID_OWNER','Owner must be an active member of the current department');
     if(input.parentObjectiveId){const parent=(await db.query('SELECT * FROM objectives WHERE id=$1 AND archived_at IS NULL',[input.parentObjectiveId])).rows[0];if(!visibleObjective(user,parent))deny(400,'INVALID_PARENT','Select a visible objective to align with');}
-    const result=await db.transaction(async tx=>{await assertObjectivePoints(tx,{org_id:user.org_id,owner_id:ownerId,level:input.level,period:input.planning?.period},input.planning?.weight);const objective=(await tx.query('INSERT INTO objectives(id,org_id,department_id,owner_id,level,title,planning,parent_objective_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *',[randomUUID(),user.org_id,user.department_id,ownerId,input.level,input.title,JSON.stringify(input.planning||{}),input.parentObjectiveId||null])).rows[0];await audit(tx,user,'objective.created',objective.id,{},ownerId);return objective;});
+    const result=await db.transaction(async tx=>{if(input.rebalance&&input.planning?.weight!==undefined)await rebalanceObjectives(tx,{org_id:user.org_id,owner_id:ownerId,level:input.level,period:input.planning?.period},input.planning.weight);else await assertObjectivePoints(tx,{org_id:user.org_id,owner_id:ownerId,level:input.level,period:input.planning?.period},input.planning?.weight);const objective=(await tx.query('INSERT INTO objectives(id,org_id,department_id,owner_id,level,title,planning,parent_objective_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *',[randomUUID(),user.org_id,user.department_id,ownerId,input.level,input.title,JSON.stringify(input.planning||{}),input.parentObjectiveId||null])).rows[0];await audit(tx,user,'objective.created',objective.id,{},ownerId);return objective;});
     return reply.code(201).send(result);
   });
-  const krInput=z.object({title:z.string().trim().min(1).max(300),baseline:z.number().finite(),target:z.number().finite(),actual:z.number().finite().optional(),direction:z.enum(['increase','decrease']),unit:z.string().trim().min(1).max(30),planning:krPlanning.optional()}).strict();
+  const krInput=z.object({title:z.string().trim().min(1).max(300),baseline:z.number().finite(),target:z.number().finite(),actual:z.number().finite().optional(),direction:z.enum(['increase','decrease']),unit:z.string().trim().min(1).max(30),planning:krPlanning.optional(),rebalance:z.boolean().optional()}).strict();
   app.post<{Params:{id:string}}>('/objectives/:id/key-results',async(req,reply)=>{
     const user=currentUser(req),input=krInput.parse(req.body),objectiveId=id.parse(req.params.id);
     const objective=(await db.query('SELECT * FROM objectives WHERE id=$1 AND archived_at IS NULL',[objectiveId])).rows[0];
     if(!visibleObjective(user,objective)||objective.department_id!==user.department_id||(user.role!=='manager'&&(objective.level!=='personal'||objective.owner_id!==user.id)))deny(404,'NOT_FOUND','Key result not found');
     if(krProgress({...input,actual:input.actual??input.baseline})===null)deny(400,'METRIC_INVALID','Metric target must differ from baseline in the declared direction');
-    const result=await db.transaction(async tx=>{await assertKrWeight(tx,objectiveId,input.planning?.weight);const kr=(await tx.query('INSERT INTO key_results(id,objective_id,title,baseline,target,actual,direction,unit,planning) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *',[randomUUID(),objectiveId,input.title,input.baseline,input.target,input.actual??input.baseline,input.direction,input.unit,JSON.stringify(input.planning||{})])).rows[0];await audit(tx,user,'kr.created',kr.id,{},objective.owner_id||user.id);
+    const result=await db.transaction(async tx=>{if(input.rebalance&&input.planning?.weight!==undefined)await rebalanceKrs(tx,objectiveId,input.planning.weight);else await assertKrWeight(tx,objectiveId,input.planning?.weight);const kr=(await tx.query('INSERT INTO key_results(id,objective_id,title,baseline,target,actual,direction,unit,planning) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *',[randomUUID(),objectiveId,input.title,input.baseline,input.target,input.actual??input.baseline,input.direction,input.unit,JSON.stringify(input.planning||{})])).rows[0];await audit(tx,user,'kr.created',kr.id,{},objective.owner_id||user.id);
       // Key results become tasks when the OKR is published; once it is published (a leader adding a KR), right away.
       // (Objectives without a monthly cycle have no publish step and keep creating tasks right away.)
       if(!objective.planning?.period||await isPublished(tx,objective.org_id,objective.owner_id,objective.planning.period))await createKrTask(tx,user,objective,kr);

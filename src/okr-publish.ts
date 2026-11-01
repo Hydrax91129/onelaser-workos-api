@@ -54,8 +54,9 @@ export async function createKrTask(tx: Queryable, creator: User, objective: any,
 }
 
 /** Problems that keep an owner's OKR for a period from being published. */
-async function readiness(db: Queryable, orgId: string, ownerId: string, period: string) {
-  const objectives = (await db.query(`SELECT * FROM objectives WHERE org_id=$1 AND owner_id=$2 AND level<>'company' AND archived_at IS NULL AND planning->>'period'=$3`, [orgId, ownerId, period])).rows;
+async function readiness(db: Queryable, orgId: string, ownerId: string, period: string, withCompany = false) {
+  // For the top leader (an administrator without a manager) the company objectives are their own OKR.
+  const objectives = (await db.query(`SELECT * FROM objectives WHERE org_id=$1 AND archived_at IS NULL AND planning->>'period'=$3 AND ${withCompany ? "(level='company' OR (owner_id=$2 AND level<>'company'))" : "owner_id=$2 AND level<>'company'"}`, [orgId, ownerId, period])).rows;
   const problems: { zh: string; en: string }[] = [];
   if (!objectives.length) problems.push({ zh: '还没有目标', en: 'No objectives yet' });
   const points = objectives.reduce((s: number, o: any) => s + num(o.planning?.weight), 0);
@@ -84,7 +85,8 @@ export async function registerOkrPublish(app: FastifyInstance, db: Database, o: 
     const user = actorOf(req), v = z.object({ period: periodInput }).strict().parse(req.body);
     return db.transaction(async tx => {
       if (await isPublished(tx, user.org_id, user.id, v.period)) deny(409, 'OKR_ALREADY_PUBLISHED', 'This OKR is already published', '这个月的 OKR 已经发布过了。');
-      const r = await readiness(tx, user.org_id, user.id, v.period);
+      const top = o.isAdmin(user) && !(await tx.query('SELECT manager_id FROM users WHERE id=$1', [user.id])).rows[0]?.manager_id;
+      const r = await readiness(tx, user.org_id, user.id, v.period, top && !!(await tx.query("SELECT 1 FROM objectives WHERE org_id=$1 AND level='company' AND archived_at IS NULL AND planning->>'period'=$2 LIMIT 1", [user.org_id, v.period])).rows[0]);
       if (r.problems.length) deny(400, 'OKR_NOT_READY', 'Fix these before publishing: ' + r.problems.map(p => p.en).join('; '), '发布前请先完成：' + r.problems.map(p => p.zh).join('；') + '。');
       await tx.query('INSERT INTO okr_publications(org_id,owner_id,period,published_by) VALUES($1,$2,$3,$4)', [user.org_id, user.id, v.period, user.id]);
       let tasks = 0;
