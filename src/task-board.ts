@@ -4,7 +4,7 @@ import { z } from 'zod';
 import type { FastifyInstance } from 'fastify';
 import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
-import { visibleTask } from './domain.js';
+import { visibleTask, reviewerAllowed } from './domain.js';
 import { deny } from './errors.js';
 
 export const boardSchema = `
@@ -119,8 +119,9 @@ export function registerTaskBoardRoutes(app:FastifyInstance,db:Database){
    let owner=task.owner_id,reviewer=task.reviewer_id;
    if((v.ownerId&&v.ownerId!==task.owner_id||v.reviewerId&&v.reviewerId!==task.reviewer_id)&&task.submission_version>0)deny(409,'TASK_REASSIGNMENT_LOCKED','Tasks with submitted evidence keep their original owner and reviewer');
    if(v.ownerId||v.reviewerId){if(user.role!=='manager')deny(403,'FORBIDDEN','A manager must reassign tasks');owner=v.ownerId||owner;reviewer=v.reviewerId||reviewer;
-    const people=(await tx.query('SELECT * FROM users WHERE id=ANY($1::text[]) AND org_id=$2 AND department_id=$3 AND active=true',[[owner,reviewer],user.org_id,user.department_id])).rows;
-    if(!people.some(p=>p.id===owner)||!people.some(p=>p.id===reviewer&&p.role==='manager'&&p.id!==owner))deny(400,'INVALID_REVIEWER','Select an active owner and a different authorized reviewer');
+    const people=(await tx.query('SELECT * FROM users WHERE id=ANY($1::text[]) AND org_id=$2 AND active=true',[[owner,reviewer],user.org_id])).rows;
+    const ownerRow=people.find(p=>p.id===owner&&p.department_id===user.department_id),reviewerRow=people.find(p=>p.id===reviewer);
+    if(!ownerRow||!reviewerAllowed(ownerRow,reviewerRow,user.org_id,user.department_id))deny(400,'INVALID_REVIEWER','Select an active owner and a different authorized reviewer');
    }
    if(v.status==='done'&&task.board_status!=='done')deny(409,'COMPLETION_RESULT_REQUIRED','Write the result and a self-evaluation to complete this task');
    if(v.status&&v.status!=='done'&&task.board_status==='done'&&task.board_done_at&&Date.now()-new Date(task.board_done_at).getTime()>=COMPLETION_LOCK_MS)deny(409,'COMPLETION_LOCKED','This task was completed more than 3 days ago; its result and score are locked');

@@ -43,6 +43,12 @@ services:
         sync: false
       - key: DINGTALK_NOTIFICATIONS_ENABLED
         value: 'false'
+      # Optional email sign-in codes and invite emails for members outside DingTalk (Resend).
+      # Without these, invites still work: the admin copies the link; invitees sign in with email + password.
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
       # Configure GROK_BOT_OAUTH_REDIRECT_URIS only after verifying the client
       # request or official client metadata; no allowlist is enabled by default.
       # Optional exact local client-ID pin: GROK_BOT_OAUTH_PRE_REGISTERED_CLIENT_ID.

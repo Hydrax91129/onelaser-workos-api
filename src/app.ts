@@ -7,6 +7,7 @@ import { registerShopifyRoutes, type ShopifyOptions } from './shopify.js';
 import { registerOkrRoutes } from './okr.js';
 import { registerOkrCollabRoutes } from './okr-collab.js';
 import { registerCompletionRoutes, jsonModel, type JsonModel } from './completions.js';
+import { registerMemberRoutes, isPublicMemberPath, mailerFromEnv, type Mailer } from './members.js';
 import { registerOrgRoutes, isAdmin as isOrgAdmin } from './org.js';
 import { executiveSummary } from './executive.js';
 import Fastify, { type FastifyRequest } from 'fastify';
@@ -14,7 +15,7 @@ import { randomUUID } from 'node:crypto';
 import { z, ZodError } from 'zod';
 import type { Database, Queryable } from './db.js';
 import { cookie, hash, issueSession, readCookie, resolveSession, sameSecret, sessionCookieName, type User } from './auth.js';
-import { visibleObjective, visibleTask, attachReportingScope, krProgress, hasKrMetric } from './domain.js';
+import { visibleObjective, visibleTask, attachReportingScope, krProgress, hasKrMetric, reviewerAllowed } from './domain.js';
 import { attachOkrImportMetadata } from './okr-import.js';
 import { languageFrom, message, type Language } from './i18n.js';
 import { ApiError, deny } from './errors.js';
@@ -35,12 +36,12 @@ const taskInput = z.object({
 const submissionInput = z.object({ expectedVersion, title:z.string().trim().min(3).max(200), description:z.string().trim().min(30).max(30000), evidenceUrl:evidenceUrl.optional() }).strict();
 const reviewInput = z.object({ expectedVersion, submissionVersion:z.number().int().min(1), decision:z.enum(['accept','return']), quality:z.number().int().min(0).max(100).optional(), note:z.string().trim().min(5).max(4000), verifiedCurrentSubmission:z.boolean().optional() }).strict();
 const measurementInput = z.object({ expectedVersion, actual:z.number().finite(), source:z.string().trim().min(3).max(2000), note:z.string().trim().min(5).max(4000) }).strict();
-export type AppOptions = { completionModel?:JsonModel|null; fxFetcher?:typeof fetch; db:Database; environment?:string; allowDevLogin?:boolean; devLoginSecret?:string; closeDatabase?:boolean; integrations?:IntegrationOptions; support?:SupportOptions; publicWiki?:PublicWikiOptions; shopify?:ShopifyOptions; caldock?:CaldockOptions; studio?:StudioOptions };
+export type AppOptions = { mailer?:Mailer|null; completionModel?:JsonModel|null; fxFetcher?:typeof fetch; db:Database; environment?:string; allowDevLogin?:boolean; devLoginSecret?:string; closeDatabase?:boolean; integrations?:IntegrationOptions; support?:SupportOptions; publicWiki?:PublicWikiOptions; shopify?:ShopifyOptions; caldock?:CaldockOptions; studio?:StudioOptions };
 
 function actor(req: FastifyRequest): User { return req.actor || deny(401,'UNAUTHENTICATED','Authentication is required'); }
 function scope(user: User) {
   if (Array.isArray(user.visibleOwnerIds)) return ['org_id=$1 AND (owner_id=ANY($2::text[]) OR reviewer_id=($2::text[])[1])',[user.org_id,user.visibleOwnerIds]] as const;
-  return user.role === 'manager' ? ['org_id=$1 AND department_id=$2',[user.org_id,user.department_id]] as const : ['org_id=$1 AND (owner_id=$2 OR reviewer_id=$2)',[user.org_id,user.id]] as const;
+  return user.role === 'manager' ? ['org_id=$1 AND (department_id=$2 OR reviewer_id=$3)',[user.org_id,user.department_id,user.id]] as const : ['org_id=$1 AND (owner_id=$2 OR reviewer_id=$2)',[user.org_id,user.id]] as const;
 }
 async function loadTask(tx: Queryable, user: User, id: string, lock=false) {
   const result = await tx.query('SELECT * FROM tasks WHERE id=$1' + (lock?' FOR UPDATE':''),[id]);
@@ -62,6 +63,7 @@ export async function buildApp(options:AppOptions) {
   const aiAssessmentRequired=()=>process.env.REQUIRE_AI_ASSESSMENT!=='false'&&aiReviewConfigured();
   const {db}=options, environment=options.environment || 'development';
   const completionModel=options.completionModel===undefined?jsonModel({apiKey:process.env.AI_PROVIDER_API_KEY||process.env.XAI_API_KEY,model:process.env.AI_SCORING_MODEL_ID||process.env.AI_MODEL_ID,baseUrl:process.env.AI_PROVIDER_BASE_URL}):options.completionModel||undefined;
+  const mailer=options.mailer===undefined?mailerFromEnv(process.env):options.mailer;
   const devEnabled=options.allowDevLogin===true && environment!=='production';
   if(devEnabled && (options.devLoginSecret?.length || 0)<32) throw new Error('DEV_LOGIN_SECRET must contain at least 32 characters when development login is enabled');
   const app=Fastify({logger:false,bodyLimit:128*1024,trustProxy:false});
@@ -86,7 +88,7 @@ export async function buildApp(options:AppOptions) {
     // Commerce has its own customer identities, cookies, CSRF and admin checks.
     // Studio alone may bridge an independently scoped DingTalk employee session.
     if(requestPath.startsWith('/caldock/')) return;
-    if(publicPaths.has(requestPath)||/^\/integrations\/grok-bot\/oauth\/requests\/[A-Za-z0-9_-]{43}$/.test(requestPath)) return;
+    if(publicPaths.has(requestPath)||isPublicMemberPath(requestPath)||/^\/integrations\/grok-bot\/oauth\/requests\/[A-Za-z0-9_-]{43}$/.test(requestPath)) return;
     const cookieToken=readCookie(req.headers.cookie,sessionCookieName(integrations.secureCookies));
     const token=req.headers.authorization?(req.headers.authorization.startsWith('Bearer ')?req.headers.authorization.slice(7):undefined):cookieToken;
     if(token&&integrations.bot?.workerToken&&sameSecret(token,integrations.bot.workerToken))deny(401,'UNAUTHENTICATED','Authentication is required');
@@ -114,7 +116,7 @@ export async function buildApp(options:AppOptions) {
     catch { return reply.code(503).send({status:'unavailable',service:'onelaser-workos-api'}); }
     return {status:'ok',service:'onelaser-workos-api',version:'0.1.0',database:db.kind,productionReady:false};
   });
-  app.get('/capabilities',async()=>({taskCompletion:true,aiCompletionScore:!!completionModel,aiInsights:!!completionModel,liveFx:true,aiAssessmentRequired:aiAssessmentRequired(),tasks:true,objectives:true,okrCollaboration:true,orgProfiles:true,submissions:true,humanReviews:true,audit:true,devLogin:devEnabled,dingtalk:integrations.dingtalk?'configured':'not_integrated',aiReview:(integrations.aiReviewMode==='bot'?(integrations.bot&&(!(integrations.botMcpAuthMode==='oauth')||!!(integrations.botOAuth?.publicUrl&&integrations.botOAuth.orgId&&integrations.botOAuth.redirectUris.length))):integrations.ai)?'configured':'not_integrated',aiReviewMode:integrations.aiReviewMode||'api',botMcpAuthMode:integrations.botMcpAuthMode||'bearer',notificationDelivery:integrations.notificationsEnabled&&integrations.dingtalk?'configured':'not_integrated',employeeDecisions:'not_supported',frontendConnected:integrations.frontendConnected===true,teamMode:integrations.teamMode||'department',auth:{provider:'dingtalk',loginEnabled:!!integrations.dingtalk,session:'httpOnlyCookie',csrfHeader:'X-CSRF-Token'},setup:integrations.setup||null}));
+  app.get('/capabilities',async()=>({passwordLogin:true,emailCodeLogin:!!mailer,memberInvites:true,memberDisable:true,taskCompletion:true,aiCompletionScore:!!completionModel,aiInsights:!!completionModel,liveFx:true,aiAssessmentRequired:aiAssessmentRequired(),tasks:true,objectives:true,okrCollaboration:true,orgProfiles:true,submissions:true,humanReviews:true,audit:true,devLogin:devEnabled,dingtalk:integrations.dingtalk?'configured':'not_integrated',aiReview:(integrations.aiReviewMode==='bot'?(integrations.bot&&(!(integrations.botMcpAuthMode==='oauth')||!!(integrations.botOAuth?.publicUrl&&integrations.botOAuth.orgId&&integrations.botOAuth.redirectUris.length))):integrations.ai)?'configured':'not_integrated',aiReviewMode:integrations.aiReviewMode||'api',botMcpAuthMode:integrations.botMcpAuthMode||'bearer',notificationDelivery:integrations.notificationsEnabled&&integrations.dingtalk?'configured':'not_integrated',employeeDecisions:'not_supported',frontendConnected:integrations.frontendConnected===true,teamMode:integrations.teamMode||'department',auth:{provider:'dingtalk',loginEnabled:!!integrations.dingtalk,session:'httpOnlyCookie',csrfHeader:'X-CSRF-Token'},setup:integrations.setup||null}));
   const attempts=new Map<string,{count:number;until:number}>();
   app.post('/auth/dev-login',async(req,reply)=>{
     if(!devEnabled) deny(404,'DEV_LOGIN_DISABLED','Development login is disabled');
@@ -153,8 +155,9 @@ export async function buildApp(options:AppOptions) {
     const result=await db.transaction(async tx=>{
       const owner=(await tx.query<User>('SELECT * FROM users WHERE id=$1 AND active=true',[input.ownerId])).rows[0];
       if(!owner||owner.org_id!==user.org_id||owner.department_id!==user.department_id) deny(400,'INVALID_OWNER','Owner must be an active member of the current department');
-      const reviewer=(await tx.query<User>(input.reviewerId?'SELECT * FROM users WHERE id=$1 AND active=true':'SELECT * FROM users WHERE org_id=$1 AND department_id=$2 AND role=$3 AND active=true AND id<>$4 ORDER BY id LIMIT 1',input.reviewerId?[input.reviewerId]:[user.org_id,user.department_id,'manager',owner.id])).rows[0];
-      if(!reviewer||reviewer.role!=='manager'||reviewer.id===owner.id||reviewer.org_id!==user.org_id||reviewer.department_id!==user.department_id) deny(400,'INVALID_REVIEWER','Select a different authorized manager in this department');
+      let reviewer=(await tx.query<User>(input.reviewerId?'SELECT * FROM users WHERE id=$1 AND active=true':'SELECT * FROM users WHERE org_id=$1 AND department_id=$2 AND role=$3 AND active=true AND id<>$4 ORDER BY id LIMIT 1',input.reviewerId?[input.reviewerId]:[user.org_id,user.department_id,'manager',owner.id])).rows[0];
+      if(!reviewer&&!input.reviewerId&&(owner as any).manager_id)reviewer=(await tx.query<User>('SELECT * FROM users WHERE id=$1 AND active=true',[(owner as any).manager_id])).rows[0];
+      if(!reviewerAllowed(owner,reviewer,user.org_id,user.department_id)) deny(400,'INVALID_REVIEWER','Select a different authorized manager in this department');
       if(input.krId){const kr=await loadKr(tx,input.krId);if(!visibleObjective(user,kr)||!visibleObjective(owner,kr))deny(400,'INVALID_KR','The linked key result must be visible to the task owner');}
       const groupId=await validateBoardCreation(tx,user,input);
       const id=randomUUID();
@@ -216,13 +219,14 @@ export async function buildApp(options:AppOptions) {
     });return reply.code(201).send(result);
   });
   app.get('/notifications/preview',async req=>{
-    const user=actor(req),[where,params]=scope(user),tasks=(await db.query(`SELECT id,title,status,owner_id,due_at FROM tasks WHERE ${where} AND status<>$3 ORDER BY due_at LIMIT 100`,[...params,'accepted'])).rows;
+    const user=actor(req),[where,params]=scope(user),tasks=(await db.query(`SELECT id,title,status,owner_id,due_at FROM tasks WHERE ${where} AND status<>$${params.length+1} ORDER BY due_at LIMIT 100`,[...params,'accepted'])).rows;
     return {status:'draft',sent:false,recipient:user.id,items:tasks};
   });
   app.get('/audit',async req=>{const u=actor(req),[where,params]=Array.isArray(u.visibleOwnerIds)?['org_id=$1 AND owner_id=ANY($2::text[])',[u.org_id,u.visibleOwnerIds]] as const:u.role==='manager'?['org_id=$1 AND department_id=$2',[u.org_id,u.department_id]] as const:['org_id=$1 AND owner_id=$2',[u.org_id,u.id]] as const;return {items:(await db.query(`SELECT * FROM audit_events WHERE ${where} ORDER BY created_at DESC,id LIMIT 100`,[...params])).rows,limit:100};});
   await registerOkrRoutes(app,db);
   await registerOkrCollabRoutes(app,db);
   await registerOrgRoutes(app,db,{executiveUserIds:integrations.executiveUserIds||[]});
+  await registerMemberRoutes(app,db,{executiveUserIds:integrations.executiveUserIds||[],secureCookies:integrations.secureCookies,appPublicUrl:integrations.appPublicUrl,mailer,teamName:integrations.teamName});
   await registerCompletionRoutes(app,db,{model:completionModel,fxFetcher:options.fxFetcher,fxFallback:Number(process.env.FX_FALLBACK_CNY)||7.1});
   await registerIntegrationRoutes(app,db,integrations);
   if(options.closeDatabase!==false) app.addHook('onClose',async()=>db.close());

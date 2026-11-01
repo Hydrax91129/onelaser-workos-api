@@ -115,7 +115,7 @@ export async function registerOrgRoutes(app: FastifyInstance, db: Database, o: O
   app.get('/org/members', async req => {
     const user = actorOf(req);
     if (!isAdmin(user, o)) deny(403, 'FORBIDDEN', 'Administrator access is required');
-    const rows = (await db.query(`SELECT ${PUBLIC_USER_COLUMNS},active,is_admin,role_override,grants FROM users WHERE org_id=$1 ORDER BY active DESC,display_name,id`, [user.org_id])).rows;
+    const rows = (await db.query(`SELECT ${PUBLIC_USER_COLUMNS},active,is_admin,role_override,grants,disabled_at,login_email,(password_hash IS NOT NULL) AS has_password,invited_by,(SELECT e.user_id IS NOT NULL FROM external_identities e WHERE e.user_id=users.id LIMIT 1) AS dingtalk FROM users WHERE org_id=$1 ORDER BY active DESC,display_name,id`, [user.org_id])).rows;
     return { items: rows.map(r => ({ ...r, executive: o.executiveUserIds.includes(r.id), admin: o.executiveUserIds.includes(r.id) || r.is_admin === true, adminSource: o.executiveUserIds.includes(r.id) ? 'deployment' : r.is_admin ? 'app' : null })) };
   });
 

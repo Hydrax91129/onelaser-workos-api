@@ -5,7 +5,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Database, Queryable } from '../db.js';
 import { cookie, hash, issueSession, oauthCookieName, readCookie, sameSecret, sessionCookieName, type User } from '../auth.js';
-import { deny } from '../errors.js';
+import { ApiError, deny } from '../errors.js';
 import { visibleObjective, visibleTask, krProgress } from '../domain.js';
 import { DingTalkClient, DingTalkError, type DingTalkProfile } from './dingtalk.js';
 import { AiIntegrationError, GrokReviewer, type ReviewInput } from './grok.js';
@@ -39,14 +39,16 @@ async function loadTask(db:Queryable,user:User,taskId:string,lock=false){
 async function audit(db:Queryable,user:User,action:string,objectId:string,details:unknown,ownerId=user.id){
   await db.query('INSERT INTO audit_events(id,org_id,department_id,owner_id,actor_id,action,object_id,details) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[randomUUID(),user.org_id,user.department_id,ownerId,user.id,action,objectId,JSON.stringify(details)]);
 }
-async function upsertMember(tx:Queryable,corpId:string,profile:DingTalkProfile,options:IntegrationOptions){
+async function upsertMember(tx:Queryable,corpId:string,profile:DingTalkProfile,options:IntegrationOptions,mode:'login'|'sync'='login'){
   if(options.teamMode==='company'&&!options.allowedDepartmentIds?.includes(profile.departmentId)&&!options.additionalUserIds?.includes(profile.externalUserId))deny(403,'DINGTALK_DEPARTMENT_FORBIDDEN','DingTalk could not complete the request');
   const departmentId=options.teamMode==='company'?'company':'ding_'+profile.departmentId;
   const departmentName=options.teamMode==='company'?(options.teamName||'OneLaser'):profile.departmentName;
   await tx.query('INSERT INTO departments(org_id,id,external_id,name) VALUES($1,$2,$3,$4) ON CONFLICT(org_id,id) DO UPDATE SET name=excluded.name',[corpId,departmentId,options.teamMode==='company'?'company':profile.departmentId,departmentName]);
   const existing=(await tx.query('SELECT user_id FROM external_identities WHERE provider=$1 AND corp_id=$2 AND external_user_id=$3',['dingtalk',corpId,profile.externalUserId])).rows[0];
   const userId=existing?.user_id||randomUUID();
-  if(existing)await tx.query('UPDATE users SET display_name=$2,department_id=$3,role=COALESCE(role_override,$4),active=true WHERE id=$1 AND org_id=$5',[userId,profile.name,departmentId,profile.role,corpId]);
+  // An administrator's "disabled" decision outranks DingTalk: login is refused and sync never reactivates.
+  if(existing&&mode==='login'&&(await tx.query('SELECT disabled_at FROM users WHERE id=$1',[userId])).rows[0]?.disabled_at)deny(403,'ACCOUNT_DISABLED','This account has been disabled by an administrator');
+  if(existing)await tx.query('UPDATE users SET display_name=$2,department_id=$3,role=COALESCE(role_override,$4),active=(disabled_at IS NULL) WHERE id=$1 AND org_id=$5',[userId,profile.name,departmentId,profile.role,corpId]);
   else{
     await tx.query('INSERT INTO users(id,org_id,department_id,display_name,role) VALUES($1,$2,$3,$4,$5)',[userId,corpId,departmentId,profile.name,profile.role]);
     await tx.query('INSERT INTO external_identities(provider,corp_id,external_user_id,union_id,user_id) VALUES($1,$2,$3,$4,$5)',['dingtalk',corpId,profile.externalUserId,profile.unionId,userId]);
@@ -137,14 +139,24 @@ export async function registerIntegrationRoutes(app:FastifyInstance,db:Database,
     const target=returnState.request?await resumeConsent(returnState.request,req.headers.cookie):returnState.destination==='caldock-studio'
       ?new URL('/decision-studio/?tab=team&lang='+(returnState.language==='en'?'en':'zh'),options.appPublicUrl).toString():options.appPublicUrl;
     const profile=await safeUpstream(()=>options.dingtalk!.authenticate(input.authCode));
-    const session=await db.transaction(async tx=>{
+    let session;
+    try{session=await db.transaction(async tx=>{
       const user=await upsertMember(tx,options.corpId!,profile,options);return issueSession(tx,user.id);
-    });
+    });}catch(error){
+      if(error instanceof ApiError&&error.code==='ACCOUNT_DISABLED'){reply.header('Set-Cookie',cookie(nonceName,'',secure,0));return reply.redirect(new URL('/?login_error=disabled#overview',options.appPublicUrl).toString());}
+      throw error;
+    }
     reply.header('Set-Cookie',[cookie(nonceName,'',secure,0),cookie(sessionName,session.accessToken,secure)]);
     return reply.redirect(target);
   };
   app.get('/auth/dingtalk/callback',callback);app.post('/auth/dingtalk/callback',callback);
-  app.get('/directory',async req=>{const user=currentUser(req);return {items:(await db.query(`SELECT ${PUBLIC_USER_COLUMNS} FROM users WHERE org_id=$1 AND department_id=$2 AND active=true ORDER BY display_name,id`,[user.org_id,user.department_id])).rows};});
+  app.get('/directory',async req=>{const user=currentUser(req);
+    const items=(await db.query(`SELECT ${PUBLIC_USER_COLUMNS} FROM users WHERE org_id=$1 AND department_id=$2 AND active=true ORDER BY display_name,id`,[user.org_id,user.department_id])).rows;
+    // Managers outside the department who manage someone in it may review that person's tasks.
+    const outside=(await db.query(`SELECT ${PUBLIC_USER_COLUMNS} FROM users WHERE org_id=$1 AND active=true AND department_id<>$2 AND id IN (SELECT manager_id FROM users WHERE org_id=$1 AND department_id=$2 AND active=true AND manager_id IS NOT NULL) ORDER BY display_name,id`,[user.org_id,user.department_id])).rows;
+    // Former members keep their name on historical tasks (shown as "disabled").
+    const former=(await db.query('SELECT id,display_name,department_id FROM users WHERE org_id=$1 AND department_id=$2 AND active=false ORDER BY display_name,id',[user.org_id,user.department_id])).rows;
+    return {items,reviewers:outside.map((u:any)=>({...u,outsideDepartment:true})),former:former.map((u:any)=>({...u,active:false}))};});
   app.get('/departments',async req=>{const user=currentUser(req);return {items:(await db.query('SELECT id,name FROM departments WHERE org_id=$1 AND id=$2',[user.org_id,user.department_id])).rows};});
   app.post('/integrations/dingtalk/sync',async req=>{
     const user=currentUser(req);if(user.role!=='manager')deny(403,'FORBIDDEN','A designated manager must review evidence');
@@ -163,7 +175,7 @@ export async function registerIntegrationRoutes(app:FastifyInstance,db:Database,
     // A small company can use one internal workspace after enterprise membership checks.
     const sameDepartment=options.teamMode==='company'?profiles:profiles.filter(p=>'ding_'+p.departmentId===user.department_id);
     await db.transaction(async tx=>{
-      for(const profile of sameDepartment)await upsertMember(tx,options.corpId!,profile,options);
+      for(const profile of sameDepartment)await upsertMember(tx,options.corpId!,profile,options,'sync');
       const externalIds=sameDepartment.map(p=>p.externalUserId);
       const missing=(await tx.query('SELECT u.id,e.external_user_id FROM users u JOIN external_identities e ON e.user_id=u.id WHERE u.org_id=$1 AND u.department_id=$2 AND e.provider=$3',[user.org_id,user.department_id,'dingtalk'])).rows.filter(r=>!externalIds.includes(r.external_user_id));
       for(const member of missing)await tx.query('UPDATE users SET active=false WHERE id=$1',[member.id]);

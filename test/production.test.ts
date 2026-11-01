@@ -174,3 +174,14 @@ test('DingTalk title and work place fill the profile by default, follow DingTalk
     title='Staff Engineer';await login();assert.equal((await row()).title,'Product Lead','a WorkOS edit is kept');
   }finally{await app2.close();}
 });
+test('an administrator-disabled member cannot return through DingTalk login or directory sync',async()=>{
+  await db.query("UPDATE users SET active=false,disabled_at=now() WHERE id=$1",[employeeId]);
+  try{
+    const start=await app.inject('/auth/dingtalk/start');const state=new URL(start.headers.location!).searchParams.get('state')!;const nonce=String(start.headers['set-cookie']).split(';')[0];
+    const callback=await app.inject({url:`/auth/dingtalk/callback?state=${state}&authCode=employee`,headers:{cookie:nonce}});
+    assert.equal(callback.statusCode,302,callback.body);assert.match(String(callback.headers.location),/login_error=disabled/);
+    assert.ok(![callback.headers['set-cookie']].flat().map(String).some(v=>v.startsWith('__Host-workos_session=')&&!v.includes('Max-Age=0')),'no session issued');
+    const sync=await request(managerCookie,managerCsrf,'POST','/integrations/dingtalk/sync');assert.equal(sync.statusCode,200,sync.body);
+    assert.equal((await db.query('SELECT active FROM users WHERE id=$1',[employeeId])).rows[0].active,false,'sync keeps the member disabled');
+  }finally{await db.query("UPDATE users SET active=true,disabled_at=NULL WHERE id=$1",[employeeId]);}
+});

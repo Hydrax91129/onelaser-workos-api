@@ -8,6 +8,12 @@ export function visibleTask(user: User, task: any) {
   if (Array.isArray(user.visibleOwnerIds)) return user.visibleOwnerIds.includes(task.owner_id);
   return user.role === 'manager' && task.department_id === user.department_id;
 }
+/** A reviewer must differ from the owner and be either a manager in the same department
+ * or the owner's own manager (so a department with a single manager still works). */
+export function reviewerAllowed(owner: any, reviewer: any, orgId: string, departmentId: string) {
+  if (!owner || !reviewer || reviewer.id === owner.id || reviewer.org_id !== orgId || reviewer.active === false) return false;
+  return (reviewer.role === 'manager' && reviewer.department_id === departmentId) || (!!owner.manager_id && reviewer.id === owner.manager_id);
+}
 export async function attachReportingScope(db: { query: (sql: string, params?: unknown[]) => Promise<{ rows: any[] }> }, user: User) {
   const rows = (await db.query('SELECT id,manager_id FROM users WHERE org_id=$1 AND active=true', [user.org_id])).rows as { id: string; manager_id: string | null }[];
   if (!rows.some(r => r.manager_id)) { user.visibleOwnerIds = null; return user; }
