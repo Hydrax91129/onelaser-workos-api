@@ -123,7 +123,7 @@ test('a department with one manager can still create the manager\'s own task: th
  try{
   const due=new Date(Date.now()+3*864e5).toISOString();
   const before=await call('m1','POST','/tasks',{title:'Manager own task',ownerId:'m1',dueAt:due,description:'A task the department manager owns personally',criteria:['done']});
-  assert.equal(before.statusCode,400,'no other manager in marketing and no reporting line yet');
+  assert.equal(before.statusCode,201,'top of the line with no other manager: the task is created and scored by AI on completion');assert.equal(before.json().reviewer_id??before.json().task?.reviewer_id,'m1');
   await call('m1','PATCH','/org/members/m1',{managerId:'m4'});
   const after=await call('m1','POST','/tasks',{title:'Manager own task',ownerId:'m1',dueAt:due,description:'A task the department manager owns personally',criteria:['done']});
   assert.equal(after.statusCode,201,after.body);assert.equal(after.json().reviewer_id??after.json().task?.reviewer_id,'m4');

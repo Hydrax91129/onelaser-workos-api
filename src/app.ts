@@ -164,7 +164,9 @@ export async function buildApp(options:AppOptions) {
       if(!owner||owner.org_id!==user.org_id||owner.department_id!==user.department_id) deny(400,'INVALID_OWNER','Owner must be an active member of the current department');
       let reviewer=(await tx.query<User>(input.reviewerId?'SELECT * FROM users WHERE id=$1 AND active=true':'SELECT * FROM users WHERE org_id=$1 AND department_id=$2 AND role=$3 AND active=true AND id<>$4 ORDER BY id LIMIT 1',input.reviewerId?[input.reviewerId]:[user.org_id,user.department_id,'manager',owner.id])).rows[0];
       if(!reviewer&&!input.reviewerId&&(owner as any).manager_id)reviewer=(await tx.query<User>('SELECT * FROM users WHERE id=$1 AND active=true',[(owner as any).manager_id])).rows[0];
-      if(!reviewerAllowed(owner,reviewer,user.org_id,user.department_id)) deny(400,'INVALID_REVIEWER','Select a different authorized manager in this department');
+      // Top of the reporting line with no other manager in the department: the owner's own tasks are scored by AI on completion, so they review themselves.
+      const topSelf=!reviewer&&!input.reviewerId&&!(owner as any).manager_id&&input.ownerId===user.id;if(topSelf)reviewer=owner;
+      if(!topSelf&&!reviewerAllowed(owner,reviewer,user.org_id,user.department_id)) deny(400,'INVALID_REVIEWER','Select a different authorized manager in this department');
       if(input.krId){const kr=await loadKr(tx,input.krId);if(!visibleObjective(user,kr)||!visibleObjective(owner,kr))deny(400,'INVALID_KR','The linked key result must be visible to the task owner');}
       const groupId=await validateBoardCreation(tx,user,input);
       const id=randomUUID();
