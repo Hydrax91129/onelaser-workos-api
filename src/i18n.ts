@@ -21,6 +21,8 @@ const zh:Record<string,string>={
   'Administrator access is required':'需要管理员权限。',
   'Cost details require product area access':'查看成本明细前，需要先开通产品管理区权限。',
   'Member not found':'未找到该成员。',
+  'Update not found':'找不到这条更新，可能已被删除。',
+  'Only the author can edit or delete this update':'只有发布人可以编辑或删除这条更新。',
   'Select an active member as manager':'请选择在职成员作为直属上级。',
   'A person cannot report to themselves or their own reports':'不能把上级设为本人或本人的下属。',
   'You cannot remove your own administrator access':'不能取消自己的管理员权限，请由其他管理员操作。',

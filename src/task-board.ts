@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS task_board_config(org_id text NOT NULL,department_id 
 CREATE TABLE IF NOT EXISTS task_board_views(user_id text PRIMARY KEY REFERENCES users(id),org_id text NOT NULL,data jsonb NOT NULL);
 CREATE TABLE IF NOT EXISTS task_updates(id text PRIMARY KEY,task_id text NOT NULL REFERENCES tasks(id),org_id text NOT NULL,actor_id text NOT NULL REFERENCES users(id),body text NOT NULL,created_at timestamptz NOT NULL DEFAULT now());
 CREATE INDEX IF NOT EXISTS task_updates_task ON task_updates(task_id,created_at,id);
+ALTER TABLE task_updates ADD COLUMN IF NOT EXISTS edited_at timestamptz;
 `;
 const id=z.string().min(1).max(100).regex(/^[A-Za-z0-9_-]+$/);
 const color=z.string().regex(/^#[0-9a-fA-F]{6}$/);
@@ -108,8 +109,35 @@ export function registerTaskBoardRoutes(app:FastifyInstance,db:Database){
  app.get<{Params:{id:string}}>('/tasks/:id/updates',async req=>{
   const user=actor(req.actor),task=(await db.query('SELECT * FROM tasks WHERE id=$1',[id.parse(req.params.id)])).rows[0];
   if(!visibleTask(user,task))deny(404,'NOT_FOUND','Task not found');
-  const items=(await db.query('SELECT u.id,u.body,u.created_at,u.actor_id,p.display_name FROM task_updates u JOIN users p ON p.id=u.actor_id WHERE u.task_id=$1 AND u.org_id=$2 ORDER BY u.created_at DESC,u.id DESC LIMIT 2000',[task.id,user.org_id])).rows.reverse();
-  return {items,limit:200,notificationsSent:false};
+  const items=(await db.query('SELECT u.id,u.body,u.created_at,u.edited_at,u.actor_id,p.display_name FROM task_updates u JOIN users p ON p.id=u.actor_id WHERE u.task_id=$1 AND u.org_id=$2 ORDER BY u.created_at DESC,u.id DESC LIMIT 2000',[task.id,user.org_id])).rows.reverse();
+  return {items:items.map((x:any)=>({...x,mine:x.actor_id===user.id})),limit:200,notificationsSent:false};
+ });
+ // Only the author can edit or delete their own update. The original text stays in the audit log.
+ const ownUpdate=async(tx:any,user:any,taskId:string,updateId:string)=>{
+  const task=(await tx.query('SELECT * FROM tasks WHERE id=$1',[taskId])).rows[0];if(!visibleTask(user,task))deny(404,'NOT_FOUND','Task not found');
+  const u=(await tx.query('SELECT * FROM task_updates WHERE id=$1 AND task_id=$2 AND org_id=$3 FOR UPDATE',[updateId,taskId,user.org_id])).rows[0];
+  if(!u)deny(404,'NOT_FOUND','Update not found');
+  if(u.actor_id!==user.id)deny(403,'UPDATE_AUTHOR_ONLY','Only the author can edit or delete this update');
+  return {task,u};
+ };
+ app.post<{Params:{id:string;updateId:string}}>('/tasks/:id/updates/:updateId/edit',async req=>{
+  const user=actor(req.actor),taskId=id.parse(req.params.id),updateId=id.parse(req.params.updateId),v=z.object({body:z.string().trim().min(1).max(10000)}).strict().parse(req.body);
+  return db.transaction(async tx=>{
+   const {task,u}=await ownUpdate(tx,user,taskId,updateId);
+   if(u.body===v.body)return {id:u.id,body:u.body,edited_at:u.edited_at};
+   const row=(await tx.query('UPDATE task_updates SET body=$2,edited_at=now() WHERE id=$1 RETURNING id,body,edited_at',[u.id,v.body])).rows[0];
+   await log(tx,user,'task.update.edited',taskId,{updateId:u.id,before:u.body},task.owner_id);
+   return row;
+  });
+ });
+ app.delete<{Params:{id:string;updateId:string}}>('/tasks/:id/updates/:updateId',async req=>{
+  const user=actor(req.actor),taskId=id.parse(req.params.id),updateId=id.parse(req.params.updateId);
+  return db.transaction(async tx=>{
+   const {task,u}=await ownUpdate(tx,user,taskId,updateId);
+   await tx.query('DELETE FROM task_updates WHERE id=$1',[u.id]);
+   await log(tx,user,'task.update.deleted',taskId,{updateId:u.id,body:u.body,postedAt:u.created_at},task.owner_id);
+   return {deleted:true};
+  });
  });
  app.post<{Params:{id:string}}>('/tasks/:id/updates',async(req,reply)=>{
   const user=actor(req.actor),taskId=id.parse(req.params.id),v=z.object({requestId:z.string().uuid(),expectedVersion:z.number().int().positive().optional(),body:z.string().trim().min(1).max(10000)}).strict().parse(req.body);
