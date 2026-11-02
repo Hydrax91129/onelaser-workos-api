@@ -76,6 +76,15 @@ CREATE TABLE IF NOT EXISTS caldock_payment_events (
  event_type text NOT NULL CHECK(event_type IN ('paid','refunded')), amount_cents integer NOT NULL,
  created_at timestamptz NOT NULL DEFAULT now()
 );
+-- Stripe adapter (additive and repeatable). Provider IDs only; no card data is stored.
+ALTER TABLE caldock_orders ADD COLUMN IF NOT EXISTS stripe_checkout_session_id text;
+ALTER TABLE caldock_orders ADD COLUMN IF NOT EXISTS stripe_customer_id text;
+ALTER TABLE caldock_orders ADD COLUMN IF NOT EXISTS stripe_subscription_id text;
+CREATE INDEX IF NOT EXISTS caldock_order_stripe_subscription ON caldock_orders(stripe_subscription_id);
+CREATE INDEX IF NOT EXISTS caldock_order_stripe_customer ON caldock_orders(stripe_customer_id);
+CREATE TABLE IF NOT EXISTS caldock_stripe_events (
+ event_id text PRIMARY KEY, event_type text NOT NULL, received_at timestamptz NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS caldock_audit (
  id text PRIMARY KEY, actor_id text REFERENCES caldock_users(id), action text NOT NULL,
  object_id text NOT NULL, details jsonb NOT NULL DEFAULT '{}', created_at timestamptz NOT NULL DEFAULT now()
