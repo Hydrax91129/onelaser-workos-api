@@ -39,8 +39,8 @@ const evidenceUrl = z.string().max(2000).url().refine(value => {
   const url = new URL(value); return url.protocol === 'https:' && !url.username && !url.password;
 }, 'Only HTTPS URLs without embedded credentials are allowed');
 const taskInput = z.object({
-  title: z.string().trim().min(3).max(200), description: z.string().trim().min(1).max(10000),
-  ownerId: identifier, reviewerId: identifier.optional(), criteria: z.array(z.string().trim().min(1).max(1000)).min(1).max(20),
+  title: z.string().trim().min(3).max(200), description: z.string().trim().max(10000).default(''),
+  ownerId: identifier, reviewerId: identifier.optional(), criteria: z.array(z.string().trim().min(1).max(1000)).max(20).default([]),
   dueAt: z.string().datetime({ offset: true }), krId: identifier.optional(), boardGroupId:identifier.optional(), boardPriority:z.string().max(80).optional(), boardCategory:z.string().max(80).optional(), parentTaskId:identifier.optional()
 }).strict();
 const submissionInput = z.object({ expectedVersion, title:z.string().trim().min(3).max(200), description:z.string().trim().min(30).max(30000), evidenceUrl:evidenceUrl.optional() }).strict();
@@ -173,6 +173,8 @@ export async function buildApp(options:AppOptions) {
   app.post('/tasks',async(req,reply)=>{
     const user=actor(req),input=taskInput.parse(req.body);
     if(user.role==='employee'&&input.ownerId!==user.id) deny(403,'FORBIDDEN','Employees can create tasks only for themselves');
+    // Your own tasks need only a name (description and attachments optional); a task for someone else still needs what to deliver and how it is accepted.
+    if(input.ownerId!==user.id&&(!input.description||!input.criteria.length)) deny(400,'TASK_DETAILS_REQUIRED','A task for someone else needs a description and acceptance criteria');
     const result=await db.transaction(async tx=>{
       const owner=(await tx.query<User>('SELECT * FROM users WHERE id=$1 AND active=true',[input.ownerId])).rows[0];
       if(!owner||owner.org_id!==user.org_id||owner.department_id!==user.department_id) deny(400,'INVALID_OWNER','Owner must be an active member of the current department');

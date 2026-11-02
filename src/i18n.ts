@@ -132,6 +132,7 @@ const zh:Record<string,string>={
   'Files can be attached to key results only':'证明文件只能上传到关键结果（KR）。',
   'Your work location is set by an administrator':'工作地点由管理员设置，本人不能修改。',
   'A work email is required':'工作邮箱必须填写。',
+  'A task for someone else needs a description and acceptance criteria':'给别人建任务时，需要写清楚期望成果和验收标准。',
   'You do not have access to returns and repairs':'你没有退货维修的访问权限。',
   'Only warehouse managers can do this':'只有仓库管理员可以执行这个操作。',
   'Return case not found':'找不到这条退货记录。',

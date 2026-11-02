@@ -30,3 +30,15 @@ test('work email: required, admin-set email is locked for the person, and remind
   assert.equal(sent.filter(m=>m.to==='wei@1laser.com').length,2);
  }finally{await app.close();}
 });
+
+test('own tasks need only a name; a task for someone else still needs description and criteria',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ const app=await buildApp({db,integrations:{executiveUserIds:['m1']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
+ const token=(await issueSession(db,'m1')).accessToken;
+ const post=(payload:any)=>app.inject({method:'POST',url:'/tasks',payload,headers:{authorization:'Bearer '+token}});
+ try{
+  const due=new Date(Date.now()+3*86400000).toISOString();
+  const own=await post({title:'杜湛采购一批打标机设备',ownerId:'m1',dueAt:due});assert.equal(own.statusCode,201,own.body);assert.equal(own.json().description,'');
+  const other=await post({title:'给别人的任务',ownerId:'m2',dueAt:due});assert.equal(other.statusCode,400);assert.equal(other.json().error.code,'TASK_DETAILS_REQUIRED');
+ }finally{await app.close();}
+});
