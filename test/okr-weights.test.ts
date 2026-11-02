@@ -51,3 +51,21 @@ test('rebalance: adding a KR or objective scales the others so the total stays e
   const full=await kr('KR 四',99);assert.equal(full.statusCode,400,'others keep at least 1% each');
  }finally{await app.close();}
 });
+
+test('people type every KR weight themselves; saving needs all KRs and exactly 100%',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ const app=await buildApp({db,integrations:{executiveUserIds:['m1']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
+ const tokens:Record<string,string>={};
+ const call=async(who:string,method:'GET'|'POST'|'PATCH',url:string,payload?:any)=>{tokens[who]??=(await issueSession(db,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who]}});};
+ const period=new Date().toISOString().slice(0,7),due=new Date(Date.now()+20*864e5).toISOString().slice(0,10);
+ try{
+  const o=(await call('m2','POST','/objectives',{title:'企业销售过 $400,000',level:'personal',planning:{period,weight:100,scoringDueDate:due}})).json();
+  const kr=(title:string,weight:number)=>call('m2','POST',`/objectives/${o.id}/key-results`,{title,baseline:0,target:1,direction:'increase',unit:'完成',planning:{weight,targetText:'完成'}});
+  const a=(await kr('组织 11 月整体营销',75)).json(),b=(await kr('第二条',25)).json();
+  const bad=await call('m2','POST',`/objectives/${o.id}/kr-weights`,{weights:[{id:a.id,weight:60},{id:b.id,weight:30}]});assert.equal(bad.statusCode,400);assert.equal(bad.json().error.code,'KR_WEIGHTS_NOT_100');assert.match(bad.json().error.message,/90%/);
+  assert.equal((await call('m2','POST',`/objectives/${o.id}/kr-weights`,{weights:[{id:a.id,weight:100}]})).json().error.code,'KR_WEIGHTS_MISMATCH');
+  assert.ok([403,404].includes((await call('m3','POST',`/objectives/${o.id}/kr-weights`,{weights:[{id:a.id,weight:40},{id:b.id,weight:60}]})).statusCode),'others cannot change it');
+  const ok=await call('m2','POST',`/objectives/${o.id}/kr-weights`,{weights:[{id:a.id,weight:40},{id:b.id,weight:60}]});assert.equal(ok.statusCode,200,ok.body);
+  const rows=(await db.query('SELECT id,planning FROM key_results WHERE objective_id=$1',[o.id])).rows;assert.equal(rows.find((r:any)=>r.id===b.id).planning.weight,60);
+ }finally{await app.close();}
+});

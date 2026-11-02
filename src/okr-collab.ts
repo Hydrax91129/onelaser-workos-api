@@ -151,6 +151,30 @@ export async function registerOkrCollabRoutes(app: FastifyInstance, db: Database
     });
   });
 
+  // Set every KR weight of one objective at once. People type their own percentages; the only rule is
+  // that all key results of the objective are included and add up to exactly 100%.
+  app.post<{ Params: { id: string } }>('/objectives/:id/kr-weights', async req => {
+    const user = actor(req), objectiveId = id.parse(req.params.id);
+    const input = z.object({ weights: z.array(z.object({ id, weight }).strict()).min(1).max(50) }).strict().parse(req.body);
+    return db.transaction(async tx => {
+      const o = await loadObjective(tx, user, objectiveId, true);
+      if (!canEditObjective(user, o)) deny(403,'FORBIDDEN','Only the owner or a department manager can edit this objective');
+      const krs = (await tx.query('SELECT * FROM key_results WHERE objective_id=$1 AND archived_at IS NULL FOR UPDATE', [o.id])).rows;
+      const given = new Map(input.weights.map(w => [w.id, w.weight]));
+      if (given.size !== input.weights.length || krs.length !== given.size || krs.some((k: any) => !given.has(k.id)))
+        deny(400,'KR_WEIGHTS_MISMATCH','Include every key result of this objective exactly once','请为这个目标下的每一条 KR 都填写权重。');
+      const total = Math.round(input.weights.reduce((s, w) => s + w.weight, 0) * 100) / 100;
+      if (Math.abs(total - 100) > 0.01) deny(400,'KR_WEIGHTS_NOT_100',`KR weights must add up to exactly 100% (now ${total}%)`,`同一个目标下所有 KR 的权重加起来必须正好是 100%（现在是 ${total}%）。`);
+      for (const k of krs) {
+        const w = given.get(k.id)!;
+        if (Math.abs(Number(k.planning?.weight || 0) - w) < 0.001) continue;
+        await tx.query('UPDATE key_results SET planning=$2,meta_version=meta_version+1,updated_at=now() WHERE id=$1', [k.id, JSON.stringify({ ...(k.planning || {}), weight: w })]);
+      }
+      await audit(tx, user, 'objective.kr_weights_set', o.id, { weights: input.weights }, o.owner_id, o.department_id);
+      return { id: o.id, weights: input.weights };
+    });
+  });
+
   app.patch<{ Params: { id: string } }>('/key-results/:id', async req => {
     const user = actor(req), input = krPatch.parse(req.body), krId = id.parse(req.params.id);
     return db.transaction(async tx => {

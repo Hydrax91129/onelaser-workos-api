@@ -34,7 +34,7 @@ CREATE INDEX IF NOT EXISTS member_invites_org ON member_invites(org_id,created_a
 CREATE TABLE IF NOT EXISTS login_codes(email text PRIMARY KEY, code_hash text NOT NULL, expires_at timestamptz NOT NULL, attempts integer NOT NULL DEFAULT 0, created_at timestamptz NOT NULL DEFAULT now());
 `;
 
-export type Mailer = (message: { to: string; subject: string; text: string; html: string }) => Promise<void>;
+export type Mailer = (message: { to: string; subject: string; text: string; html: string; attachments?: { filename: string; content: string }[] }) => Promise<void>;
 export type MemberOptions = OrgOptions & { secureCookies: boolean; appPublicUrl?: string; mailer?: Mailer | null; teamName?: string };
 
 /** Resend (https://resend.com) when RESEND_API_KEY and EMAIL_FROM are set; otherwise no email login. */
@@ -44,8 +44,8 @@ export function mailerFromEnv(env: NodeJS.ProcessEnv): Mailer | null {
   return async message => {
     const response = await fetch('https://api.resend.com/emails', {
       method: 'POST', headers: { authorization: 'Bearer ' + key, 'content-type': 'application/json' },
-      body: JSON.stringify({ from, to: [message.to], subject: message.subject, text: message.text, html: message.html }),
-      signal: AbortSignal.timeout(10000),
+      body: JSON.stringify({ from, to: [message.to], subject: message.subject, text: message.text, html: message.html, ...(message.attachments?.length ? { attachments: message.attachments } : {}) }),
+      signal: AbortSignal.timeout(message.attachments?.length ? 30000 : 10000),
     });
     if (!response.ok) throw new Error('Email delivery failed');
   };
