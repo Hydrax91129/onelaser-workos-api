@@ -44,10 +44,32 @@ The first user is never an administrator. Matching email addresses do not auto-l
 - Order creation is idempotent per customer/request key and respects one open rental per customer.
 - A new customer's initial referral is bound from a server-side 30-day first-touch record. Existing customers cannot overwrite attribution; self-referrals cannot earn commission.
 - Commission defaults to zero and first paid order. Administrators can set 0–100% and first/every paid order. Each order snapshots the rule, so future edits do not retroactively change it.
-- Paid state and commissions come only from `recordVerifiedCaldockPayment`, an internal adapter function. It is intentionally NOT an HTTP endpoint. A future payment adapter must authenticate and verify provider events before invoking it. The current application does not collect money or accept a client payment-success flag.
+- Paid state and commissions come only from `recordVerifiedCaldockPayment`, an internal adapter function. It is intentionally NOT an HTTP endpoint. The Stripe adapter (below) is its only caller, after verifying Stripe's webhook signature. A client payment-success flag is never accepted.
 - Full refunds void commissions. Prior offline settlement references and timestamps are preserved so a settled/refunded commission can be flagged for recovery.
 - Administrator order actions only advance verified paid orders through provisioning and delivery. Delivery begins the billing period. Version checks prevent stale changes.
 - Commissions require approval, then a reference for a completed OFFLINE settlement. No automatic transfer is performed.
+
+## Stripe payments (test mode first)
+
+CalDock uses Stripe Checkout subscriptions: monthly $199, quarterly $507 every 3 months, yearly $1,548. Prices come from the server order snapshot; no Stripe products or prices need to be created by hand. No card data reaches this service.
+
+Activation (the Stripe account owner or an operator with Render access; never paste keys into GitHub, chat or the frontend):
+
+1. In Stripe **test mode**, Developers → API keys: create a **restricted key** with write access to Checkout Sessions and Subscriptions and read access to Customers and Invoices (a standard `sk_test_` key also works).
+2. Developers → Webhooks → Add endpoint: `https://craftos.app/api/caldock/stripe/webhook`. Events: `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `invoice.paid`, `invoice.payment_failed`, `customer.subscription.updated`, `customer.subscription.deleted`, `charge.refunded`. Copy its signing secret (`whsec_…`).
+3. Render private environment variables: `CALDOCK_STRIPE_SECRET_KEY` and `CALDOCK_STRIPE_WEBHOOK_SECRET`, then redeploy.
+4. Check `https://craftos.app/api/caldock/capabilities`: `"payments":true,"paymentMode":"test"`.
+
+Live money needs a separate decision: replace both values with live-mode ones **and** set `CALDOCK_STRIPE_ALLOW_LIVE=true`. A live key without that switch, or any malformed value, disables CalDock payments only (logged at startup); Work OS keeps running.
+
+Behaviour:
+- `POST /caldock/orders/:id/checkout` (signed-in owner, Origin + CSRF) returns one hosted Checkout URL per pending order and reuses it while open. The frontend only navigates to `https://checkout.stripe.com`.
+- The webhook verifies the v1 signature over raw bytes (5-minute tolerance) and rejects test/live mismatches. Duplicate deliveries are harmless. Deterministic rejections (amount or state mismatch) are written to `caldock_audit` as `payment.rejected` for manual refund review instead of being retried forever.
+- Billing starts on delivery: marking an order delivered moves the next automatic charge to the end of the delivered period (`trial_end`, no proration).
+- Customer "stop next renewal" sets `cancel_at_period_end`; cancelling a pending order expires its open Checkout page.
+- `invoice.paid` for a renewal extends `billing_ends_at` once per event. Renewal commissions are not yet accrued automatically (pending decision).
+- A full `charge.refunded` cancels the subscription and marks the order refunded (voiding commission). Partial refunds stay manual.
+- End-to-end acceptance still requires real customer sign-in (Google/Apple not configured yet), a Stripe test card payment, delivery, stop-renewal and refund in the Stripe test dashboard.
 
 ## Explicit demonstrations
 
