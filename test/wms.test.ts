@@ -59,3 +59,21 @@ test('WMS: import, goods in/out/transfer, count adjustments confirmed by the man
   assert.equal((await summary('m5')).items.length,3);
  }finally{await app.close();}
 });
+
+test('WMS batch goods in and batch transfer: all lines or none',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ const app=await buildApp({db,integrations:{executiveUserIds:['m1']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
+ const tokens:Record<string,string>={};
+ const call=async(who:string,method:'GET'|'POST',url:string,payload?:any)=>{tokens[who]??=(await issueSession(db,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who]}});};
+ try{
+  await call('m1','POST','/wms/import',{asOf:'2026-10-31',rows:[{sku:'A-1',qty:{us:0,transit:5}},{sku:'B-2',qty:{us:1}}]});
+  const bad=await call('m1','POST','/wms/movements/batch',{type:'in',location:'us',reason:'柜子到货',lines:[{sku:'A-1',qty:2},{sku:'NOPE',qty:1}]});assert.equal(bad.statusCode,400);
+  const q=async(s:string,l:string)=>Number((await call('m1','GET','/wms/summary')).json().items.find((i:any)=>i.sku===s).qty[l]||0);
+  assert.equal(await q('A-1','us'),0,'nothing applied when one line is wrong');
+  const ok=await call('m1','POST','/wms/movements/batch',{type:'in',location:'us',reason:'柜子到货',reference:'MSKU-1',lines:[{sku:'a-1',qty:2},{sku:'B-2',qty:3},{sku:'A-1',qty:1}]});assert.equal(ok.statusCode,201,ok.body);assert.deepEqual(ok.json(),{lines:2,units:6});
+  assert.equal(await q('A-1','us'),3);assert.equal(await q('B-2','us'),4);
+  assert.equal((await call('m1','POST','/wms/movements/batch',{type:'transfer',location:'transit',toLocation:'us',reason:'到港入仓',lines:[{sku:'A-1',qty:9}]})).statusCode,409,'cannot move more than is there');
+  assert.equal((await call('m1','POST','/wms/movements/batch',{type:'transfer',location:'transit',toLocation:'us',reason:'到港入仓',lines:[{sku:'A-1',qty:5}]})).statusCode,201);
+  assert.equal(await q('A-1','us'),8);assert.equal(await q('A-1','transit'),0);
+ }finally{await app.close();}
+});

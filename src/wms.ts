@@ -159,6 +159,39 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     return m;
   });
 
+  // Batch goods in (a container or a delivery with many SKUs): one location, one reason and reference,
+  // many lines; all or nothing. "transfer" moves the lines from one location to another (e.g. arrived from transit).
+  const batchInput = z.object({
+    type: z.enum(['in', 'transfer']), location: z.enum(LOC_IDS), toLocation: z.enum(LOC_IDS).optional(),
+    reason: z.string().trim().min(2).max(200), reference: z.string().trim().max(80).optional(),
+    lines: z.array(z.object({ sku, qty: z.number().int().positive().max(1_000_000) }).strict()).min(1).max(500),
+  }).strict();
+  app.post('/wms/movements/batch', async (req, reply) => {
+    const u = actorOf(req), v = batchInput.parse(req.body); requireManage(u);
+    if (v.type === 'transfer' && (!v.toLocation || v.toLocation === v.location)) deny(400, 'WMS_TRANSFER_TARGET', 'Choose a different destination location');
+    const merged = new Map<string, number>();
+    for (const l of v.lines) merged.set(l.sku.toLowerCase(), (merged.get(l.sku.toLowerCase()) || 0) + l.qty);
+    const out = await db.transaction(async tx => {
+      const items = (await tx.query('SELECT sku FROM wms_items WHERE org_id=$1', [u.org_id])).rows as { sku: string }[];
+      const known = new Map(items.map(i => [i.sku.toLowerCase(), i.sku]));
+      const missing = [...merged.keys()].filter(k => !known.has(k));
+      if (missing.length) deny(400, 'WMS_UNKNOWN_SKUS', `These SKUs do not exist yet: ${missing.slice(0, 10).join(', ')}`, `这些 SKU 还不存在，请先新增：${missing.slice(0, 10).join('、')}${missing.length > 10 ? ` 等 ${missing.length} 个` : ''}`);
+      const batch = randomUUID(); let units = 0;
+      for (const [k, qty] of merged) {
+        const s2 = known.get(k)!, id = randomUUID();
+        if (v.type === 'in') await addStock(tx, u.org_id, s2, v.location, qty);
+        else { await addStock(tx, u.org_id, s2, v.location, -qty); await addStock(tx, u.org_id, s2, v.toLocation!, qty); }
+        await tx.query(`INSERT INTO wms_movements(id,org_id,type,sku,location,to_location,qty,reason,reference,status,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'done',$10)`,
+          [id, u.org_id, v.type, s2, v.location, v.type === 'transfer' ? v.toLocation : null, qty, v.reason, v.reference || null, u.id]);
+        units += qty;
+      }
+      await audit(tx, u, 'wms.batch', batch, { type: v.type, location: v.location, toLocation: v.toLocation, lines: merged.size, units, reference: v.reference });
+      return { lines: merged.size, units };
+    });
+    reply.code(201);
+    return out;
+  });
+
   for (const decision of ['approve', 'reject'] as const) {
     app.post<{ Params: { id: string } }>(`/wms/movements/:id/${decision}`, async req => {
       const u = actorOf(req), mid = uid.parse(req.params.id); requireView(u);
