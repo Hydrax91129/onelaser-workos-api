@@ -80,8 +80,12 @@ const updateInput = z.object({
 const actor = (req: FastifyRequest): User => req.actor || deny(401,'UNAUTHENTICATED','Authentication is required');
 
 /** Same rule as creating a KR: managers edit their department's objectives; employees edit their own personal ones. */
+let isAdminCheck: (u: User) => boolean = u => (u as any).is_admin === true;
 export function canEditObjective(user: User, o: any) {
-  if (!o || o.org_id !== user.org_id || o.level === 'company' || o.department_id !== user.department_id) return false;
+  if (!o || o.org_id !== user.org_id) return false;
+  // The company OKR is the top leader's own OKR: its owner and company administrators edit it.
+  if (o.level === 'company') return o.owner_id === user.id || isAdminCheck(user);
+  if (o.department_id !== user.department_id) return false;
   return user.role === 'manager' || (o.level === 'personal' && o.owner_id === user.id);
 }
 
@@ -108,7 +112,8 @@ async function assertNoCycle(tx: Queryable, objectiveId: string, parentId: strin
   }
 }
 
-export async function registerOkrCollabRoutes(app: FastifyInstance, db: Database) {
+export async function registerOkrCollabRoutes(app: FastifyInstance, db: Database, opts: { isAdmin?: (u: User) => boolean } = {}) {
+  if (opts.isAdmin) isAdminCheck = opts.isAdmin;
   app.patch<{ Params: { id: string } }>('/objectives/:id', async req => {
     const user = actor(req), input = objectivePatch.parse(req.body), objectiveId = id.parse(req.params.id);
     return db.transaction(async tx => {

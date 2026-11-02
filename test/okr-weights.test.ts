@@ -69,3 +69,18 @@ test('people type every KR weight themselves; saving needs all KRs and exactly 1
   const rows=(await db.query('SELECT id,planning FROM key_results WHERE objective_id=$1',[o.id])).rows;assert.equal(rows.find((r:any)=>r.id===b.id).planning.weight,60);
  }finally{await app.close();}
 });
+
+test('the company OKR owner (an administrator) can set KR weights on company objectives',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ const app=await buildApp({db,integrations:{executiveUserIds:['m1']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
+ const tokens:Record<string,string>={};
+ const call=async(who:string,method:'GET'|'POST'|'PATCH',url:string,payload?:any)=>{tokens[who]??=(await issueSession(db,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who]}});};
+ const period=new Date().toISOString().slice(0,7),due=new Date(Date.now()+20*864e5).toISOString().slice(0,10);
+ try{
+  const o=await call('m1','POST','/objectives',{title:'企业销售过 $400,000',level:'company',planning:{period,weight:100,scoringDueDate:due}});assert.equal(o.statusCode,201,o.body);
+  const kr=(title:string,weight:number)=>call('m1','POST',`/objectives/${o.json().id}/key-results`,{title,baseline:0,target:1,direction:'increase',unit:'完成',planning:{weight,targetText:'完成'}});
+  const a=(await kr('组织 11 月整体营销',75)).json(),b=(await kr('第二条',25)).json();
+  const ok=await call('m1','POST',`/objectives/${o.json().id}/kr-weights`,{weights:[{id:a.id,weight:75},{id:b.id,weight:25}].map((w,i)=>i?{...w,weight:20}:{...w,weight:80})});assert.equal(ok.statusCode,200,ok.body);
+  assert.equal((await call('m2','POST',`/objectives/${o.json().id}/kr-weights`,{weights:[{id:a.id,weight:50},{id:b.id,weight:50}]})).statusCode,403,'other people still cannot change the company OKR');
+ }finally{await app.close();}
+});

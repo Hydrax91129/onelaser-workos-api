@@ -251,7 +251,7 @@ export async function buildApp(options:AppOptions) {
   });
   app.get('/audit',async req=>{const u=actor(req),[where,params]=Array.isArray(u.visibleOwnerIds)?['org_id=$1 AND owner_id=ANY($2::text[])',[u.org_id,u.visibleOwnerIds]] as const:u.role==='manager'?['org_id=$1 AND department_id=$2',[u.org_id,u.department_id]] as const:['org_id=$1 AND owner_id=$2',[u.org_id,u.id]] as const;return {items:(await db.query(`SELECT * FROM audit_events WHERE ${where} ORDER BY created_at DESC,id LIMIT 100`,[...params])).rows,limit:100};});
   await registerOkrRoutes(app,db);
-  await registerOkrCollabRoutes(app,db);
+  await registerOkrCollabRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
   await registerOrgRoutes(app,db,{executiveUserIds:integrations.executiveUserIds||[]});
   await registerMemberRoutes(app,db,{executiveUserIds:integrations.executiveUserIds||[],secureCookies:integrations.secureCookies,appPublicUrl:integrations.appPublicUrl,mailer,teamName:integrations.teamName});
   await registerTranslateRoutes(app,db,{model:options.translationModel===undefined?(jsonModel({apiKey:process.env.AI_PROVIDER_API_KEY||process.env.XAI_API_KEY,model:process.env.AI_TRANSLATION_MODEL_ID||process.env.AI_SCORING_MODEL_ID||process.env.AI_MODEL_ID,baseUrl:process.env.AI_PROVIDER_BASE_URL})||null):options.translationModel});
