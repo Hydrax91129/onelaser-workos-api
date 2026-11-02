@@ -15,8 +15,11 @@ test('project tasks are real tasks: they land in the assignee’s task center wi
   const t=await call('m2','POST',`/projects/${proj.id}/tasks`,{title:'首台样机组装',ownerId:'m5',groupId:proj.groups[1].id,dueAt:new Date(Date.now()+5*864e5).toISOString(),priority:'urgent'});assert.equal(t.statusCode,201,t.body);
   const task=t.json();assert.equal(task.owner_id,'m5');assert.equal(task.source_kind,'project');assert.equal(task.reviewer_id,'m2');
   const board=(await call('m5','GET','/task-board')).json().items.find((x:any)=>x.id===task.id);assert.ok(board,'in the assignee’s task center');assert.equal(board.source_kind,'project');
-  const list=(await call('m6','GET','/projects')).json().items;assert.equal(list[0].tasks.length,1,'everyone in the org can read projects');assert.equal(list[0].canEdit,false);
-  assert.equal((await call('m6','POST',`/projects/${proj.id}/tasks`,{title:'x任务',ownerId:'m6',groupId:proj.groups[0].id,dueAt:new Date(Date.now()+864e5).toISOString()})).statusCode,403,'non-members cannot add tasks');
+  assert.equal((await call('m6','GET','/projects')).json().items.length,0,'outsiders do not see the project');
+  assert.equal((await call('m4','GET','/projects')).json().items.length,0,'a department manager who is not in the project does not see it either');
+  const adminView=(await call('m1','GET','/projects')).json().items;assert.equal(adminView[0].tasks.length,1,'company admins see every project');
+  assert.equal((await call('m6','POST',`/projects/${proj.id}/tasks`,{title:'x任务',ownerId:'m6',groupId:proj.groups[0].id,dueAt:new Date(Date.now()+864e5).toISOString()})).statusCode,404,'to outsiders the project does not exist');
+  assert.equal((await call('m6','PATCH',`/projects/${proj.id}`,{description:'x'})).statusCode,404);
   const moved=await call('m3','PATCH',`/projects/${proj.id}/tasks/${task.id}`,{expectedVersion:task.version,status:'working',groupId:proj.groups[2].id});assert.equal(moved.statusCode,200,moved.body);assert.equal(moved.json().board_status,'working');
   const done=await call('m3','PATCH',`/projects/${proj.id}/tasks/${task.id}`,{expectedVersion:moved.json().version,status:'done'});assert.equal(done.statusCode,409);assert.equal(done.json().error.code,'COMPLETION_RESULT_REQUIRED');
   assert.equal((await call('m2','POST',`/projects/${proj.id}/updates`,{health:'at_risk',body:'电源板供应商延期一周'})).statusCode,201);
@@ -39,5 +42,7 @@ test('project admin: the creator by default or a chosen active member; only the 
   const invited=await call('m2','PATCH',`/projects/${mine.id}`,{members:['m3','m6']});assert.equal(invited.statusCode,200,invited.body);assert.deepEqual([...invited.json().members].sort(),['m2','m3','m6']);
   const handed=await call('m2','PATCH',`/projects/${mine.id}`,{ownerId:'m6'});assert.equal(handed.json().owner_id,'m6');
   assert.equal((await call('m3','PATCH',`/projects/${mine.id}`,{description:'目标与范围'})).statusCode,200,'members still edit the description');
+  const removed=await call('m6','PATCH',`/projects/${mine.id}`,{members:['m6']});assert.equal(removed.statusCode,200,removed.body);
+  assert.equal((await call('m3','GET','/projects')).json().items.some((x:any)=>x.id===mine.id),false,'a removed member loses sight of the project');
  }finally{await app.close();}
 });
