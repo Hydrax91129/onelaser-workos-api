@@ -40,6 +40,7 @@ export const LOCATIONS = [
   { id: 'dg', zh: '东莞工厂仓', en: 'Dongguan factory' },
   { id: 'jn', zh: '济南工厂仓', en: 'Jinan factory' },
   { id: 'transit', zh: '在途', en: 'In transit' },
+  { id: 'refurb', zh: '美国仓·翻新品', en: 'US refurbished' },
 ] as const;
 const LOC_IDS = LOCATIONS.map(l => l.id) as [string, ...string[]];
 
@@ -54,6 +55,13 @@ const areaGrants = (area: string) => [...new Set(Object.values(AREAS[area]).flat
 const levelOf = (grants: string[], area: string) => {
   const levels = Object.entries(AREAS[area]).reverse(); // highest first
   return levels.find(([, need]) => need.length && need.every(g => grants.includes(g)))?.[0] || 'none';
+};
+/** Warehouse access level of a person: admins manage; otherwise from grants; managers and product people can view. */
+export const warehouseLevelFor = (u: any, admin: boolean) => {
+  if (admin) return 'manage';
+  const g: string[] = Array.isArray(u.grants) ? u.grants : [], lv = levelOf(g, 'warehouse');
+  if (lv !== 'none') return lv;
+  return u.role === 'manager' || g.includes('products') ? 'view' : 'none';
 };
 export const accessOf = (grants: string[]) => Object.fromEntries(Object.keys(AREAS).map(a => [a, levelOf(grants, a)]));
 

@@ -9,6 +9,7 @@ import { assignSchema } from './assign.js';
 import { okrScoreSchema } from './okr-scores.js';
 import { projectSchema } from './projects.js';
 import { wmsSchema } from './wms.js';
+import { rmaSchema } from './rma.js';
 import { productSchema } from './products.js';
 import { feedbackSchema } from './feedback.js';
 import { okrPublishSchema } from './okr-publish.js';
@@ -206,7 +207,7 @@ CREATE TABLE IF NOT EXISTS notification_deliveries (
 CREATE INDEX IF NOT EXISTS task_scope_idx ON tasks(org_id, department_id, owner_id);
 CREATE INDEX IF NOT EXISTS audit_scope_idx ON audit_events(org_id, department_id, owner_id);
 `;
-export const schema = coreSchema + boardSchema + supportSchema + okrImportSchema + okrCollabSchema + orgSchema + memberSchema + translationSchema + completionSchema + assignSchema + okrScoreSchema + projectSchema + wmsSchema + productSchema + feedbackSchema + publicWikiSchema + caldockSchema + studioSchema + okrPublishSchema;
+export const schema = coreSchema + boardSchema + supportSchema + okrImportSchema + okrCollabSchema + orgSchema + memberSchema + translationSchema + completionSchema + assignSchema + okrScoreSchema + projectSchema + wmsSchema + rmaSchema + productSchema + feedbackSchema + publicWikiSchema + caldockSchema + studioSchema + okrPublishSchema;
 
 export async function seedDemo(db: Database) {
   const users = [

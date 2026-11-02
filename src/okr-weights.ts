@@ -1,10 +1,9 @@
 /* Weight rules for simple OKRs.
  * - One person's objectives in one monthly cycle add up to 100 points.
  * - The key results under one objective add up to exactly 100%.
- * A change that would push either total above 100 is refused. Totals below 100
- * are allowed while an OKR is still being written, but key results can only be
- * scored once their weights add up to exactly 100%. Totals that were already
- * above 100 (older data) may still be lowered. */
+ * While an OKR is still being written (before the final publish) every number can be
+ * changed freely, so totals may be below or above 100 for a while; the page shows them
+ * red until they are exactly 100. Final publish and KR scoring require exactly 100. */
 import type { Queryable } from './db.js';
 import { deny } from './errors.js';
 
@@ -18,13 +17,8 @@ async function otherKrWeights(db: Queryable, objectiveId: string, excludeKrId?: 
   return rows.filter((r: any) => r.id !== excludeKrId).reduce((s: number, r: any) => s + num(r.planning?.weight), 0);
 }
 
-export async function assertKrWeight(db: Queryable, objectiveId: string, weight: number | undefined, current?: { id: string; weight?: unknown }) {
-  if (weight === undefined) return;
-  const others = await otherKrWeights(db, objectiveId, current?.id);
-  const lowering = current && weight <= num(current.weight);
-  if (others + weight > 100 + EPS && !lowering)
-    deny(400, 'KR_WEIGHT_OVER_100', `KR weights under one objective must add up to exactly 100%. ${fmt(Math.min(others, 100))}% is already used, so at most ${fmt(Math.max(0, 100 - others))}% is left.`,
-      `同一个目标下所有 KR 的权重合计必须正好是 100%。其他 KR 已用 ${fmt(Math.min(others, 100))}%，这条最多只能填 ${fmt(Math.max(0, 100 - others))}%。`);
+export async function assertKrWeight(_db: Queryable, _objectiveId: string, _weight: number | undefined, _current?: { id: string; weight?: unknown }) {
+  // Drafts may total more or less than 100%; publish and scoring enforce exactly 100%.
 }
 
 /** Points of the other objectives of the same owner (or the company) in the same cycle. */
@@ -34,13 +28,8 @@ async function otherObjectivePoints(db: Queryable, o: { id?: string; org_id: str
   return rows.filter((r: any) => r.id !== o.id).reduce((s: number, r: any) => s + num(r.planning?.weight), 0);
 }
 
-export async function assertObjectivePoints(db: Queryable, o: { id?: string; org_id: string; owner_id: string | null; level: string; period?: string }, weight: number | undefined, currentWeight?: unknown) {
-  if (weight === undefined || !o.period) return;
-  const others = await otherObjectivePoints(db, { ...o, period: o.period });
-  const lowering = o.id !== undefined && weight <= num(currentWeight);
-  if (others + weight > 100 + EPS && !lowering)
-    deny(400, 'OBJECTIVE_POINTS_OVER_100', `Objectives in one cycle must add up to exactly 100 points. ${fmt(Math.min(others, 100))} points are already used, so at most ${fmt(Math.max(0, 100 - others))} are left.`,
-      `本周期所有目标的分值合计必须正好是 100 分。其他目标已用 ${fmt(Math.min(others, 100))} 分，这个目标最多只能填 ${fmt(Math.max(0, 100 - others))} 分。`);
+export async function assertObjectivePoints(_db: Queryable, _o: { id?: string; org_id: string; owner_id: string | null; level: string; period?: string }, _weight: number | undefined, _currentWeight?: unknown) {
+  // Drafts may total more or less than 100 points; final publish enforces exactly 100.
 }
 
 /** Key results can be scored only when every KR under the objective has a weight and they add up to exactly 100%. */
