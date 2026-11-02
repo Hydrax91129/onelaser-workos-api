@@ -42,3 +42,15 @@ test('own tasks need only a name; a task for someone else still needs descriptio
   const other=await post({title:'给别人的任务',ownerId:'m2',dueAt:due});assert.equal(other.statusCode,400);assert.equal(other.json().error.code,'TASK_DETAILS_REQUIRED');
  }finally{await app.close();}
 });
+
+test('a deliverable needs only the progress note; the title comes from its first line',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ const app=await buildApp({db,integrations:{executiveUserIds:['m1']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
+ const token=(await issueSession(db,'m1')).accessToken;
+ const call=(method:'GET'|'POST',url:string,payload?:any)=>app.inject({method,url,payload,headers:{authorization:'Bearer '+token}});
+ try{
+  const t=(await call('POST','/tasks',{title:'自己的任务',ownerId:'m1',dueAt:new Date(Date.now()+3*86400000).toISOString()})).json();
+  assert.equal((await call('POST',`/tasks/${t.id}/submissions`,{expectedVersion:t.version,description:'x'})).statusCode,400,'a note is still required');
+  const s=await call('POST',`/tasks/${t.id}/submissions`,{expectedVersion:t.version,description:'三家报价已对比完\n附件是报价单'});assert.equal(s.statusCode,201,s.body);assert.equal(s.json().submission.title,'三家报价已对比完');
+ }finally{await app.close();}
+});

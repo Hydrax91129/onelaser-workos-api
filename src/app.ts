@@ -43,7 +43,9 @@ const taskInput = z.object({
   ownerId: identifier, reviewerId: identifier.optional(), criteria: z.array(z.string().trim().min(1).max(1000)).max(20).default([]),
   dueAt: z.string().datetime({ offset: true }), krId: identifier.optional(), boardGroupId:identifier.optional(), boardPriority:z.string().max(80).optional(), boardCategory:z.string().max(80).optional(), parentTaskId:identifier.optional()
 }).strict();
-const submissionInput = z.object({ expectedVersion, title:z.string().trim().min(3).max(200), description:z.string().trim().min(30).max(30000), evidenceUrl:evidenceUrl.optional() }).strict();
+const submissionInput = z.object({ expectedVersion, title:z.string().trim().min(1).max(200).optional(), description:z.string().trim().min(2).max(30000), evidenceUrl:evidenceUrl.optional() }).strict();
+/** A submission needs only its progress note (files are attached to the task); the title defaults to the note's first line. */
+const submissionTitle=(t:string|undefined,d:string)=>{if(t)return t;const first=(d.split(/\r?\n/).find(l=>l.trim())||d).trim();return first.length>60?first.slice(0,60)+'…':first;};
 const reviewInput = z.object({ expectedVersion, submissionVersion:z.number().int().min(1), decision:z.enum(['accept','return']), quality:z.number().int().min(0).max(100).optional(), note:z.string().trim().min(5).max(4000), verifiedCurrentSubmission:z.boolean().optional() }).strict();
 const measurementInput = z.object({ expectedVersion, actual:z.number().finite(), source:z.string().trim().min(3).max(2000), note:z.string().trim().min(5).max(4000) }).strict();
 /** Besides the department rules, a person may read the OKRs of everyone in their reporting line,
@@ -197,7 +199,7 @@ export async function buildApp(options:AppOptions) {
       if(task.owner_id!==user.id) deny(403,'FORBIDDEN','Only the task owner can submit evidence');
       if(task.version!==input.expectedVersion) deny(409,'VERSION_CONFLICT','Task changed; reload before submitting');
       const version=task.submission_version+1;
-      const submission=(await tx.query('INSERT INTO submissions(id,task_id,version,submitted_by,title,description,evidence_url) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *',[randomUUID(),id,version,user.id,input.title,input.description,input.evidenceUrl||null])).rows[0];
+      const submission=(await tx.query('INSERT INTO submissions(id,task_id,version,submitted_by,title,description,evidence_url) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *',[randomUUID(),id,version,user.id,submissionTitle(input.title,input.description),input.description,input.evidenceUrl||null])).rows[0];
       await tx.query('UPDATE tasks SET version=version+1,submission_version=$2,status=$3,board_status=$4,board_done_at=NULL,updated_at=now(),updated_by=$5 WHERE id=$1',[id,version,'submitted','review',user.id]);
       await audit(tx,user,'submission.created',id,{submissionVersion:version,previousReviewInvalidated:true},task.owner_id);return {submission,taskVersion:task.version+1};
     });return reply.code(201).send(result);
