@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS user_avatars(user_id text PRIMARY KEY REFERENCES user
 export const PUBLIC_USER_COLUMNS = 'id,display_name,name_zh,name_en,department_id,role,title,phone,email,wechat,location,timezone,manager_id,avatar_version';
 
 /** Feature grants an admin can give in the app. `products` opens the product test area; `product_cost_detail` shows how prices are calculated. */
-export const GRANTS = ['products', 'product_cost_detail'] as const;
+export const GRANTS = ['products', 'product_cost_detail', 'products_manage', 'pricing_msrp', 'supply', 'supply_manage', 'warehouse', 'warehouse_manage'] as const;
 const id = z.string().min(1).max(100).regex(/^[A-Za-z0-9_-]+$/);
 const text = (max: number) => z.string().trim().max(max);
 const profileInput = z.object({
