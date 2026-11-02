@@ -24,3 +24,20 @@ test('project tasks are real tasks: they land in the assignee’s task center wi
   assert.equal((await call('m2','PATCH',`/projects/${proj.id}`,{milestones:[{id:'ms1',name:'首台样机',date:'2026-11-14',done:false}]})).json().milestones[0].name,'首台样机');
  }finally{await app.close();}
 });
+
+test('project admin: the creator by default or a chosen active member; only the admin manages members',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ const app=await buildApp({db,integrations:{executiveUserIds:['m1']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
+ const tokens:Record<string,string>={};
+ const call=async(who:string,method:'GET'|'POST'|'PATCH',url:string,payload?:any)=>{tokens[who]??=(await issueSession(db,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who]}});};
+ try{
+  const mine=(await call('m2','POST','/projects',{name:'官网改版',startDate:'2026-11-01',endDate:'2026-12-20',members:['m3']})).json();
+  assert.equal(mine.owner_id,'m2','the creator is the project admin by default');assert.equal(mine.canManage,true);
+  const chosen=await call('m2','POST','/projects',{name:'展会筹备',startDate:'2026-11-01',endDate:'2026-12-20',ownerId:'m5',members:['m3']});assert.equal(chosen.statusCode,201,chosen.body);
+  const c=chosen.json();assert.equal(c.owner_id,'m5');assert.deepEqual([...c.members].sort(),['m2','m3','m5']);assert.equal(c.canManage,false,'the creator is no longer the admin');
+  assert.equal((await call('m3','PATCH',`/projects/${mine.id}`,{members:['m3','m6']})).statusCode,403,'a member cannot invite');
+  const invited=await call('m2','PATCH',`/projects/${mine.id}`,{members:['m3','m6']});assert.equal(invited.statusCode,200,invited.body);assert.deepEqual([...invited.json().members].sort(),['m2','m3','m6']);
+  const handed=await call('m2','PATCH',`/projects/${mine.id}`,{ownerId:'m6'});assert.equal(handed.json().owner_id,'m6');
+  assert.equal((await call('m3','PATCH',`/projects/${mine.id}`,{description:'目标与范围'})).statusCode,200,'members still edit the description');
+ }finally{await app.close();}
+});

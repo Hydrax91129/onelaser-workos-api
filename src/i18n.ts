@@ -131,6 +131,8 @@ const zh:Record<string,string>={
   'Your work location is set by an administrator':'工作地点由管理员设置，本人不能修改。',
   'Project not found':'找不到这个项目。',
   'Only project members can change this project':'只有项目成员可以修改这个项目。',
+  'Only the project admin can change members or the project admin':'只有项目管理员可以邀请或移除成员、更换项目管理员。',
+  'The project admin must be an active member of the company':'项目管理员必须是公司在职成员。',
   'The end date must be after the start date':'结束日期必须晚于开始日期。',
   'Choose a stage of this project':'请选择这个项目里的一个分组。',
   'Only project members can change this task':'只有项目成员可以修改这条任务。',

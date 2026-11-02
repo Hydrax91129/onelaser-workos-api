@@ -50,7 +50,9 @@ export async function registerProjectRoutes(app: FastifyInstance, db: Database, 
       (SELECT count(*)::int FROM task_updates u WHERE u.task_id=tasks.id) AS update_count,(SELECT json_build_object('ai_status',c.ai_status,'ai_score',c.ai_score) FROM task_completions c WHERE c.task_id=tasks.id AND c.superseded_at IS NULL ORDER BY c.created_at DESC LIMIT 1) AS completion,${TASK_SOURCE_COLUMNS}
       FROM tasks WHERE project_id=ANY($1::text[]) ORDER BY tasks.due_at,tasks.id`, [pids])).rows : [];
   const updatesOf = async (pids: string[]) => pids.length ? (await db.query('SELECT * FROM project_updates WHERE project_id=ANY($1::text[]) ORDER BY created_at DESC LIMIT 500', [pids])).rows : [];
-  const shape = (p: any, tasks: any[], updates: any[], user: User) => ({ ...p, canEdit: canEdit(user, p), tasks: tasks.filter(t => t.project_id === p.id), updates: updates.filter(u => u.project_id === p.id).slice(0, 30) });
+  // Project admin (owner_id, the creator by default) and company admins manage members and the admin role.
+  const canManage = (user: User, p: any) => p.owner_id === user.id || o.isAdmin(user);
+  const shape = (p: any, tasks: any[], updates: any[], user: User) => ({ ...p, canEdit: canEdit(user, p), canManage: canManage(user, p), tasks: tasks.filter(t => t.project_id === p.id), updates: updates.filter(u => u.project_id === p.id).slice(0, 30) });
 
   app.get('/projects', async req => {
     const user = actorOf(req); await applyAutoStatus(db, user.org_id);
@@ -61,23 +63,25 @@ export async function registerProjectRoutes(app: FastifyInstance, db: Database, 
 
   const projectInput = z.object({
     name: z.string().trim().min(2).max(120), description: z.string().trim().max(4000).optional(), color: color.optional(), icon: z.string().regex(/^[a-z-]{2,40}$/).optional(),
-    startDate: date, endDate: date, members: z.array(id).max(100).optional(), template: z.enum(['blank', 'launch', 'campaign', 'event']).optional(),
+    startDate: date, endDate: date, members: z.array(id).max(100).optional(), ownerId: id.optional(), template: z.enum(['blank', 'launch', 'campaign', 'event']).optional(),
   }).strict();
   app.post('/projects', async (req, reply) => {
     const user = actorOf(req), v = projectInput.parse(req.body);
     if (v.endDate < v.startDate) deny(400, 'INVALID_DATES', 'The end date must be after the start date');
-    const members = [...new Set([user.id, ...(v.members || [])])];
+    const ownerId = v.ownerId || user.id;
+    const members = [...new Set([user.id, ownerId, ...(v.members || [])])];
     const valid = (await db.query('SELECT id FROM users WHERE org_id=$1 AND active=true AND id=ANY($2::text[])', [user.org_id, members])).rows.map((r: any) => r.id);
+    if (!valid.includes(ownerId)) deny(400, 'INVALID_PROJECT_ADMIN', 'The project admin must be an active member of the company');
     const groups = (TEMPLATES[v.template || 'blank']).map(([name, c]) => ({ id: randomUUID().slice(0, 8), name, color: c }));
     const p = (await db.query(`INSERT INTO projects(id,org_id,name,description,color,icon,owner_id,members,start_date,end_date,groups) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
-      [randomUUID(), user.org_id, v.name, v.description || '', v.color || '#3370ff', v.icon || 'rocket-launch', user.id, JSON.stringify(valid), v.startDate, v.endDate, JSON.stringify(groups)])).rows[0];
+      [randomUUID(), user.org_id, v.name, v.description || '', v.color || '#3370ff', v.icon || 'rocket-launch', ownerId, JSON.stringify(valid), v.startDate, v.endDate, JSON.stringify(groups)])).rows[0];
     reply.code(201);
     return shape(p, [], [], user);
   });
 
   const patchInput = z.object({
     name: z.string().trim().min(2).max(120).optional(), description: z.string().trim().max(4000).optional(), color: color.optional(), startDate: date.optional(), endDate: date.optional(),
-    health: health.optional(), members: z.array(id).max(100).optional(),
+    health: health.optional(), members: z.array(id).max(100).optional(), ownerId: id.optional(),
     groups: z.array(z.object({ id: z.string().min(1).max(40), name: z.string().trim().min(1).max(80), color }).strict()).min(1).max(30).optional(),
     milestones: z.array(z.object({ id: z.string().min(1).max(40), name: z.string().trim().min(1).max(120), date, done: z.boolean() }).strict()).max(50).optional(),
   }).strict();
@@ -85,10 +89,13 @@ export async function registerProjectRoutes(app: FastifyInstance, db: Database, 
     const user = actorOf(req), v = patchInput.parse(req.body), pid = id.parse(req.params.id);
     const row = await db.transaction(async tx => {
       const p = await load(tx, user, pid, true); requireEdit(user, p);
+      if ((v.members || v.ownerId) && !canManage(user, p)) deny(403, 'PROJECT_ADMIN_ONLY', 'Only the project admin can change members or the project admin');
+      const ownerId = v.ownerId || p.owner_id;
       let members = p.members;
-      if (v.members) members = (await tx.query('SELECT id FROM users WHERE org_id=$1 AND active=true AND id=ANY($2::text[])', [user.org_id, [...new Set([p.owner_id, ...v.members])]])).rows.map((r: any) => r.id);
-      const updated = (await tx.query(`UPDATE projects SET name=$2,description=$3,color=$4,start_date=$5,end_date=$6,health=$7,members=$8,groups=$9,milestones=$10,updated_at=now() WHERE id=$1 RETURNING *`,
-        [p.id, v.name ?? p.name, v.description ?? p.description, v.color ?? p.color, v.startDate ?? p.start_date, v.endDate ?? p.end_date, v.health ?? p.health, JSON.stringify(members), JSON.stringify(v.groups ?? p.groups), JSON.stringify(v.milestones ?? p.milestones)])).rows[0];
+      if (v.members || v.ownerId) members = (await tx.query('SELECT id FROM users WHERE org_id=$1 AND active=true AND id=ANY($2::text[])', [user.org_id, [...new Set([ownerId, ...(v.members || p.members)])]])).rows.map((r: any) => r.id);
+      if (!members.includes(ownerId)) deny(400, 'INVALID_PROJECT_ADMIN', 'The project admin must be an active member of the company');
+      const updated = (await tx.query(`UPDATE projects SET name=$2,description=$3,color=$4,start_date=$5,end_date=$6,health=$7,members=$8,groups=$9,milestones=$10,owner_id=$11,updated_at=now() WHERE id=$1 RETURNING *`,
+        [p.id, v.name ?? p.name, v.description ?? p.description, v.color ?? p.color, v.startDate ?? p.start_date, v.endDate ?? p.end_date, v.health ?? p.health, JSON.stringify(members), JSON.stringify(v.groups ?? p.groups), JSON.stringify(v.milestones ?? p.milestones), ownerId])).rows[0];
       return updated;
     });
     return shape(row, await projectTasks([pid]), await updatesOf([pid]), user);
