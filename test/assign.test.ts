@@ -21,7 +21,8 @@ test('anyone can assign a task to anyone in the organization; the assigner revie
   const t=r.json();assert.equal(t.owner_id,'m5');assert.equal(t.reviewer_id,'m3');assert.equal(t.department_id,'product');assert.equal(t.source_kind,'direct');assert.equal(t.assigned_by_name,'许夏');
   assert.ok((await call('m5','GET','/tasks')).json().items.some((x:any)=>x.id===t.id),'assignee sees it');
   const board=(await call('m5','GET','/task-board')).json().items.find((x:any)=>x.id===t.id);assert.ok(board);assert.equal(board.source_kind,'direct');
-  assert.ok((await call('m3','GET','/task-board')).json().items.some((x:any)=>x.id===t.id),'assigner in another department tracks it on the board');
+  assert.ok((await call('m5','GET','/task-board')).json().items.some((x:any)=>x.id===t.id),'the assignee sees it in their personal Task hub');
+  assert.ok(!(await call('m3','GET','/task-board')).json().items.some((x:any)=>x.id===t.id),'the assigner tracks it under “tasks I assigned”, not in their own hub');
   assert.ok((await call('m4','GET','/tasks')).json().items.some((x:any)=>x.id===t.id),'the assignee’s department manager sees it');
   assert.ok(!(await call('m2','GET','/tasks')).json().items.some((x:any)=>x.id===t.id),'unrelated colleagues do not');
   const a=(await call('m5','GET','/tasks/assignments')).json();const mine=a.toMe.find((x:any)=>x.id===t.id);assert.ok(mine);assert.equal(mine.assigned_by_name,'许夏');

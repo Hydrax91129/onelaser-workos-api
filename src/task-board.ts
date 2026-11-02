@@ -9,6 +9,7 @@ import { TASK_SOURCE_COLUMNS } from './assign.js';
 import { deny } from './errors.js';
 
 export const boardSchema = `
+CREATE TABLE IF NOT EXISTS task_board_personal(user_id text PRIMARY KEY, org_id text NOT NULL, groups jsonb NOT NULL, updated_at timestamptz NOT NULL DEFAULT now());
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS board_group_id text NOT NULL DEFAULT 'todo';
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS board_status text NOT NULL DEFAULT 'not_started';
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS board_priority text NOT NULL DEFAULT '';
@@ -48,9 +49,9 @@ export const defaultBoardConfig=()=>({
  priority:[{id:'urgent',en:'Urgent',zh:'紧急',color:'#ff7cd1'},{id:'high',en:'High',zh:'高',color:'#6646aa'},{id:'medium',en:'Medium',zh:'中',color:'#8581df'},{id:'low',en:'Low',zh:'低',color:'#8eb8f9'},{id:'',en:'Unassigned',zh:'未设置',color:'#797e93'}],
  category:[{id:'hr',en:'B-HR',zh:'B-人事',color:'#ff8358'},{id:'finance',en:'B-Finance',zh:'B-财务',color:'#e96a7d'},{id:'legal',en:'B-Legal',zh:'B-法务',color:'#349ecd'},{id:'operations',en:'B-Operations',zh:'B-运营',color:'#ca5d77'},{id:'marketing',en:'B-Marketing',zh:'B-市场',color:'#ffd533'},{id:'personal',en:'Personal',zh:'个人事务',color:'#ff44a1'}]
 });
-const configInput=z.object({expectedVersion:z.number().int().positive(),groups:z.array(group).min(2).max(40),status:z.array(label).min(5).max(7),priority:z.array(label).length(5),category:z.array(label).max(40)}).strict().superRefine((v,c)=>{
- for(const k of ['groups','status','priority','category'] as const)if(new Set(v[k].map(x=>x.id)).size!==v[k].length)c.addIssue({code:'custom',path:[k],message:'Duplicate labels'});
- if(!['todo','completed'].every(x=>v.groups.some(g=>g.id===x)))c.addIssue({code:'custom',path:['groups'],message:'Default groups required'});
+const configInput=z.object({expectedVersion:z.number().int().positive(),groups:z.array(group).min(2).max(40).optional(),status:z.array(label).min(5).max(7),priority:z.array(label).length(5),category:z.array(label).max(40)}).strict().superRefine((v,c)=>{
+ for(const k of ['groups','status','priority','category'] as const)if(v[k]&&new Set(v[k]!.map(x=>x.id)).size!==v[k]!.length)c.addIssue({code:'custom',path:[k],message:'Duplicate labels'});
+ if(v.groups&&!['todo','completed'].every(x=>v.groups!.some(g=>g.id===x)))c.addIssue({code:'custom',path:['groups'],message:'Default groups required'});
  if(!statusIds.every(x=>v.status.some(g=>g.id===x))||!priorityIds.every(x=>v.priority.some(g=>g.id===x)))c.addIssue({code:'custom',path:['status'],message:'Stable label identifiers required'});
  if(v.category.some(x=>!x.id))c.addIssue({code:'custom',path:['category'],message:'Blank category is reserved'});
 });
@@ -70,7 +71,7 @@ export async function boardConfig(tx:Queryable,user:User){
 export async function validateBoardCreation(tx:Queryable,user:User,input:any){
  const config=(await boardConfig(tx,user)).data;
  for(const [key,list] of [['boardPriority','priority'],['boardCategory','category']] as const)if(input[key]&&!config[list].some((x:any)=>x.id===input[key]))deny(400,'INVALID_BOARD_LABEL','Select an existing board label');
- if(input.boardGroupId&&!config.groups.some((x:any)=>x.id===input.boardGroupId&&x.id!=='completed'))deny(400,'INVALID_BOARD_GROUP','Select an active group');
+ if(input.boardGroupId&&input.boardGroupId!=='completed'&&!config.groups.some((x:any)=>x.id===input.boardGroupId)&&!(await personalGroups(tx,user)).some((x:any)=>x.id===input.boardGroupId))deny(400,'INVALID_BOARD_GROUP','Select an active group');
  if(input.parentTaskId){const parent=(await tx.query('SELECT * FROM tasks WHERE id=$1 FOR UPDATE',[input.parentTaskId])).rows[0];if(!visibleTask(user,parent)||parent.parent_task_id)deny(400,'INVALID_PARENT','Select a visible top-level parent task');return parent.board_group_id==='completed'?'todo':parent.board_group_id;}
  return input.boardGroupId||'todo';
 }
@@ -78,29 +79,70 @@ export function effectiveGroup(task:any,tasks:any[],now=Date.now()){
  const oldDone=(t:any)=>t.board_status==='done'&&t.board_done_at&&new Date(t.board_done_at).getTime()<=now-COMPLETION_LOCK_MS;
  return oldDone(task)&&tasks.filter(t=>t.parent_task_id===task.id).every(oldDone)?'completed':task.board_group_id;
 }
-export function registerTaskBoardRoutes(app:FastifyInstance,db:Database){
+/* Personal groups: the Task hub is each person's own list, so everyone arranges their own groups.
+ * Until someone edits them, their groups are the department's defaults. "completed" always stays last. */
+export async function personalGroups(tx:Queryable,user:User){
+ const row=(await tx.query('SELECT groups FROM task_board_personal WHERE user_id=$1 AND org_id=$2',[user.id,user.org_id])).rows[0];
+ const base=row?.groups||(await boardConfig(tx,user)).data.groups.filter((g:any)=>g.id!=='completed');
+ const done=(await boardConfig(tx,user)).data.groups.find((g:any)=>g.id==='completed')||{id:'completed',en:'Completed',zh:'已完成',color:'#00c875'};
+ return [...base.filter((g:any)=>g.id!=='completed'),done];
+}
+async function reportsSet(db:Queryable,orgId:string,userId:string){
+ const rows=(await db.query('SELECT id,manager_id FROM users WHERE org_id=$1',[orgId])).rows as {id:string;manager_id:string|null}[];
+ const out=new Set<string>();let frontier=[userId];
+ for(let d=0;d<20&&frontier.length;d++){const next=rows.filter(r=>r.manager_id&&frontier.includes(r.manager_id)&&!out.has(r.id)&&r.id!==userId).map(r=>r.id);next.forEach(x=>out.add(x));frontier=next;}
+ return out;
+}
+export function registerTaskBoardRoutes(app:FastifyInstance,db:Database,o:{isAdmin?:(u:User)=>boolean}={}){
  const actor=(u:User|null)=>u||deny(401,'UNAUTHENTICATED','Authentication is required');
  app.get('/task-board',async req=>{
+  // The Task hub is personal: it lists the signed-in person's own tasks. A manager (or an admin) can open
+  // a report's Task hub read-only from Task analysis with ?person=<id>.
   const user=actor(req.actor);await applyAutoStatus(db,user.org_id);const config=await boardConfig(db,user);
-  // Nobody browses their superiors' tasks; tasks they assigned to or review for a superior stay visible.
-  const above=new Set<string>();{let cur=(await db.query('SELECT manager_id FROM users WHERE id=$1',[user.id])).rows[0]?.manager_id;for(let i=0;cur&&i<20&&!above.has(cur);i++){above.add(cur);cur=(await db.query('SELECT manager_id FROM users WHERE id=$1',[cur])).rows[0]?.manager_id;}}
-  // Scope before any parent/group calculation: hidden tasks never contribute names or counts.
-  const tasks=(await db.query('SELECT tasks.*,CASE WHEN tasks.status=\'accepted\' THEN (SELECT r.created_at FROM reviews r WHERE r.task_id=tasks.id AND r.submission_version=tasks.submission_version AND r.decision=\'accept\' ORDER BY r.created_at DESC,r.id DESC LIMIT 1) ELSE NULL END AS accepted_at,(SELECT count(*)::int FROM task_updates u WHERE u.task_id=tasks.id AND u.org_id=tasks.org_id) AS update_count,(SELECT json_build_object(\'ai_status\',c.ai_status,\'ai_score\',c.ai_score,\'ai_summary\',c.ai_summary) FROM task_completions c WHERE c.task_id=tasks.id AND c.superseded_at IS NULL ORDER BY c.created_at DESC LIMIT 1) AS completion,(SELECT max(u.created_at) FROM task_updates u WHERE u.task_id=tasks.id) AS last_update_at,(SELECT count(*)::int FROM task_attachments a WHERE a.task_id=tasks.id) AS attachment_count,'+TASK_SOURCE_COLUMNS+' FROM tasks WHERE org_id=$1 AND (department_id=$2 OR owner_id=$3 OR reviewer_id=$3) ORDER BY created_at,id LIMIT 1000',[user.org_id,user.department_id,user.id])).rows.filter((t:any)=>visibleTask(user,t)&&(!above.has(t.owner_id)||t.reviewer_id===user.id||t.assigned_by===user.id||t.created_by===user.id));
-  const allChildren=(await db.query('SELECT parent_task_id,board_status,board_done_at FROM tasks WHERE org_id=$1 AND department_id=$2 AND parent_task_id IS NOT NULL',[user.org_id,user.department_id])).rows;
-  const now=Date.now(),items=tasks.map(t=>({...t,effective_group_id:effectiveGroup(t,allChildren,now)}));
+  const asked=typeof (req.query as any)?.person==='string'?String((req.query as any).person).slice(0,100):'';
+  let target:any=user,readOnly=false;
+  if(asked&&asked!==user.id){
+   const allowed=o.isAdmin?.(user)||(await reportsSet(db,user.org_id,user.id)).has(asked);
+   if(!allowed)deny(403,'TASK_HUB_FORBIDDEN','You can only open the Task hub of people who report to you','只能查看向你汇报的同事的任务。');
+   target=(await db.query('SELECT * FROM users WHERE id=$1 AND org_id=$2',[asked,user.org_id])).rows[0];if(!target)deny(404,'NOT_FOUND','Member not found');readOnly=true;
+  }
+  const tasks=(await db.query('SELECT tasks.*,CASE WHEN tasks.status=\'accepted\' THEN (SELECT r.created_at FROM reviews r WHERE r.task_id=tasks.id AND r.submission_version=tasks.submission_version AND r.decision=\'accept\' ORDER BY r.created_at DESC,r.id DESC LIMIT 1) ELSE NULL END AS accepted_at,(SELECT count(*)::int FROM task_updates u WHERE u.task_id=tasks.id AND u.org_id=tasks.org_id) AS update_count,(SELECT json_build_object(\'ai_status\',c.ai_status,\'ai_score\',c.ai_score,\'ai_summary\',c.ai_summary) FROM task_completions c WHERE c.task_id=tasks.id AND c.superseded_at IS NULL ORDER BY c.created_at DESC LIMIT 1) AS completion,(SELECT max(u.created_at) FROM task_updates u WHERE u.task_id=tasks.id) AS last_update_at,(SELECT count(*)::int FROM task_attachments a WHERE a.task_id=tasks.id) AS attachment_count,'+TASK_SOURCE_COLUMNS+' FROM tasks WHERE org_id=$1 AND owner_id=$2 ORDER BY created_at,id LIMIT 1000',[user.org_id,target.id])).rows;
+  const ids=tasks.map((t:any)=>t.id);
+  const allChildren=ids.length?(await db.query('SELECT parent_task_id,board_status,board_done_at FROM tasks WHERE parent_task_id=ANY($1::text[])',[ids])).rows:[];
+  const groups=await personalGroups(db,target),known=new Set(groups.map((g:any)=>g.id)),first=groups[0]?.id||'todo';
+  const now=Date.now(),items=tasks.map((t:any)=>{const g=effectiveGroup(t,allChildren,now);return {...t,effective_group_id:known.has(g)?g:first};});
   const view=(await db.query('SELECT data FROM task_board_views WHERE user_id=$1 AND org_id=$2',[user.id,user.org_id])).rows[0]?.data;
-  return {items,config:config.data,version:config.version,view:view||{sort:[{field:'priority',direction:'asc'},{field:'due',direction:'asc'},{field:'category',direction:'asc'}],groupBy:'group',hidden:[],collapsed:[]},scope:{kind:user.role==='manager'?'department':'assigned',departmentId:user.department_id},serverNow:new Date(now).toISOString(),limit:1000};
+  return {items,config:{...config.data,groups},version:config.version,view:view||{sort:[{field:'priority',direction:'asc'},{field:'due',direction:'asc'},{field:'category',direction:'asc'}],groupBy:'group',hidden:[],collapsed:[]},scope:{kind:'personal',person:target.id,personName:target.display_name,readOnly},serverNow:new Date(now).toISOString(),limit:1000};
+ });
+ // Personal groups: add, rename, recolour, reorder and delete. Deleting a group moves its tasks to another group.
+ app.post('/task-board/groups',async req=>{
+  const user=actor(req.actor),v=z.object({groups:z.array(group).min(1).max(40),remove:z.object({id,moveTo:id}).strict().optional()}).strict().parse(req.body);
+  const list=v.groups.filter(g=>g.id!=='completed');
+  if(!list.length)deny(400,'GROUP_REQUIRED','Keep at least one group','至少保留一个分组。');
+  if(new Set(list.map(g=>g.id)).size!==list.length)deny(400,'INVALID_BOARD_GROUP','Group names must be unique','分组不能重复。');
+  return db.transaction(async tx=>{
+   if(v.remove){
+    if(v.remove.id==='completed')deny(400,'INVALID_BOARD_GROUP','The Completed group is managed automatically','“已完成”分组由系统自动管理，不能删除。');
+    if(!list.some(g=>g.id===v.remove!.moveTo))deny(400,'INVALID_BOARD_GROUP','Choose a group to move the tasks to','请选择把任务移到哪个分组。');
+    await tx.query('UPDATE tasks SET board_group_id=$3,version=version+1,updated_at=now(),updated_by=$2 WHERE org_id=$1 AND owner_id=$2 AND board_group_id=$4',[user.org_id,user.id,v.remove.moveTo,v.remove.id]);
+   }
+   await tx.query('INSERT INTO task_board_personal(user_id,org_id,groups) VALUES($1,$2,$3) ON CONFLICT(user_id) DO UPDATE SET groups=$3,updated_at=now()',[user.id,user.org_id,JSON.stringify(list)]);
+   await log(tx,user,'task_board.groups.updated',user.id,{count:list.length,removed:v.remove?.id||null},user.id);
+   return {groups:await personalGroups(tx,user)};
+  });
  });
  app.post('/task-board/config',async req=>{
   const user=actor(req.actor),v=configInput.parse(req.body);if(user.role!=='manager')deny(403,'FORBIDDEN','A manager must edit shared board settings');
   return db.transaction(async tx=>{await boardConfig(tx,user);const old=(await tx.query('SELECT * FROM task_board_config WHERE org_id=$1 AND department_id=$2 FOR UPDATE',[user.org_id,user.department_id])).rows[0];
    if(old.version!==v.expectedVersion)deny(409,'VERSION_CONFLICT','Board settings changed; reload before saving');
-   const removed=old.data.groups.filter((g:any)=>!v.groups.some(x=>x.id===g.id));
+   // Groups are personal now (see /task-board/groups); a request without groups keeps the department defaults.
+   const groups=v.groups||old.data.groups;
+   const removed=old.data.groups.filter((g:any)=>!groups.some((x:any)=>x.id===g.id));
    if(removed.length){const used=await tx.query('SELECT id FROM tasks WHERE org_id=$1 AND department_id=$2 AND board_group_id=ANY($3::text[]) LIMIT 1',[user.org_id,user.department_id,removed.map((x:any)=>x.id)]);if(used.rows.length)deny(400,'GROUP_NOT_EMPTY','Move tasks before removing their group');}
    // Labels already used by records cannot disappear silently.
    const removedCats=old.data.category.filter((g:any)=>!v.category.some(x=>x.id===g.id));
    if(removedCats.length&&(await tx.query('SELECT id FROM tasks WHERE org_id=$1 AND department_id=$2 AND board_category=ANY($3::text[]) LIMIT 1',[user.org_id,user.department_id,removedCats.map((x:any)=>x.id)])).rows.length)deny(400,'LABEL_IN_USE','A category is in use');
-   const {expectedVersion,...data}=v;
+   const {expectedVersion,...rest}=v,data={...rest,groups};
    await tx.query('UPDATE task_board_config SET version=version+1,data=$3 WHERE org_id=$1 AND department_id=$2',[user.org_id,user.department_id,JSON.stringify(data)]);
    await log(tx,user,'task_board.config.updated',user.department_id,{version:old.version+1});return {config:data,version:old.version+1};
   });
@@ -161,7 +203,8 @@ export function registerTaskBoardRoutes(app:FastifyInstance,db:Database){
    const config=(await boardConfig(tx,user)).data;
    if(v.priority!==undefined&&!config.priority.some((x:any)=>x.id===v.priority))deny(400,'INVALID_BOARD_LABEL','Select an existing board label');
    if(v.category&&!config.category.some((x:any)=>x.id===v.category))deny(400,'INVALID_BOARD_LABEL','Select an existing board label');
-   if(v.groupId&&(!config.groups.some((x:any)=>x.id===v.groupId)||v.groupId==='completed'))deny(400,'INVALID_BOARD_GROUP','Completed is managed by the three-day completion rule');
+   const ownGroups=v.groupId?[...await personalGroups(tx,user),...(task.owner_id!==user.id?await personalGroups(tx,{...user,id:task.owner_id} as User):[])]:[];
+   if(v.groupId&&((!config.groups.some((x:any)=>x.id===v.groupId)&&!ownGroups.some((x:any)=>x.id===v.groupId))||v.groupId==='completed'))deny(400,'INVALID_BOARD_GROUP','Completed is managed by the three-day completion rule');
    if(v.groupId&&user.role!=='manager'&&(await tx.query('SELECT id FROM tasks WHERE parent_task_id=$1 AND owner_id<>$2 LIMIT 1',[taskId,user.id])).rows.length)deny(403,'FORBIDDEN','A manager must move a parent with other owners');
    if(v.groupId&&task.parent_task_id)deny(400,'INVALID_BOARD_GROUP','Move the parent task to move its subitems');
    // Tasks that come from an OKR, a project or a direct assignment keep their definition: the assignee updates

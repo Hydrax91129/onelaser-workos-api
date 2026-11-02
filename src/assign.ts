@@ -175,6 +175,28 @@ export async function registerAssignRoutes(app: FastifyInstance, db: Database, o
     return { toMe, byMe };
   });
 
+  /* 催办: the person who assigned (or reviews) a task reminds its owner. One reminder per task per day;
+   * it appears in the owner's follow-up reminders and goes to DingTalk when that is configured. */
+  const isOpenTask = (t: any) => !['accepted'].includes(t.status) && !['done', 'abandoned'].includes(t.board_status);
+  const canNudge = (user: User, t: any) => t.owner_id !== user.id && (t.reviewer_id === user.id || (t.assigned_by || t.created_by) === user.id || o.isAdmin(user));
+  const nudgeText = (user: User, t: any) => { const due = new Date(t.due_at), late = due.getTime() < now(); return `${user.display_name} 催办：任务「${t.title}」${late ? '已逾期' : '截止'} ${due.getMonth() + 1}/${due.getDate()}，请尽快更新进展；如有阻碍请直接在任务里说明。`; };
+  app.post<{ Params: { id: string } }>('/tasks/:id/nudge', async req => {
+    const user = actorOf(req), taskId = z.string().min(1).max(100).parse(req.params.id);
+    const t = (await db.query('SELECT * FROM tasks WHERE id=$1 AND org_id=$2', [taskId, user.org_id])).rows[0];
+    if (!t) deny(404, 'NOT_FOUND', 'Task not found');
+    if (!canNudge(user, t)) deny(403, 'NUDGE_FORBIDDEN', 'Only the person who assigned or reviews this task can send a reminder', '只有下达或验收这个任务的人可以催办。');
+    if (!isOpenTask(t)) deny(409, 'NUDGE_TASK_CLOSED', 'This task is already finished', '这个任务已经结束，不需要催办。');
+    const sent = await deliver(t, 'manual', t.owner_id, null, nudgeText(user, t));
+    return { sent, alreadyToday: !sent };
+  });
+  app.post('/tasks/nudge-due', async req => {
+    const user = actorOf(req), horizon = new Date(now() + 3 * DAY).toISOString();
+    const rows = (await db.query(`SELECT * FROM tasks WHERE org_id=$1 AND owner_id<>$2 AND (reviewer_id=$2 OR COALESCE(assigned_by,created_by)=$2) AND due_at<=$3 AND status<>'accepted' AND board_status NOT IN ('done','abandoned') ORDER BY due_at LIMIT 200`, [user.org_id, user.id, horizon])).rows;
+    let sent = 0;
+    for (const t of rows) if (await deliver(t, 'manual', t.owner_id, null, nudgeText(user, t))) sent++;
+    return { total: rows.length, sent, alreadyToday: rows.length - sent };
+  });
+
   app.get('/nudges', async req => {
     const user = actorOf(req);
     const rows = (await db.query(`SELECT n.*, t.title AS task_title, t.due_at, t.owner_id, (SELECT display_name FROM users WHERE id=t.owner_id) AS owner_name, (SELECT json_build_object('zh',name_zh,'en',name_en) FROM users WHERE id=t.owner_id) AS owner_names

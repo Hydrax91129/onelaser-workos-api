@@ -37,7 +37,7 @@ test('final publish: needs 100 points and 100% KRs, creates KR tasks, locks the 
  }finally{await app.close();}
 });
 
-test('task board: nobody browses their superiors’ tasks unless they assigned or review them',async()=>{
+test('the Task hub is personal: own tasks only; managers open their reports’ hub read-only, never the other way',async()=>{
  const db=await createDatabase();await db.exec(schema);await seedDemo(db);
  await db.query("UPDATE users SET manager_id='m1' WHERE id IN ('m2','m3')");await db.query("UPDATE users SET role='manager' WHERE id='m2'");
  const app=await buildApp({db,integrations:{executiveUserIds:['m4']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
@@ -49,6 +49,11 @@ test('task board: nobody browses their superiors’ tasks unless they assigned o
   const r=await call('m2','POST','/tasks/assign',{assigneeId:'m1',title:'下属给上级下达的任务',dueAt:new Date(Date.now()+3*864e5).toISOString(),description:'请上级在周五前确认下季度的推广预算',criteria:['确认预算']});assert.equal(r.statusCode,201,r.body);const toBoss=r.json();
   const board=(await call('m2','GET','/task-board')).json().items.map((t:any)=>t.id);
   assert.ok(!board.includes(mine.id),'the boss’s own task is hidden from the report');
-  assert.ok(board.includes(toBoss.id),'a task the report assigned to the boss stays visible');
+  assert.ok(!board.includes(toBoss.id),'tasks the report assigned to others are tracked in “tasks I assigned”, not in the personal hub');
+  assert.ok((await call('m2','GET','/tasks/assignments')).json().byMe.some((t:any)=>t.id===toBoss.id));
+  const bossView=await call('m1','GET','/task-board?person=m2');assert.equal(bossView.statusCode,200);assert.equal(bossView.json().scope.readOnly,true);
+  assert.equal((await call('m2','GET','/task-board?person=m1')).statusCode,403,'reports cannot open their manager’s hub');
+  assert.equal((await call('m4','GET','/task-board?person=m1')).statusCode,200,'company admins can open anyone’s hub');
+  assert.ok((await call('m1','GET','/task-board')).json().items.every((t:any)=>t.owner_id==='m1'));
  }finally{await app.close();}
 });
