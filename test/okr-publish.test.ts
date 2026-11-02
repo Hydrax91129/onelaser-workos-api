@@ -57,3 +57,20 @@ test('the Task hub is personal: own tasks only; managers open their reports’ h
   assert.ok((await call('m1','GET','/task-board')).json().items.every((t:any)=>t.owner_id==='m1'));
  }finally{await app.close();}
 });
+
+test('a manager anywhere above the owner (or the project admin) can move the due date, nothing else',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ await db.query("UPDATE users SET manager_id='m1' WHERE id='m4'");await db.query("UPDATE users SET manager_id='m4' WHERE id='m5'");
+ const app=await buildApp({db,integrations:{executiveUserIds:['m6']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
+ const tokens:Record<string,string>={};
+ const call=async(who:string,method:'GET'|'POST',url:string,payload?:any)=>{tokens[who]??=(await issueSession(db,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who]}});};
+ try{
+  await db.query("INSERT INTO tasks(id,org_id,department_id,owner_id,reviewer_id,created_by,title,description,criteria,baseline_due_at,due_at) VALUES('m5-own','demo','product','m5','m4','m5','赵然自己的任务','任务说明内容','[]',now()+interval '3 days',now()+interval '3 days')");
+  const t=(await db.query("SELECT * FROM tasks WHERE id='m5-own'")).rows[0];
+  const due=new Date(Date.now()+9*864e5).toISOString();
+  const r=await call('m1','POST','/tasks/m5-own/board',{expectedVersion:t.version,dueAt:due});assert.equal(r.statusCode,200,r.body);
+  const a=await call('m6','POST','/tasks/m5-own/board',{expectedVersion:r.json().version,dueAt:due});assert.equal(a.statusCode,200,'a company admin outside the line can move the due date');
+  assert.equal((await call('m6','POST','/tasks/m5-own/board',{expectedVersion:a.json().version,title:'改个名字'})).statusCode,403,'…but nothing else');
+  assert.equal((await call('m2','POST','/tasks/m5-own/board',{expectedVersion:r.json().version,dueAt:due})).statusCode,404,'not in the reporting line');
+ }finally{await app.close();}
+});

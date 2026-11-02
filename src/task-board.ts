@@ -198,7 +198,13 @@ export function registerTaskBoardRoutes(app:FastifyInstance,db:Database,o:{isAdm
  app.post<{Params:{id:string}}>('/tasks/:id/board',async req=>{
   const user=actor(req.actor),v=patchInput.parse(req.body),taskId=id.parse(req.params.id);
   return db.transaction(async tx=>{
-   const task=(await tx.query('SELECT * FROM tasks WHERE id=$1 FOR UPDATE',[taskId])).rows[0];if(!visibleTask(user,task))deny(404,'NOT_FOUND','Task not found');
+   const task=(await tx.query('SELECT * FROM tasks WHERE id=$1 FOR UPDATE',[taskId])).rows[0];
+   // Overseers may move a task's due date even when the task is not theirs: anyone above the owner in the
+   // reporting line, the admin of the task's project, and company administrators. Only the due date.
+   const overseer=!!task&&task.org_id===user.org_id&&task.owner_id!==user.id&&(o.isAdmin?.(user)||(await reportsSet(tx,user.org_id,user.id)).has(task.owner_id)||(!!task.project_id&&(await tx.query('SELECT 1 FROM projects WHERE id=$1 AND owner_id=$2',[task.project_id,user.id])).rows.length>0));
+   if(!visibleTask(user,task)&&!overseer)deny(404,'NOT_FOUND','Task not found');
+   const onlyDue=Object.keys(v).every(k=>k==='expectedVersion'||k==='dueAt');
+   if(!visibleTask(user,task)&&!onlyDue)deny(403,'OVERSEER_DUE_ONLY','As their manager or project admin you can change the due date of this task, nothing else','你可以修改下属或项目内任务的截止时间，其他内容由负责人修改。');
    if(task.version!==v.expectedVersion)deny(409,'VERSION_CONFLICT','Task changed; reload before saving');
    const config=(await boardConfig(tx,user)).data;
    if(v.priority!==undefined&&!config.priority.some((x:any)=>x.id===v.priority))deny(400,'INVALID_BOARD_LABEL','Select an existing board label');
