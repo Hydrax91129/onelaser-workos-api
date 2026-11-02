@@ -17,8 +17,10 @@
   },
   "dependencies": {
     "@electric-sql/pglite": "0.5.12",
+    "@types/nodemailer": "^8.0.2",
     "fastify": "^5.0.0",
     "jose": "^6.2.14",
+    "nodemailer": "^6.10.1",
     "pg": "^8.0.0",
     "zod": "^4.0.0"
   },

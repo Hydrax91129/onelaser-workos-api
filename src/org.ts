@@ -17,6 +17,7 @@ export const orgSchema = `
 ALTER TABLE users ADD COLUMN IF NOT EXISTS title text NOT NULL DEFAULT '';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS phone text NOT NULL DEFAULT '';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS email text NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email_locked boolean NOT NULL DEFAULT false;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS wechat text NOT NULL DEFAULT '';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS location text NOT NULL DEFAULT '';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone text NOT NULL DEFAULT '';
@@ -60,6 +61,7 @@ const memberPatch = z.object({
   role: z.enum(['employee', 'manager']).optional(),
   isAdmin: z.boolean().optional(),
   grants: z.array(z.enum(GRANTS)).max(GRANTS.length).optional(),
+  email: z.string().trim().toLowerCase().max(200).email().optional(),
 }).strict().refine(v => Object.keys(v).length > 0, 'Nothing to change');
 
 const AVATAR = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/;
@@ -88,6 +90,13 @@ export async function registerOrgRoutes(app: FastifyInstance, db: Database, o: O
     const user = actorOf(req), input = profileInput.parse(req.body);
     // Work location is part of the org record: only administrators set it (Organization & permissions).
     if (input.location !== undefined && !isAdmin(user as any, o)) deny(403, 'LOCATION_ADMIN_ONLY', 'Your work location is set by an administrator');
+    // Work email is required for notifications; once an administrator has set it, only an administrator can change it.
+    if (input.email !== undefined) {
+      if (!input.email) deny(400, 'EMAIL_REQUIRED', 'A work email is required');
+      input.email = input.email.toLowerCase();
+      const locked = (await db.query('SELECT email_locked FROM users WHERE id=$1', [user.id])).rows[0]?.email_locked === true;
+      if (locked && !isAdmin(user as any, o)) deny(403, 'EMAIL_LOCKED', 'Your work email was set by an administrator and cannot be changed');
+    }
     const sets: string[] = [], values: unknown[] = [user.id];
     const column: Record<string, string> = { nameZh: 'name_zh', nameEn: 'name_en' };
     for (const [key, value] of Object.entries(input)) { values.push(value); sets.push(`${column[key] || key}=$${values.length}`); }
@@ -125,7 +134,7 @@ export async function registerOrgRoutes(app: FastifyInstance, db: Database, o: O
   app.get('/org/members', async req => {
     const user = actorOf(req);
     if (!isAdmin(user, o)) deny(403, 'FORBIDDEN', 'Administrator access is required');
-    const rows = (await db.query(`SELECT ${PUBLIC_USER_COLUMNS},active,is_admin,role_override,grants,disabled_at,login_email,(password_hash IS NOT NULL) AS has_password,invited_by,(SELECT e.user_id IS NOT NULL FROM external_identities e WHERE e.user_id=users.id LIMIT 1) AS dingtalk FROM users WHERE org_id=$1 ORDER BY active DESC,display_name,id`, [user.org_id])).rows;
+    const rows = (await db.query(`SELECT ${PUBLIC_USER_COLUMNS},active,is_admin,role_override,grants,disabled_at,login_email,(password_hash IS NOT NULL) AS has_password,invited_by,email_locked,(SELECT e.user_id IS NOT NULL FROM external_identities e WHERE e.user_id=users.id LIMIT 1) AS dingtalk FROM users WHERE org_id=$1 ORDER BY active DESC,display_name,id`, [user.org_id])).rows;
     return { items: rows.map(r => ({ ...r, executive: o.executiveUserIds.includes(r.id), admin: o.executiveUserIds.includes(r.id) || r.is_admin === true, adminSource: o.executiveUserIds.includes(r.id) ? 'deployment' : r.is_admin ? 'app' : null })) };
   });
 
@@ -157,8 +166,8 @@ export async function registerOrgRoutes(app: FastifyInstance, db: Database, o: O
       const role = input.role ?? member.role, override = input.role ?? member.role_override;
       const grants = input.grants ? [...new Set(input.grants)] : member.grants;
       if (input.grants?.includes('product_cost_detail') && !input.grants.includes('products')) deny(400, 'GRANT_DEPENDENCY', 'Cost details require product area access');
-      const row = (await tx.query(`UPDATE users SET manager_id=$2,title=$3,role=$4,role_override=$5,is_admin=$6,grants=$7,location=$8,name_zh=$9,name_en=$10 WHERE id=$1 RETURNING ${PUBLIC_USER_COLUMNS},active,is_admin,role_override,grants`,
-        [member.id, manager, input.title ?? member.title, role, override, input.isAdmin ?? member.is_admin, JSON.stringify(grants), input.location ?? member.location, input.nameZh ?? member.name_zh, input.nameEn ?? member.name_en])).rows[0];
+      const row = (await tx.query(`UPDATE users SET manager_id=$2,title=$3,role=$4,role_override=$5,is_admin=$6,grants=$7,location=$8,name_zh=$9,name_en=$10,email=$11,email_locked=$12 WHERE id=$1 RETURNING ${PUBLIC_USER_COLUMNS},active,is_admin,role_override,grants,email_locked`,
+        [member.id, manager, input.title ?? member.title, role, override, input.isAdmin ?? member.is_admin, JSON.stringify(grants), input.location ?? member.location, input.nameZh ?? member.name_zh, input.nameEn ?? member.name_en, input.email ?? member.email, input.email !== undefined ? true : member.email_locked === true])).rows[0];
       await audit(tx, user, 'org.member_updated', member.id, input, member.id);
       return { ...row, executive: o.executiveUserIds.includes(row.id), admin: o.executiveUserIds.includes(row.id) || row.is_admin === true };
     });

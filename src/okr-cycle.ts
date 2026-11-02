@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Database } from './db.js';
 import type { User } from './auth.js';
-import type { Notifier } from './assign.js';
+import { sentChannels, type Notifier } from './assign.js';
 import { deny } from './errors.js';
 
 export type CycleOptions = { notify?: Notifier | null; intervalMs?: number; now?: () => number; timeZone?: string; isAdmin: (u: User) => boolean };
@@ -43,7 +43,7 @@ export async function registerOkrCycle(app: FastifyInstance, db: Database, o: Cy
       [randomUUID(), orgId, key, userId, kind, day, message])).rows[0];
     if (!inserted) return 0;
     const channels = ['app'];
-    if (o.notify) { try { if (await o.notify(userId, `【WorkOS】${message}`)) channels.push('dingtalk'); } catch { /* in-app copy stands */ } }
+    if (o.notify) { try { channels.push(...sentChannels(await o.notify(userId, `【WorkOS】${message}`))); } catch { /* in-app copy stands */ } }
     await db.query('UPDATE task_nudges SET channels=$2 WHERE id=$1', [inserted.id, JSON.stringify(channels)]);
     return 1;
   }

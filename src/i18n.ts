@@ -131,6 +131,8 @@ const zh:Record<string,string>={
   'Only the leader can mark a self score as untrue':'只有领导可以判定自评不实。',
   'Files can be attached to key results only':'证明文件只能上传到关键结果（KR）。',
   'Your work location is set by an administrator':'工作地点由管理员设置，本人不能修改。',
+  'A work email is required':'工作邮箱必须填写。',
+  'Your work email was set by an administrator and cannot be changed':'你的工作邮箱已由管理员设置，本人不能修改；如需更改请联系管理员。',
   'Project not found':'找不到这个项目。',
   'Only project members can change this project':'只有项目成员可以修改这个项目。',
   'Only the project admin can change members or the project admin':'只有项目管理员可以邀请或移除成员、更换项目管理员。',

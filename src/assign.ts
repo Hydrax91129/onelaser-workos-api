@@ -36,7 +36,9 @@ export const TASK_SOURCE_COLUMNS = `(SELECT json_build_object('zh',u.name_zh,'en
      'kr', (SELECT count(*) FROM key_results k2 WHERE k2.objective_id=k.objective_id AND k2.archived_at IS NULL AND (k2.created_at,k2.id)<=(k.created_at,k.id)))
    FROM key_results k JOIN objectives o ON o.id=k.objective_id WHERE k.id=tasks.kr_id) AS okr_ref`;
 
-export type Notifier = (userId: string, content: string) => Promise<boolean>;
+/** Sends one message to one person on every configured channel; returns the channels it went out on (e.g. ['dingtalk','email']). */
+export type Notifier = (userId: string, content: string) => Promise<boolean | string[]>;
+export const sentChannels = (r: boolean | string[]) => Array.isArray(r) ? r : r ? ['dingtalk'] : [];
 export type AssignOptions = { model?: JsonModel | null; notify?: Notifier | null; intervalMs?: number; now?: () => number };
 
 const DAY = 864e5;
@@ -97,7 +99,7 @@ export async function registerAssignRoutes(app: FastifyInstance, db: Database, o
       ON CONFLICT(task_id,kind,day) DO NOTHING RETURNING id`, [randomUUID(), task.org_id, task.id, recipient, cc, kind, day, message])).rows[0];
     if (!inserted) return false;
     const channels = ['app'];
-    if (o.notify) { try { if (await o.notify(recipient, `【WorkOS】${message}`)) channels.push('dingtalk'); } catch { /* in-app copy still stands */ } }
+    if (o.notify) { try { channels.push(...sentChannels(await o.notify(recipient, `【WorkOS】${message}`))); } catch { /* in-app copy still stands */ } }
     await db.query('UPDATE task_nudges SET channels=$2 WHERE id=$1', [inserted.id, JSON.stringify(channels)]);
     return true;
   }

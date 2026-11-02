@@ -1,3 +1,4 @@
+import nodemailer from 'nodemailer';
 /* Membership lifecycle that does not depend on DingTalk:
  *  - admins disable / re-enable members (a disabled member cannot sign in by any
  *    method, DingTalk login and directory sync cannot reactivate them, their
@@ -37,9 +38,22 @@ CREATE TABLE IF NOT EXISTS login_codes(email text PRIMARY KEY, code_hash text NO
 export type Mailer = (message: { to: string; subject: string; text: string; html: string; attachments?: { filename: string; content: string }[] }) => Promise<void>;
 export type MemberOptions = OrgOptions & { secureCookies: boolean; appPublicUrl?: string; mailer?: Mailer | null; teamName?: string };
 
-/** Resend (https://resend.com) when RESEND_API_KEY and EMAIL_FROM are set; otherwise no email login. */
+/**
+ * Outgoing email. Two options, set in the server environment only:
+ *  - SMTP (any mailbox provider, e.g. Google Workspace or Zoho Mail): SMTP_HOST, SMTP_PORT (default 465), SMTP_USER, SMTP_PASS, EMAIL_FROM.
+ *  - Resend (https://resend.com): RESEND_API_KEY, EMAIL_FROM.
+ * SMTP wins when both are set. With neither, no email is sent (email-code login and email notifications stay off).
+ */
 export function mailerFromEnv(env: NodeJS.ProcessEnv): Mailer | null {
   const key = env.RESEND_API_KEY, from = env.EMAIL_FROM;
+  if (env.SMTP_HOST && env.SMTP_USER && env.SMTP_PASS && from) {
+    const port = Number(env.SMTP_PORT) || 465;
+    const transport = nodemailer.createTransport({ host: env.SMTP_HOST, port, secure: port === 465, auth: { user: env.SMTP_USER, pass: env.SMTP_PASS }, connectionTimeout: 10000, greetingTimeout: 10000, socketTimeout: 30000 });
+    return async message => {
+      await transport.sendMail({ from, to: message.to, subject: message.subject, text: message.text, html: message.html,
+        ...(message.attachments?.length ? { attachments: message.attachments.map(a => ({ filename: a.filename, content: Buffer.from(a.content, 'base64') })) } : {}) });
+    };
+  }
   if (!key || !from) return null;
   return async message => {
     const response = await fetch('https://api.resend.com/emails', {
@@ -241,7 +255,7 @@ export async function registerMemberRoutes(app: FastifyInstance, db: Database, o
       if (manager && !(await tx.query('SELECT id FROM users WHERE id=$1 AND org_id=$2 AND active=true', [manager, row.org_id])).rows[0]) manager = null;
       const newId = 'inv_' + randomUUID().replace(/-/g, '').slice(0, 20);
       await tx.query('INSERT INTO users(id,org_id,department_id,display_name,role) VALUES($1,$2,$3,$4,$5)', [newId, row.org_id, row.department_id, input.displayName || row.display_name, row.role]);
-      await tx.query(`UPDATE users SET title=$2,email=$3,login_email=$3,password_hash=$4,manager_id=$5,role_override=$6,grants=$7,invited_by=$8,location=$9 WHERE id=$1`,
+      await tx.query(`UPDATE users SET title=$2,email=$3,email_locked=true,login_email=$3,password_hash=$4,manager_id=$5,role_override=$6,grants=$7,invited_by=$8,location=$9 WHERE id=$1`,
         [newId, row.title, row.email, passwordHash, manager, row.role, JSON.stringify(row.grants || []), row.created_by, row.location || '']);
       await tx.query('UPDATE member_invites SET accepted_at=now(),accepted_user_id=$2 WHERE id=$1', [row.id, newId]);
       await audit(tx, { id: newId, org_id: row.org_id, department_id: row.department_id }, 'org.invite_accepted', row.id, { email: row.email });
@@ -313,4 +327,4 @@ export async function registerMemberRoutes(app: FastifyInstance, db: Database, o
 }
 
 /** Columns for the admin member list (adds lifecycle fields). */
-export const ADMIN_MEMBER_COLUMNS = `${PUBLIC_USER_COLUMNS},active,is_admin,role_override,grants,disabled_at,login_email,(password_hash IS NOT NULL) AS has_password,invited_by`;
+export const ADMIN_MEMBER_COLUMNS = `${PUBLIC_USER_COLUMNS},active,is_admin,role_override,grants,disabled_at,login_email,(password_hash IS NOT NULL) AS has_password,invited_by,email_locked`;
