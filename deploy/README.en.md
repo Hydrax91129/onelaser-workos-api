@@ -25,6 +25,7 @@ The production host supplies an HTTPS subdomain. GitHub Pages remains a public d
 | `DINGTALK_CLIENT_ID`, `DINGTALK_CLIENT_SECRET` | Separate enterprise internal app credentials |
 | `DINGTALK_CORP_ID` | Approved enterprise |
 | `DINGTALK_ALLOWED_DEPARTMENT_IDS` | Approved real department IDs, comma separated; required in company mode |
+| `DINGTALK_INCLUDE_SUBDEPARTMENTS` | On by default: members of any sub-department (any depth) of an allowed department can sign in and are synced, filed under that allowed department. Set `false` to admit direct members only |
 | `DINGTALK_MANAGER_USER_IDS` | Explicit manager user IDs, comma separated |
 | `REQUIRE_AI_ASSESSMENT` | Unset by default: the reviewer can accept without waiting for the Bot assessment. Set `true` to require a sufficient assessment before acceptance |
 | `AI_REVIEW_MODE` | Template selects `bot`; code defaults to `api`. Incomplete integration settings disable assessment |

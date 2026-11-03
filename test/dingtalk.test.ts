@@ -96,3 +96,52 @@ test('Additional membership still requires matching corporation, internal contac
  }
  assert.throws(()=>fixture({}, {additionalUserIds:['not a valid ID']}),DingTalkError);
 });
+
+function treeFixture(){
+ // 42 (allowed) -> 43 -> 44; 99 is not under 42.
+ const children:Record<number,number[]>={42:[43],43:[44],44:[],99:[]};
+ const members:Record<string,number>={'lead':42,'sales-1':43,'deep-1':44,'outsider':99};
+ const parents:Record<number,number[]>={42:[42,1],43:[43,42,1],44:[44,43,42,1],99:[99,1]};
+ const calls:string[]=[];
+ const fetcher:typeof fetch=async(input,init)=>{
+  const url=new URL(String(input)),body=init?.body?JSON.parse(String(init.body)):undefined;calls.push(url.pathname);
+  if(url.pathname==='/v1.0/oauth2/accessToken')return response({accessToken:'enterprise-token',expireIn:7200});
+  if(url.pathname==='/topapi/v2/department/listsubid')return response({errcode:0,result:{dept_id_list:children[body.dept_id]}});
+  if(url.pathname==='/topapi/v2/user/list')return response({errcode:0,result:{list:Object.entries(members).filter(([,d])=>d===body.dept_id).map(([userid])=>({userid})),has_more:false}});
+  if(url.pathname==='/topapi/v2/user/get')return response({errcode:0,result:{userid:body.userid,unionid:'u-'+body.userid,active:true,name:body.userid,dept_id_list:[members[body.userid]]}});
+  if(url.pathname==='/topapi/v2/department/listparentbyuser')return response({errcode:0,result:{parent_list:[{parent_dept_id_list:parents[members[body.userid]]}]}});
+  if(url.pathname==='/topapi/v2/department/get')return response({errcode:0,result:{dept_id:body.dept_id,name:'Dept '+body.dept_id}});
+  throw new Error('Unexpected fixture path '+url.pathname);
+ };
+ return {fetcher,calls};
+}
+test('With sub-departments enabled, sync includes members at any depth under the allowed department',async()=>{
+ const {fetcher}=treeFixture();const client=new DingTalkClient({...config,includeSubdepartments:true},fetcher);
+ const users=await client.listDepartmentUsers('42');
+ assert.deepEqual(users.map(u=>u.externalUserId).sort(),['deep-1','lead','sales-1']);
+ assert(users.every(u=>u.departmentId==='42'),'members are filed under the allowed ancestor department');
+ assert(!users.some(u=>u.externalUserId==='outsider'));
+});
+test('With sub-departments disabled, only direct members are synced',async()=>{
+ const {fetcher,calls}=treeFixture();const client=new DingTalkClient(config,fetcher);
+ assert.deepEqual((await client.listDepartmentUsers('42')).map(u=>u.externalUserId),['lead']);
+ assert(!calls.includes('/topapi/v2/department/listsubid'));
+});
+test('Sub-department membership never admits people outside the allowed tree',async()=>{
+ const {fetcher}=treeFixture();const client=new DingTalkClient({...config,includeSubdepartments:true},fetcher);
+ await assert.rejects((client as any).member('outsider'),(error:unknown)=>error instanceof DingTalkError&&error.code==='DINGTALK_DEPARTMENT_FORBIDDEN');
+ assert.equal((await (client as any).member('deep-1')).departmentId,'42');
+});
+test('Cyclic or oversized sub-department trees stop instead of looping',async()=>{
+ const fetcher:typeof fetch=async(input,init)=>{const url=new URL(String(input));const body=init?.body?JSON.parse(String(init.body)):{};
+  if(url.pathname==='/v1.0/oauth2/accessToken')return response({accessToken:'t',expireIn:7200});
+  if(url.pathname==='/topapi/v2/department/listsubid')return response({errcode:0,result:{dept_id_list:body.dept_id===42?[43]:[42]}});
+  if(url.pathname==='/topapi/v2/user/list')return response({errcode:0,result:{list:[],has_more:false}});
+  throw new Error('unexpected');};
+ assert.deepEqual(await new DingTalkClient({...config,includeSubdepartments:true},fetcher).listDepartmentUsers('42'),[]);
+ const wide:typeof fetch=async(input,init)=>{const url=new URL(String(input));const body=init?.body?JSON.parse(String(init.body)):{};
+  if(url.pathname==='/v1.0/oauth2/accessToken')return response({accessToken:'t',expireIn:7200});
+  if(url.pathname==='/topapi/v2/department/listsubid')return response({errcode:0,result:{dept_id_list:body.dept_id===42?Array.from({length:600},(_,i)=>1000+i):[]}});
+  throw new Error('unexpected');};
+ await assert.rejects(new DingTalkClient({...config,includeSubdepartments:true},wide).listDepartmentUsers('42'),(e:unknown)=>e instanceof DingTalkError&&e.code==='DINGTALK_DIRECTORY_LIMIT');
+});

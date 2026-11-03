@@ -74,7 +74,7 @@ export function integrationOptionsFromEnv(env:NodeJS.ProcessEnv):IntegrationOpti
   let dingtalk:DingTalkClient|undefined;
   if(!dingtalkMissing.length){
     dingtalk=new DingTalkClient({clientId:env.DINGTALK_CLIENT_ID!,clientSecret:env.DINGTALK_CLIENT_SECRET!,corpId:env.DINGTALK_CORP_ID!,agentId:env.DINGTALK_AGENT_ID,
-      allowedDepartmentIds:(env.DINGTALK_ALLOWED_DEPARTMENT_IDS||'').split(',').map(x=>x.trim()).filter(Boolean),additionalUserIds,managerUserIds,redirectUri:env.DINGTALK_REDIRECT_URI||new URL('/api/auth/dingtalk/callback',publicUrl!).toString()});
+      allowedDepartmentIds:(env.DINGTALK_ALLOWED_DEPARTMENT_IDS||'').split(',').map(x=>x.trim()).filter(Boolean),additionalUserIds,managerUserIds,includeSubdepartments:env.DINGTALK_INCLUDE_SUBDEPARTMENTS!=='false',redirectUri:env.DINGTALK_REDIRECT_URI||new URL('/api/auth/dingtalk/callback',publicUrl!).toString()});
   }
   if(env.AI_REVIEW_MODE&&!['api','bot'].includes(env.AI_REVIEW_MODE))throw new Error('Invalid AI review mode');
   const aiReviewMode=env.AI_REVIEW_MODE==='bot'?'bot':'api';
