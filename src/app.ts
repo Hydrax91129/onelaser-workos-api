@@ -13,7 +13,7 @@ import { registerOkrScoreRoutes, scoresFor, canLeadScore } from './okr-scores.js
 import { registerProjectRoutes } from './projects.js';
 import { registerWmsRoutes } from './wms.js';
 import { registerRmaRoutes } from './rma.js';
-import { registerQualityRoutes, type QualityOptions } from './quality.js';
+import { registerQualityRoutes, qualityFactoryOf, factoryPathAllowed, type QualityOptions } from './quality.js';
 import { registerProductRoutes } from './products.js';
 import { registerInboxRoutes, pushInbox, taskFollowers } from './inbox.js';
 import { registerFeedbackRoutes } from './feedback.js';
@@ -120,6 +120,10 @@ export async function buildApp(options:AppOptions) {
     req.actor=await resolveSession(db,token?'Bearer '+token:undefined);
     if(!req.actor) deny(401,'UNAUTHENTICATED','Authentication is required');
     await attachReportingScope(db,req.actor);
+    // Factory staff (quality-only accounts) never reach the rest of the workspace; leads/admins are never restricted.
+    const qualityAdmin=isOrgAdmin(req.actor as any,{executiveUserIds:integrations.executiveUserIds||[]})||(options.quality?.leadIds||[]).includes(req.actor.id);
+    (req as any).qualityFactory=qualityAdmin?null:await qualityFactoryOf(db,options.quality||{},req.actor);
+    if((req as any).qualityFactory&&!factoryPathAllowed(req.method,requestPath))deny(403,'FACTORY_SCOPE','Factory accounts can only use product quality tracking','工厂账号只能使用产品质量追踪。');
     if(req.cookieAuthenticated&&!['GET','HEAD','OPTIONS'].includes(req.method)){
       if(req.headers.origin&&req.headers.origin!==new URL(integrations.appPublicUrl||'http://localhost').origin)deny(403,'CSRF_INVALID','Request origin or security token is invalid');
       const supplied=req.headers['x-csrf-token'];
@@ -156,7 +160,7 @@ export async function buildApp(options:AppOptions) {
   });
   app.delete('/auth/session',async(req,reply)=>{await db.query('DELETE FROM sessions WHERE token_hash=$1',[hash(req.sessionToken!)]);reply.header('Set-Cookie',cookie(sessionCookieName(integrations.secureCookies),'',integrations.secureCookies,0));return {revoked:true};});
   const isExecutive=(user:User)=>integrations.executiveUserIds?.includes(user.id)===true;
-  app.get('/me',async req=>({...actor(req),isAdmin:isOrgAdmin(actor(req) as any,{executiveUserIds:integrations.executiveUserIds||[]}),executiveAccess:isExecutive(actor(req)),supportAccess:supportPermissions(actor(req),options.support||{},integrations.executiveUserIds||[])}));
+  app.get('/me',async req=>({...actor(req),isAdmin:isOrgAdmin(actor(req) as any,{executiveUserIds:integrations.executiveUserIds||[]}),executiveAccess:isExecutive(actor(req)),supportAccess:supportPermissions(actor(req),options.support||{},integrations.executiveUserIds||[]),qualityFactory:(req as any).qualityFactory||null}));
   app.get('/executive/summary',async req=>{const user=actor(req);if(!isExecutive(user))deny(403,'FORBIDDEN','Executive access is required');return db.transaction(tx=>executiveSummary(tx,user.org_id,integrations.teamMode));});
   registerSupportRoutes(app,db,options.support,integrations.executiveUserIds);
   await registerOkrPublish(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});

@@ -84,3 +84,25 @@ test('quality issue: lead sends to factory, factory plans, lead approves, factor
   assert.ok(list.categories.ELE.defects['01']);
  }finally{await app.close();}
 });
+
+test('factory accounts are limited to quality tracking; leads in the same department are not',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ await db.query("INSERT INTO departments(org_id,id,external_id,name) VALUES('demo','fdg','dt-889','东莞工厂')");
+ await db.query("INSERT INTO users(id,org_id,department_id,display_name,role) VALUES('f1','demo','fdg','东莞品质','employee'),('f9','demo','fdg','东莞品质主管','manager')");
+ const app=await buildApp({db,integrations:{executiveUserIds:['m1']},quality:{leadIds:['m4','f9'],factoryDepartments:{dg:['dt-889']}},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
+ const tokens:Record<string,string>={};
+ const call=async(who:string,method:'GET'|'POST'|'DELETE',url:string,payload?:any)=>{tokens[who]??=(await issueSession(db,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who]}});};
+ try{
+  const me=(await call('f1','GET','/me')).json();assert.equal(me.qualityFactory,'dg');
+  assert.equal((await call('f1','GET','/quality')).statusCode,200);
+  assert.equal((await call('f1','GET','/inbox')).statusCode,200);
+  for(const url of ['/tasks','/objectives','/key-results','/directory','/task-board','/products','/wms/summary','/rma','/support/summary','/executive/summary','/feedback'])
+   {const r=await call('f1','GET',url);assert.equal(r.statusCode,403,url);assert.equal(r.json().error.code,'FACTORY_SCOPE');}
+  assert.equal((await call('f1','POST','/tasks',{title:'x'})).statusCode,403);
+  assert.notEqual((await call('f1','POST','/feedback',{})).statusCode,403,'factory staff can still report bugs');
+  assert.equal((await call('f9','GET','/me')).json().qualityFactory,null,'a lead in the factory department is not restricted');
+  assert.equal((await call('f9','GET','/tasks')).statusCode,200);
+  assert.equal((await call('m2','GET','/tasks')).statusCode,200,'ordinary staff unaffected');
+  assert.equal((await call('f1','DELETE','/auth/session')).statusCode<400,true,'factory staff can sign out');
+ }finally{await app.close();}
+});

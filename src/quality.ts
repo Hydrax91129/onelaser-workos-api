@@ -64,6 +64,19 @@ export function qualityOptionsFromEnv(env: NodeJS.ProcessEnv): QualityOptions {
   return { leadIds: (env.WORKOS_QUALITY_LEAD_IDS || '').split(',').map(s => s.trim()).filter(Boolean), factoryDepartments };
 }
 
+/* Factory membership comes from the person's department (internal id or DingTalk external id). */
+export async function qualityFactoryOf(db: Queryable, o: QualityOptions, u: User): Promise<string | null> {
+  const map = o.factoryDepartments || {};
+  if (!Object.keys(map).length) return null;
+  const ext = (await db.query('SELECT external_id FROM departments WHERE org_id=$1 AND id=$2', [u.org_id, u.department_id])).rows[0]?.external_id;
+  for (const [factory, depts] of Object.entries(map)) if (depts.includes(u.department_id) || (ext && depts.includes(ext))) return factory;
+  return null;
+}
+/* Factory accounts are outside staff: besides the quality pages they may only manage their own session and
+ * profile, and send bug reports / ideas. Everything else in CraftOS (tasks, OKRs, people, products, prices, stock, support…) is refused. */
+const FACTORY_PATHS = [/^\/me(?:\/(?:profile|avatar|password))?$/, /^\/auth\/(?:session|csrf)$/, /^\/quality(?:\/.*)?$/, /^\/inbox(?:\/read)?$/, /^\/translate$/];
+export const factoryPathAllowed = (method: string, path: string) => FACTORY_PATHS.some(re => re.test(path)) || (method === 'POST' && path === '/feedback');
+
 const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use a date like 2026-11-02');
 const id = z.string().min(1).max(100).regex(/^[A-Za-z0-9_-]+$/);
 const longText = (min = 0) => z.string().trim().min(min).max(5000);
@@ -77,14 +90,7 @@ export async function registerQualityRoutes(app: FastifyInstance, db: Database, 
   const today = () => new Date(now()).toISOString().slice(0, 10);
   const actorOf = (req: FastifyRequest): User => req.actor || deny(401, 'UNAUTHENTICATED', 'Authentication is required');
   const isLead = (u: User) => o.isAdmin(u) || (o.leadIds || []).includes(u.id);
-  /* Factory membership comes from the person's department (internal id or DingTalk external id). */
-  const factoryOf = async (u: User): Promise<string | null> => {
-    const map = o.factoryDepartments || {};
-    if (!Object.keys(map).length) return null;
-    const ext = (await db.query('SELECT external_id FROM departments WHERE org_id=$1 AND id=$2', [u.org_id, u.department_id])).rows[0]?.external_id;
-    for (const [factory, depts] of Object.entries(map)) if (depts.includes(u.department_id) || (ext && depts.includes(ext))) return factory;
-    return null;
-  };
+  const factoryOf = (u: User) => qualityFactoryOf(db, o, u);
   const roleOf = async (u: User) => {
     if (isLead(u)) return { role: 'lead' as const, factory: null };
     const factory = await factoryOf(u);
