@@ -209,6 +209,20 @@ const zh:Record<string,string>={
   'Update request already used':'这条更新已经提交过了。',
   'Completed is managed by the three-day completion rule':'“已完成”分组由系统按完成满 3 天自动归入，不能手动移入。',
   'Login destination is ambiguous':'登录跳转地址不明确，请重新登录。',
-  'Studio DingTalk membership scope is not configured':'钉钉成员范围还没有配置。'
+  'Studio DingTalk membership scope is not configured':'钉钉成员范围还没有配置。',
+  'KOL access is required':'你还没有 KOL 管理的权限，请联系管理员在“ERP 权限”里开通。',
+  'Only KOL managers can do this':'只有 KOL 管理员可以进行这项操作。',
+  'UpPromote is not connected: UPPROMOTE_API_KEY is missing':'还没有连接 UpPromote：服务器上缺少 UPPROMOTE_API_KEY，请联系管理员。',
+  'A sync is already running':'正在同步中，请稍等片刻再试。',
+  'UpPromote could not be reached':'暂时连不上 UpPromote，请稍后再试。',
+  'UpPromote rejected the API key':'UpPromote 拒绝了 API Key，可能已失效或被重新生成，请联系管理员更新。',
+  'UpPromote returned an error':'UpPromote 返回了错误，请稍后再试。',
+  'KOL not found':'找不到这位 KOL。',
+  'Entry not found':'找不到这条记录。',
+  'This KOL changed since you opened it; reload and try again':'这位 KOL 的资料在你打开后已被修改，请刷新后再试。',
+  'Contact details of UpPromote KOLs are edited in UpPromote':'来自 UpPromote 的 KOL，联系方式和社媒账号请在 UpPromote 里修改，系统会自动同步过来。',
+  'UpPromote KOLs are removed in UpPromote':'来自 UpPromote 的 KOL 不能在这里删除，请在 UpPromote 里处理。',
+  'Choose a person in your company as the owner':'负责人必须是公司里的同事。',
+  'Nothing to change':'没有需要保存的修改。'
 };
 export function message(text:string,lang:Language) {return lang==='en'?text:(zh[text]||'请求未能处理，请核对输入或联系管理员。');}
