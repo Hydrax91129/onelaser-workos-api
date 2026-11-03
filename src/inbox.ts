@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS inbox_items(id text PRIMARY KEY, org_id text NOT NULL
 CREATE INDEX IF NOT EXISTS inbox_items_user ON inbox_items(user_id,created_at);
 `;
 
-export type InboxKind = 'task_new' | 'task_update' | 'submission' | 'review_accept' | 'review_revise' | 'completion';
+export type InboxKind = 'task_new' | 'task_update' | 'submission' | 'review_accept' | 'review_revise' | 'completion' | 'hr_reminder';
 
 /** Record one in-app item per recipient (the actor never notifies themself). Runs inside the caller's transaction. */
 export async function pushInbox(tx: Queryable, item: { orgId: string; recipients: (string | null | undefined)[]; actorId: string; kind: InboxKind; taskId?: string | null; title: string; body?: string }) {
