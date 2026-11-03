@@ -43,8 +43,8 @@ const ALLOWED_MIME = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gi
 const MAX_ATTACHMENT = 8 * 1024 * 1024;
 const id = z.string().trim().min(1).max(128);
 const completeInput = z.object({
-  result: z.string().trim().min(30, 'Describe the result in at least 30 characters').max(20000),
-  selfReview: z.string().trim().min(10, 'Add a self-evaluation of at least 10 characters').max(5000),
+  result: z.string().trim().min(2, 'Describe the result').max(20000),
+  selfReview: z.string().trim().max(5000).default(''),
   attachmentIds: z.array(id).max(20).default([]),
   expectedVersion: z.number().int().positive(),
 }).strict();
