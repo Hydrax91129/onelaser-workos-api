@@ -49,6 +49,24 @@ services:
         sync: false
       - key: EMAIL_FROM
         sync: false
+      # Optional object storage for uploaded files (RMA photos, task attachments, feedback screenshots).
+      # Unset = files stay in PostgreSQL, as before. To switch: create a PRIVATE bucket and a key limited to it,
+      # set the five S3_* values, run `node build/src/cli/check-file-storage.js` in the Shell, then FILE_STORAGE=s3.
+      # Alibaba Cloud OSS Hong Kong: S3_ENDPOINT=https://oss-cn-hongkong.aliyuncs.com, S3_REGION=oss-cn-hongkong.
+      # Cloudflare R2: S3_ENDPOINT=https://<account>.r2.cloudflarestorage.com, S3_REGION=auto, S3_FORCE_PATH_STYLE=true.
+      # Keep the S3_* values while any file lives in the bucket, even if FILE_STORAGE goes back to db.
+      - key: FILE_STORAGE
+        value: db
+      - key: S3_ENDPOINT
+        sync: false
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_REGION
+        sync: false
+      - key: S3_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY
+        sync: false
       # Configure GROK_BOT_OAUTH_REDIRECT_URIS only after verifying the client
       # request or official client metadata; no allowlist is enabled by default.
       # Optional exact local client-ID pin: GROK_BOT_OAUTH_PRE_REGISTERED_CLIENT_ID.

@@ -15,6 +15,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
 import { deny } from './errors.js';
+import { dbOnlyStorage, discardFiles, objectKey, readFile, storeFile, type FileStorage } from './files.js';
 import { visibleTask } from './domain.js';
 
 export const COMPLETION_LOCK_MS = 3 * 86400000;
@@ -36,6 +37,9 @@ CREATE TABLE IF NOT EXISTS task_attachments (
  name text NOT NULL, mime text NOT NULL, size integer NOT NULL, data bytea NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS task_attachment_task_idx ON task_attachments(task_id,created_at);
+-- Bytes live in data (database storage) or in the bucket under storage_key (object storage); see files.ts.
+ALTER TABLE task_attachments ADD COLUMN IF NOT EXISTS storage_key text;
+ALTER TABLE task_attachments ALTER COLUMN data DROP NOT NULL;
 `;
 
 const ALLOWED_MIME = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'application/pdf', 'text/plain', 'text/csv',
@@ -85,7 +89,7 @@ export async function scoreCompletion(model: JsonModel, task: { title: string; d
   return { score, summary: out.summary.slice(0, 500) };
 }
 
-export type CompletionOptions = { model?: JsonModel; fxFetcher?: typeof fetch; fxFallback?: number };
+export type CompletionOptions = { model?: JsonModel; fxFetcher?: typeof fetch; fxFallback?: number; files?: FileStorage };
 const actorOf = (req: FastifyRequest): User => req.actor || deny(401, 'UNAUTHENTICATED', 'Authentication is required');
 
 export async function latestCompletion(db: Queryable, taskId: string) {
@@ -93,6 +97,7 @@ export async function latestCompletion(db: Queryable, taskId: string) {
 }
 
 export async function registerCompletionRoutes(app: FastifyInstance, db: Database, o: CompletionOptions) {
+  const files = o.files || dbOnlyStorage;
   const retryRate = new Map<string, number[]>();
   const canScore = (user:User, task:any) => task.owner_id === user.id || task.reviewer_id === user.id;
   async function recordAttempt(tx:Queryable, task:any, actorId:string, action:string, details:object) {
@@ -207,7 +212,10 @@ export async function registerCompletionRoutes(app: FastifyInstance, db: Databas
     const count = (await db.query('SELECT count(*)::int n FROM task_attachments WHERE task_id=$1', [taskId])).rows[0].n;
     if (count >= 50) deny(400, 'ATTACHMENT_LIMIT', 'A task can have at most 50 attachments');
     const name = v.name.replace(/[\\/\u0000-\u001f]/g, '_');
-    const row = (await db.query('INSERT INTO task_attachments(id,org_id,task_id,uploader_id,name,mime,size,data) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id,name,mime,size,uploader_id,created_at', [randomUUID(), task.org_id, taskId, user.id, name, v.mime, data.length, data])).rows[0];
+    const attachmentId = randomUUID(), stored = await storeFile(files, objectKey(task.org_id, 'tasks', taskId, attachmentId), data, v.mime);
+    let row;
+    try { row = (await db.query('INSERT INTO task_attachments(id,org_id,task_id,uploader_id,name,mime,size,data,storage_key) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id,name,mime,size,uploader_id,created_at', [attachmentId, task.org_id, taskId, user.id, name, v.mime, data.length, stored.data, stored.storageKey])).rows[0]; }
+    catch (e) { await discardFiles(files, [stored.storageKey]); throw e; }
     return reply.code(201).send(row);
   });
   app.get<{ Params: { id: string } }>('/tasks/:id/attachments', async req => {
@@ -220,12 +228,12 @@ export async function registerCompletionRoutes(app: FastifyInstance, db: Databas
     const user = actorOf(req), taskId = id.parse(req.params.id);
     const task = (await db.query('SELECT * FROM tasks WHERE id=$1', [taskId])).rows[0];
     if (!visibleTask(user, task)) deny(404, 'NOT_FOUND', 'Task not found');
-    const a = (await db.query('SELECT name,mime,data FROM task_attachments WHERE id=$1 AND task_id=$2', [id.parse(req.params.aid), taskId])).rows[0];
+    const a = (await db.query('SELECT name,mime,data,storage_key FROM task_attachments WHERE id=$1 AND task_id=$2', [id.parse(req.params.aid), taskId])).rows[0];
     if (!a) deny(404, 'NOT_FOUND', 'Task not found');
-    const inline = /^image\/(png|jpeg|webp|gif)$|^application\/pdf$/.test(a.mime);
+    const bytes = await readFile(files, a), inline = /^image\/(png|jpeg|webp|gif)$|^application\/pdf$/.test(a.mime);
     return reply.header('content-type', a.mime).header('x-content-type-options', 'nosniff').header('cache-control', 'private, max-age=300')
       .header('content-security-policy', "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox")
-      .header('content-disposition', `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(a.name)}`).send(a.data);
+      .header('content-disposition', `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(a.name)}`).send(bytes);
   });
 
   /* AI analysis for report pages: aggregated numbers in, 3–4 sentences out; cached and rate-limited. */

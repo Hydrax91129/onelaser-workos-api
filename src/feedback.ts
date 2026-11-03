@@ -8,6 +8,7 @@ import type { Database } from './db.js';
 import type { User } from './auth.js';
 import type { Mailer } from './members.js';
 import { deny } from './errors.js';
+import { dbOnlyStorage, discardFiles, objectKey, readFile, storeFile, type FileStorage } from './files.js';
 
 export const feedbackSchema = `
 CREATE TABLE IF NOT EXISTS feedback(id text PRIMARY KEY, org_id text NOT NULL, user_id text NOT NULL, body text NOT NULL DEFAULT '', page text NOT NULL DEFAULT '',
@@ -18,7 +19,8 @@ const MAX_IMAGES = 6, MAX_IMAGE_BYTES = 3 * 1024 * 1024;
 const TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] as const;
 const esc = (v: string) => v.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 
-export async function registerFeedbackRoutes(app: FastifyInstance, db: Database, o: { isAdmin: (u: User) => boolean; mailer: Mailer | null; to?: string; appUrl?: string }) {
+export async function registerFeedbackRoutes(app: FastifyInstance, db: Database, o: { isAdmin: (u: User) => boolean; mailer: Mailer | null; to?: string; appUrl?: string; files?: FileStorage }) {
+  const files = o.files || dbOnlyStorage;
   const actorOf = (req: FastifyRequest): User => req.actor || deny(401, 'UNAUTHENTICATED', 'Authentication is required');
   const to = o.to || 'admin@1laser.com';
   const input = z.object({
@@ -30,8 +32,14 @@ export async function registerFeedbackRoutes(app: FastifyInstance, db: Database,
     const u = actorOf(req), v = input.parse(req.body);
     if (!v.body && !v.images.length) deny(400, 'FEEDBACK_EMPTY', 'Write a few words or add a screenshot');
     for (const im of v.images) if (Buffer.from(im.data, 'base64').length > MAX_IMAGE_BYTES) deny(400, 'FEEDBACK_IMAGE_TOO_LARGE', 'Each screenshot must be 3 MB or smaller');
-    const id = randomUUID();
-    await db.query('INSERT INTO feedback(id,org_id,user_id,body,page,images) VALUES($1,$2,$3,$4,$5,$6)', [id, u.org_id, u.id, v.body, v.page, JSON.stringify(v.images)]);
+    const id = randomUUID(), images: { name: string; type: string; data?: string; key?: string; size?: number }[] = [];
+    try {
+      for (const [i, im] of v.images.entries()) {
+        const bytes = Buffer.from(im.data, 'base64'), stored = await storeFile(files, objectKey(u.org_id, 'feedback', id, String(i)), bytes, im.type);
+        images.push(stored.storageKey ? { name: im.name, type: im.type, key: stored.storageKey, size: bytes.length } : { name: im.name, type: im.type, data: im.data });
+      }
+      await db.query('INSERT INTO feedback(id,org_id,user_id,body,page,images) VALUES($1,$2,$3,$4,$5,$6)', [id, u.org_id, u.id, v.body, v.page, JSON.stringify(images)]);
+    } catch (e) { await discardFiles(files, images.map(im => im.key)); throw e; }
     let emailed = false;
     if (o.mailer) {
       const who = (u as any).display_name || u.id, when = new Date().toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
@@ -58,7 +66,8 @@ export async function registerFeedbackRoutes(app: FastifyInstance, db: Database,
     const row = (await db.query('SELECT images FROM feedback WHERE id=$1 AND org_id=$2', [String(req.params.id).slice(0, 100), u.org_id])).rows[0];
     const im = row?.images?.[Number(req.params.n)];
     if (!im) deny(404, 'NOT_FOUND', 'Image not found');
-    return reply.header('Content-Type', im.type).header('Cache-Control', 'private, max-age=86400').header('X-Content-Type-Options', 'nosniff').header('Content-Security-Policy', "default-src 'none'").send(Buffer.from(im.data, 'base64'));
+    const bytes = await readFile(files, { data: im.data ?? null, storage_key: im.key ?? null }, 'base64');
+    return reply.header('Content-Type', im.type).header('Cache-Control', 'private, max-age=86400').header('X-Content-Type-Options', 'nosniff').header('Content-Security-Policy', "default-src 'none'").send(bytes);
   });
   app.post<{ Params: { id: string } }>('/feedback/:id/status', async req => {
     const u = actorOf(req); if (!o.isAdmin(u)) deny(403, 'FORBIDDEN', 'Administrator access is required');

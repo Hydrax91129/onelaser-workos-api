@@ -187,6 +187,12 @@ Grok 评审可选择模型 API（`AI_REVIEW_MODE=api`）或 [Bot 异步通道](d
 
 通知请求为 `{taskIds:[...],idempotencyKey:"UUID"}`，仅负责人可发给当前范围内的任务本人。需另开 `DINGTALK_NOTIFICATIONS_ENABLED=true` 并配置 AgentId；未开启不会发送。返回 `queued` 只表示钉钉接受发送请求，`sent:false` 不冒充已送达；超时标为 `unknown`，同一幂等键不自动重发。不得将通知预览当作真实送达。
 
+### 上传文件的存放位置
+
+RMA 照片、任务附件和反馈截图默认存在 PostgreSQL 里（`FILE_STORAGE=db`），和以前一样。设置 `FILE_STORAGE=s3` 和五个 `S3_*` 值后，新上传的文件写入私有的 S3 兼容存储桶（阿里云 OSS、Cloudflare R2），数据库只记对象路径。下载仍然经过 API，权限检查和安全响应头不变，存储桶不需要也不允许公开访问。已经存在数据库里的旧文件照常读取，不需要迁移。存储桶故障时上传返回 503，不会留下没有文件的记录。
+
+切换前先在服务 Shell 运行 `node build/src/cli/check-file-storage.js`：它会写入、读回并删除一个测试对象，并确认不带签名的请求读不到文件。只要还有文件在桶里，就要保留 `S3_*` 设置，即使把 `FILE_STORAGE` 改回 `db`。HR 加密证件和头像仍存在数据库里，不受这个设置影响。配置示例见 `render.yaml`。
+
 新增 OAuth/CSRF、企业范围、Grok 引用和通知幂等测试使用 mock 官方服务；这些测试不会发送真实钉钉消息或消耗真实模型额度。真实授权、模型可用性、API 费用、用户首次登录和通知接收仍需上线验证。
 
 

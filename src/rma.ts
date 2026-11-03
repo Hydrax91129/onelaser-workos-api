@@ -16,6 +16,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
 import { deny } from './errors.js';
+import { dbOnlyStorage, discardFiles, objectKey, readFile, storeFile, type FileStorage } from './files.js';
 import { LOCATIONS, warehouseLevelFor } from './wms.js';
 
 export const rmaSchema = `
@@ -29,6 +30,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS rma_cases_number ON rma_cases(org_id, number);
 CREATE TABLE IF NOT EXISTS rma_photos(id text PRIMARY KEY, org_id text NOT NULL, case_id text NOT NULL, kind text NOT NULL, name text NOT NULL, mime text NOT NULL,
   size integer NOT NULL, data bytea NOT NULL, uploader_id text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
 CREATE INDEX IF NOT EXISTS rma_photos_case ON rma_photos(case_id);
+-- Bytes live in data (database storage) or in the bucket under storage_key (object storage); see files.ts.
+ALTER TABLE rma_photos ADD COLUMN IF NOT EXISTS storage_key text;
+ALTER TABLE rma_photos ALTER COLUMN data DROP NOT NULL;
 CREATE TABLE IF NOT EXISTS rma_events(id text PRIMARY KEY, org_id text NOT NULL, case_id text NOT NULL, actor_id text NOT NULL, action text NOT NULL, note text NOT NULL DEFAULT '',
   created_at timestamptz NOT NULL DEFAULT now());
 CREATE INDEX IF NOT EXISTS rma_events_case ON rma_events(case_id, created_at);
@@ -49,7 +53,8 @@ const nameOf = (u: any) => u ? (u.display_name || u.name_zh || u.name_en || u.id
 const days = (a: any, b: any) => a && b ? Math.max(0, Math.round((new Date(b).getTime() - new Date(a).getTime()) / 86400000)) : null;
 const ymd = (v: any) => v ? (v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10)) : null;
 
-export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: { isAdmin: (u: User) => boolean; now?: () => number }) {
+export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: { isAdmin: (u: User) => boolean; now?: () => number; files?: FileStorage }) {
+  const files = o.files || dbOnlyStorage;
   const now = o.now || Date.now;
   const actorOf = (req: FastifyRequest): User => req.actor || deny(401, 'UNAUTHENTICATED', 'Authentication is required');
   const level = (u: User) => warehouseLevelFor(u, o.isAdmin(u));
@@ -237,20 +242,24 @@ export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: {
     if (!data.length || data.length > MAX_PHOTO) deny(400, 'RMA_PHOTO_TOO_LARGE', 'Photos must be 5 MB or smaller');
     if (Number((await db.query('SELECT count(*)::int n FROM rma_photos WHERE case_id=$1', [caseId])).rows[0].n) >= MAX_PHOTOS) deny(400, 'RMA_PHOTO_LIMIT', 'A case can have at most 40 photos');
     const photoId = randomUUID();
-    await db.transaction(async tx => {
-      await tx.query('INSERT INTO rma_photos(id,org_id,case_id,kind,name,mime,size,data,uploader_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)',
-        [photoId, u.org_id, caseId, v.kind, v.name.replace(/[\\/\u0000-\u001f]/g, '_'), v.mime, data.length, data, u.id]);
-      await event(tx, u, caseId, 'photo:' + v.kind, v.name);
-    });
+    const stored = await storeFile(files, objectKey(u.org_id, 'rma', caseId, photoId), data, v.mime);
+    try {
+      await db.transaction(async tx => {
+        await tx.query('INSERT INTO rma_photos(id,org_id,case_id,kind,name,mime,size,data,storage_key,uploader_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
+          [photoId, u.org_id, caseId, v.kind, v.name.replace(/[\\/\u0000-\u001f]/g, '_'), v.mime, data.length, stored.data, stored.storageKey, u.id]);
+        await event(tx, u, caseId, 'photo:' + v.kind, v.name);
+      });
+    } catch (e) { await discardFiles(files, [stored.storageKey]); throw e; }
     reply.code(201);
     return { id: photoId, kind: v.kind, name: v.name, size: data.length };
   });
 
   app.get<{ Params: { id: string; photo: string } }>('/rma/:id/photos/:photo', async (req, reply) => {
     const u = actorOf(req); requireView(u);
-    const p = (await db.query('SELECT mime,data,name FROM rma_photos WHERE id=$1 AND case_id=$2 AND org_id=$3', [id.parse(req.params.photo), id.parse(req.params.id), u.org_id])).rows[0];
+    const p = (await db.query('SELECT mime,data,storage_key,name FROM rma_photos WHERE id=$1 AND case_id=$2 AND org_id=$3', [id.parse(req.params.photo), id.parse(req.params.id), u.org_id])).rows[0];
     if (!p) deny(404, 'NOT_FOUND', 'Photo not found');
+    const bytes = await readFile(files, p);
     reply.header('content-type', p.mime).header('cache-control', 'private, max-age=86400').header('x-content-type-options', 'nosniff');
-    return reply.send(Buffer.from(p.data));
+    return reply.send(bytes);
   });
 }
