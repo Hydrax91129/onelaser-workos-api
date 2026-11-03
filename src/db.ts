@@ -19,6 +19,7 @@ import { supportSchema } from './support.js';
 import { publicWikiSchema } from './public-wiki.js';
 import { okrImportSchema } from './okr-import.js';
 import { hrSchema } from './hr.js';
+import { itSchema } from './it-accounts.js';
 import { PGlite } from '@electric-sql/pglite';
 import pg from 'pg';
 
@@ -209,7 +210,7 @@ CREATE TABLE IF NOT EXISTS notification_deliveries (
 CREATE INDEX IF NOT EXISTS task_scope_idx ON tasks(org_id, department_id, owner_id);
 CREATE INDEX IF NOT EXISTS audit_scope_idx ON audit_events(org_id, department_id, owner_id);
 `;
-export const schema = coreSchema + boardSchema + supportSchema + okrImportSchema + okrCollabSchema + orgSchema + memberSchema + translationSchema + completionSchema + assignSchema + okrScoreSchema + projectSchema + wmsSchema + rmaSchema + productSchema + inboxSchema + feedbackSchema + publicWikiSchema + caldockSchema + studioSchema + okrPublishSchema + hrSchema;
+export const schema = coreSchema + boardSchema + supportSchema + okrImportSchema + okrCollabSchema + orgSchema + memberSchema + translationSchema + completionSchema + assignSchema + okrScoreSchema + projectSchema + wmsSchema + rmaSchema + productSchema + inboxSchema + feedbackSchema + publicWikiSchema + caldockSchema + studioSchema + okrPublishSchema + hrSchema + itSchema;
 
 export async function seedDemo(db: Database) {
   const users = [
