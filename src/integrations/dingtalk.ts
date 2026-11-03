@@ -2,6 +2,8 @@
 export type DingTalkConfig = {
   clientId: string; clientSecret: string; corpId: string; agentId?: string;
   allowedDepartmentIds: string[]; additionalUserIds?: string[]; managerUserIds: string[]; redirectUri: string;
+  /** Members of any sub-department (at any depth) of an allowed department are admitted under that allowed department. */
+  includeSubdepartments?: boolean;
 };
 export type DingTalkProfile = {
   externalUserId: string; unionId: string; name: string; departmentId: string;
@@ -15,6 +17,8 @@ export class DingTalkError extends Error {
 type Json = Record<string, any>;
 const numericId = /^\d{1,20}$/;
 const userId = /^[A-Za-z0-9_.@-]{1,128}$/;
+const MAX_SUBDEPARTMENTS = 500;
+const validDept = (id: unknown) => { const s = String(id); return numericId.test(s) && Number.isSafeInteger(Number(s)) && Number(s) > 0 ? s : undefined; };
 export class DingTalkClient {
   private token?: { value: string; expires: number };
   private pendingToken?: Promise<string>;
@@ -67,12 +71,43 @@ export class DingTalkClient {
     if (!member || member.active !== true || member.userid !== externalUserId || typeof member.unionid !== 'string' || !member.unionid || (expectedUnionId && member.unionid !== expectedUnionId)) throw new DingTalkError('DINGTALK_MEMBERSHIP_REJECTED',403);
     const departments:string[]=Array.isArray(member.dept_id_list)?member.dept_id_list.map(String).filter((id:string)=>numericId.test(id)&&Number.isSafeInteger(Number(id))&&Number(id)>0):[];
     // An explicit person exception never grants access to the rest of their department.
-    const departmentId=this.config.allowedDepartmentIds.find(id=>departments.includes(id))||(this.additional.has(externalUserId)?departments[0]:undefined);
+    let departmentId=this.config.allowedDepartmentIds.find(id=>departments.includes(id));
+    // A member of a sub-department counts under the nearest allowed ancestor department.
+    if (!departmentId && this.config.includeSubdepartments) departmentId=await this.allowedAncestor(externalUserId);
+    if (!departmentId && this.additional.has(externalUserId)) departmentId=departments[0];
     if (!departmentId) throw new DingTalkError('DINGTALK_DEPARTMENT_FORBIDDEN',403);
     const department=await this.enterprise('/topapi/v2/department/get',{dept_id:Number(departmentId),language:'zh_CN'});
     if (typeof department.result?.name !== 'string' || String(department.result.dept_id)!==departmentId || typeof member.name !== 'string' || !member.name) throw new DingTalkError('DINGTALK_INVALID_RESPONSE',502);
     const clip=(v:unknown,n:number)=>typeof v==='string'?v.trim().slice(0,n):'';
     return {externalUserId,unionId:member.unionid,name:member.name,departmentId,departmentName:department.result.name,role:this.managers.has(externalUserId)?'manager':'employee',...(clip(member.title,80)?{title:clip(member.title,80)}:{}),...(clip(member.work_place,80)?{workPlace:clip(member.work_place,80)}:{})};
+  }
+  private async allowedAncestor(externalUserId: string): Promise<string | undefined> {
+    const data=await this.enterprise('/topapi/v2/department/listparentbyuser',{userid:externalUserId});
+    const lists=data.result?.parent_list;
+    if (!Array.isArray(lists)) throw new DingTalkError('DINGTALK_INVALID_RESPONSE',502);
+    for (const entry of lists) {
+      // Each chain runs from the member's own department up to the root, so the first allowed id is the nearest.
+      const chain=Array.isArray(entry?.parent_dept_id_list)?entry.parent_dept_id_list.map(validDept).filter(Boolean) as string[]:[];
+      const hit=chain.find(id=>this.allowed.has(id));
+      if (hit) return hit;
+    }
+    return undefined;
+  }
+  private async withSubdepartments(deptId: string): Promise<string[]> {
+    const seen=new Set([deptId]);const queue=[deptId];
+    while (queue.length) {
+      const current=queue.shift()!;
+      const data=await this.enterprise('/topapi/v2/department/listsubid',{dept_id:Number(current)});
+      const ids=data.result?.dept_id_list;
+      if (!Array.isArray(ids)) throw new DingTalkError('DINGTALK_INVALID_RESPONSE',502);
+      for (const raw of ids) {
+        const id=validDept(raw);if (!id) throw new DingTalkError('DINGTALK_INVALID_RESPONSE',502);
+        if (seen.has(id)) continue;
+        seen.add(id);queue.push(id);
+        if (seen.size>MAX_SUBDEPARTMENTS) throw new DingTalkError('DINGTALK_DIRECTORY_LIMIT',502);
+      }
+    }
+    return [...seen];
   }
   async authenticate(authCode: string): Promise<DingTalkProfile> {
     if (typeof authCode !== 'string' || authCode.length<1 || authCode.length>2048) throw new DingTalkError('OAUTH_CODE_INVALID',400);
@@ -89,14 +124,20 @@ export class DingTalkClient {
   }
   async listDepartmentUsers(deptId: string): Promise<DingTalkProfile[]> {
     if (!this.allowed.has(deptId)) throw new DingTalkError('DINGTALK_DEPARTMENT_FORBIDDEN',403);
-    const ids=new Set<string>();let cursor=0;const seenCursors=new Set<number>();
+    const ids=new Set<string>();
+    const departments=this.config.includeSubdepartments?await this.withSubdepartments(deptId):[deptId];
+    for (const dept of departments) await this.collectUserIds(dept,ids);
+    const profiles:DingTalkProfile[]=[];for(const id of ids)profiles.push(await this.member(id));return profiles;
+  }
+  private async collectUserIds(deptId: string, ids: Set<string>): Promise<void> {
+    let cursor=0;const seenCursors=new Set<number>();
     for(let page=0;page<20;page++){
       if(seenCursors.has(cursor)) throw new DingTalkError('DINGTALK_PAGINATION_INVALID',502);seenCursors.add(cursor);
       const data=await this.enterprise('/topapi/v2/user/list',{dept_id:Number(deptId),cursor,size:100});
       const result=data.result;if(!result||!Array.isArray(result.list))throw new DingTalkError('DINGTALK_INVALID_RESPONSE',502);
       for(const item of result.list){if(typeof item.userid!=='string'||!userId.test(item.userid))throw new DingTalkError('DINGTALK_INVALID_RESPONSE',502);ids.add(item.userid);}
       if(ids.size>2000)throw new DingTalkError('DINGTALK_DIRECTORY_LIMIT',502);
-      if(!result.has_more){const profiles:DingTalkProfile[]=[];for(const id of ids)profiles.push(await this.member(id));return profiles;}
+      if(!result.has_more)return;
       if(!Number.isSafeInteger(result.next_cursor)||result.next_cursor<0)throw new DingTalkError('DINGTALK_PAGINATION_INVALID',502);cursor=result.next_cursor;
     }
     throw new DingTalkError('DINGTALK_DIRECTORY_LIMIT',502);
