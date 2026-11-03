@@ -224,6 +224,18 @@ const zh:Record<string,string>={
   'Update request already used':'这条更新已经提交过了。',
   'Completed is managed by the three-day completion rule':'“已完成”分组由系统按完成满 3 天自动归入，不能手动移入。',
   'Login destination is ambiguous':'登录跳转地址不明确，请重新登录。',
-  'Studio DingTalk membership scope is not configured':'钉钉成员范围还没有配置。'
+  'Studio DingTalk membership scope is not configured':'钉钉成员范围还没有配置。',
+  'Only HR can do this':'只有人事（HR）可以进行这项操作。',
+  'Sensitive HR data is not set up: HR_DATA_KEY is missing or invalid':'敏感人事资料还没有启用：加密密钥 HR_DATA_KEY 未设置或格式不对，请联系管理员。',
+  'This value was saved with a data key that is no longer configured':'这项资料是用已停用的加密密钥保存的，请联系管理员恢复旧密钥。',
+  'This value could not be decrypted':'这项资料无法解密，请联系管理员。',
+  'Person not found':'找不到这位员工。',
+  'This record changed since you opened it; reload and try again':'这份档案在你打开后已被修改，请刷新后再试。',
+  'Only HR and the person themself can see sensitive details':'只有人事（HR）和员工本人可以查看敏感资料。',
+  'Give a reason for viewing this detail':'请填写查看这项资料的原因（至少 4 个字）。',
+  'Documents must be PDF, PNG, JPEG or WebP':'文件只能是 PDF、PNG、JPEG 或 WebP 格式。',
+  'Documents must be 10 MB or smaller':'文件不能超过 10 MB。',
+  'A person can have at most 50 documents':'每位员工最多保存 50 份文件。',
+  'Document not found':'找不到这份文件。'
 };
 export function message(text:string,lang:Language) {return lang==='en'?text:(zh[text]||'请求未能处理，请核对输入或联系管理员。');}
