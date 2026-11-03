@@ -125,14 +125,19 @@ test('Expired jobs and expired leases are visible and reject completion; explici
   await h.db.query('UPDATE ai_review_jobs SET expires_at=$2 WHERE id=$1',[replacement.id,'2000-01-01T00:00:00Z']);assert.equal((await h.call('m2','GET',`/tasks/${task.id}/analysis-jobs/${replacement.id}`)).json().job.errorCode,'BOT_JOB_EXPIRED');toolError(await h.rpc('workos_get_review_job',{jobId:replacement.id}),'BOT_JOB_EXPIRED',410);
 });
 test('A human review changes the task version; only an explicit fresh analyze can replace the now-stale job',async t=>{
-  // This scenario covers a reviewer deciding before the bot replies, which needs the documented opt-out of the AI requirement.
-  process.env.REQUIRE_AI_ASSESSMENT='false';t.after(()=>{delete process.env.REQUIRE_AI_ASSESSMENT;});
+  // By default the reviewer can decide before the bot replies.
   const h=await harness(t),task=await h.createSubmission(),job=await h.enqueue(task.id),leased=toolData(await h.rpc('workos_get_review_job',{jobId:job.id}));
   const accepted=await h.call('m1','POST',`/tasks/${task.id}/reviews`,{expectedVersion:task.version,submissionVersion:1,decision:'accept',quality:9,note:'Human explicitly inspected this synthetic evidence.',verifiedCurrentSubmission:true});assert.equal(accepted.statusCode,201,accepted.body);
   toolError(await h.rpc('workos_submit_review',{jobId:job.id,leaseToken:leased.leaseToken,result:assessment(leased)}),'BOT_JOB_STALE',409);assert.equal(h.dispatches.length,1);
   const fresh=await h.enqueue(task.id);assert.notEqual(fresh.id,job.id);assert.equal(h.dispatches.length,2);
   assert.equal((await h.call('m2','GET',`/tasks/${task.id}/analysis-jobs/${job.id}`)).json().job.status,'superseded');
   const detail=(await h.call('m1','GET',`/tasks/${task.id}`)).json();assert.equal(detail.status,'accepted');assert.equal(detail.currentReview.quality,9);
+});
+test('REQUIRE_AI_ASSESSMENT=true makes a finished assessment a precondition for acceptance',async t=>{
+  process.env.REQUIRE_AI_ASSESSMENT='true';t.after(()=>{delete process.env.REQUIRE_AI_ASSESSMENT;});
+  const h=await harness(t),task=await h.createSubmission();await h.enqueue(task.id);
+  const res=await h.call('m1','POST',`/tasks/${task.id}/reviews`,{expectedVersion:task.version,submissionVersion:1,decision:'accept',quality:9,note:'Waiting for the bot should block when required.',verifiedCurrentSubmission:true});
+  assert.equal(res.statusCode,409,res.body);assert.equal(res.json().error.code,'AI_ASSESSMENT_REQUIRED');
 });
 test('Timeout has an unknown outcome, non-200 is failed, and neither path automatically replays or claims completion',async t=>{
   for(const outcome of ['timeout','non200']as const){

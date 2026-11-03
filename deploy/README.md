@@ -26,6 +26,7 @@
 | `DINGTALK_CORP_ID` | 批准接入的企业 |
 | `DINGTALK_ALLOWED_DEPARTMENT_IDS` | 明确批准的真实部门 ID，逗号分隔；公司模式仍须指定 |
 | `DINGTALK_MANAGER_USER_IDS` | 明确批准的主管 userId，逗号分隔 |
+| `REQUIRE_AI_ASSESSMENT` | 默认不设：验收人可以不等 Bot 评估直接人工验收。设为 `true` 时，必须先有评估通过才能验收 |
 | `AI_REVIEW_MODE` | 模板选择 `bot`；代码默认 `api`。配置缺失时评审保持关闭 |
 | `GROK_BOT_MCP_AUTH_MODE` | Render 选择 `oauth`；代码默认 `bearer` 兼容模式 |
 | `GROK_BOT_OAUTH_REDIRECT_URIS` | OAuth 精确回调白名单，默认空；只能由管理员核对真实客户端后显式配置 |
