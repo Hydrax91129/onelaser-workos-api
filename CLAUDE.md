@@ -1,0 +1,275 @@
+# CLAUDE.md — OneLaser WorkOS（craftos.app）
+
+> 所有 Claude Code 会话在开始任何工作前必须先完整阅读本文件。
+> 本文件同时承担两个职能：①所有会话共同遵守的规则；②各模块会话之间唯一的"沟通板"。
+> 会话之间没有共享记忆，彼此看不到对方未合并的工作。想让其他会话知道的事情，必须写进本文件并合并到 main。
+>
+> 版本：v1.0（2026-11-03）｜维护人：KC｜标注"【待填】"的地方由工程师或"平台核心"会话补全
+
+---
+
+## 1. 项目概况
+
+- **是什么**：craftos.app 是 OneLaser 正在线上使用的公司内部系统（WorkOS），美国团队和中国团队（武汉、东莞、济南/山东）共同使用。
+- **仓库**：GitHub，Yonge6 账号下【待填：仓库名】
+- **主分支**：main【待确认】
+- **部署**：由 Yongger 负责发布；托管正在迁移到 OneLaser 自己的 Render 工作区，目标是稳定、可控地发布。
+- **决策人**：KC（创始人）。涉及业务规则、权限、数据结构的取舍，以 KC 的确认为准。
+
+### 当前侧边栏结构（KC 2026-10-31 确定，未经 KC 同意不得改动）
+
+- **工作区**：个人工作台、OKR（参考飞书 OKR）、项目管理（monday.com + Asana 风格，项目任务自动流入个人任务列表）、任务中心
+- **报表区**：OKR 分析、项目分析、任务分析
+- **产品管理区**（受限可见）：产品管理、成本核算、智能供应链
+- **产品开发测试区**：客服工作台、知识中心/Wiki、产品质量追踪
+- **集成与通知**：放在个人设置里，仅管理员可见
+- 新模块要进侧边栏时，先在第 7 节"待 KC 决策"里登记位置提案，不得自行添加。
+
+---
+
+## 2. 技术栈与目录结构（core 读代码补全，基于 main `63a5dd3`，2026-11-03）
+
+**两个仓库。** 改界面要动前端仓库，改接口和数据要动后端仓库。上线时一起发布。
+
+| 仓库 | 内容 | 本文件 |
+|---|---|---|
+| `Yonge6/onelaser-workos-api`（本仓库） | 后端 API、数据库结构、部署配置；构建时把固定版本的前端一起打进镜像 | 就在这里 |
+| `Yonge6/onelaser-workos` | 网页前端（`dist/` 下的静态文件） | 没有副本，以本文件为准 |
+
+- **前端**：原生 JavaScript + CSS，没有框架，也没有构建步骤，`dist/` 里的文件就是线上文件。每个模块一个文件，例如 `dist/wms.js` + `dist/wms.css`、`dist/kol.js`、`dist/dealers.js`；`dist/live-app.js` 是真实模式的主程序，`dist/api-client.js` 负责 Cookie、CSRF 和错误处理，`dist/i18n.js` 负责中英文。改了 JS/CSS 后要运行 `node tools/stamp-assets.mjs` 更新 `index.html` 里的版本号，否则浏览器会继续用缓存。
+  - 后端用 `deploy/frontend-revision.txt` 固定前端的某个提交（40 位哈希）；`tools/fetch-frontend.mjs` 构建时按哈希下载并校验 `dist/`。**前端合并后，要在后端改这个哈希并发布，线上才会变。**
+  - CalDock 是另一个独立前端，用 `deploy/caldock-revision.txt` 固定；知识中心 Wiki 的公开内容用 `deploy/wiki-revision.txt` 固定。
+- **后端**：Node.js 24（最低 22）+ TypeScript（strict，ES 模块）+ Fastify 5；请求校验用 zod 4。
+  - 入口：`src/server.ts`（读环境变量、建库、启动）→ `src/app.ts`（`buildApp`：注册所有路由、登录拦截、CSRF、错误处理）。
+  - 每个模块一个文件，同时包含建表语句和路由，例如 `src/wms.ts`、`src/rma.ts`、`src/quality.ts`、`src/hr.ts`、`src/it-accounts.ts`、`src/products.ts`、`src/support.ts`、`src/public-wiki.ts`、`src/caldock*.ts`。
+  - 外部集成：`src/integrations/`（钉钉 `dingtalk.ts`、Grok Bot、OAuth 等，路由在 `routes.ts`）。
+  - 线上由 Caddy（`deploy/Caddyfile`）在同一域名下提供网页，`/api/*` 去掉前缀后转给 Node；启动脚本是 `deploy/container-start.sh`，镜像见 `Dockerfile`。
+- **数据库 / ORM**：PostgreSQL 16，**没有 ORM**，直接写 SQL（`pg` 驱动，参数化查询 `$1,$2…`）。本地和测试用内嵌的 PGlite（`@electric-sql/pglite`），不需要装数据库。统一接口在 `src/db.ts`：`db.query`、`db.transaction`。
+- **认证与权限**：
+  - 会话：`src/auth.ts`（会话令牌只存哈希、HttpOnly Cookie、CSRF 令牌）；登录拦截和 CSRF 校验在 `src/app.ts` 的 `onRequest` 钩子里，所有路由默认要求登录，公开路径要明确列出。
+  - 登录方式：钉钉 OAuth（`src/integrations/dingtalk.ts`、`routes.ts`）；邮箱 + 密码 / 邮箱验证码和成员邀请（`src/members.ts`）。
+  - 角色和权限点：`users.role`（`employee` / `manager`）+ `users.grants`（JSON 数组）。权限点清单是 `src/org.ts` 里的 `GRANTS`：`products`、`product_cost_detail`、`products_manage`、`pricing_msrp`、`supply`、`supply_manage`、`warehouse`、`warehouse_manage`。管理员判断是 `src/org.ts` 的 `isAdmin`。
+  - 按人指定的权限由环境变量控制（见下方清单的 `*_USER_IDS`），例如老板看板 `WORKOS_EXECUTIVE_USER_IDS`、HR `WORKOS_HR_USER_IDS`。
+  - 数据可见范围（谁能看哪些任务和 OKR）：`src/domain.ts`（`visibleTask`、`visibleObjective`、`attachReportingScope`）。
+  - 各模块自己的权限判断写在模块文件里，例如 `src/wms.ts` 的 `warehouseLevelFor`、`src/quality.ts` 的工厂账号限制。
+- **数据库迁移目录**：**没有单独的迁移目录，也没有迁移版本号。** 每个模块文件导出一段建表 SQL（如 `wmsSchema`），在 `src/db.ts` 的 `schema` 里拼起来，每次服务启动时完整执行一遍。所以所有语句都必须能重复执行：`CREATE TABLE IF NOT EXISTS`、`ALTER TABLE … ADD COLUMN IF NOT EXISTS`、`CREATE INDEX IF NOT EXISTS`。改结构 = 在对应模块的 schema 末尾追加这类语句，并把新模块的 schema 加进 `src/db.ts`（这一步属于第 4 节的共享区域）。
+- **侧边栏 / 路由定义位置**：
+  - 侧边栏：前端 `dist/live-app.js` 里的 `navs`（每项：页面代号、图标、中文名、英文名、所属分区）和 `navSections`（分区）；某个菜单项显示不显示由同一文件的 `navVisible` 和各个 `*Access` 函数决定。
+  - 页面路由：前端用地址里的 `#页面代号`，由 `live-app.js` 的 `routePage` 切换。
+  - 后端接口：在 `src/app.ts` 的 `buildApp` 里调用各模块的 `register*Routes` 注册。
+- **公共组件目录**：前端没有组件库，也没有单独的组件目录。共用的东西是：`dist/styles.css`、`dist/workspace-ui.css`（全局样式和主题变量）、`dist/api-client.js`（请求）、`dist/i18n.js`（中英文）、`dist/help-tips.js`（悬停说明）、`dist/preferences.js`（语言和主题）、`dist/assets/`（图标字体、Logo）。后端的共用代码在 `src/errors.ts`（`deny()` 出错）、`src/i18n.ts`（错误信息中文翻译）、`src/db.ts`、`src/auth.ts`。
+- **本地运行命令**（后端，在本仓库）：
+  ```sh
+  npm ci
+  export NODE_ENV=development ALLOW_DEV_LOGIN=true SEED_DEMO=true PGLITE_DATA_DIR=.runtime/pglite
+  export DEV_LOGIN_SECRET="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
+  npm run dev          # 监听 127.0.0.1:3001，内嵌数据库，虚构账号
+  ```
+  生产方式运行：`npm run build && npm start`。在 Mac 上前后端一起跑：`npm run local:mac`（见 `deploy/MAC_LOCAL.md`）。
+- **测试命令**：
+  - 后端：`npm run typecheck` + `npm test`（`test/*.test.ts`，Node 自带测试框架，内嵌数据库，测试数据全部虚构）。要用真 PostgreSQL 测时设置 `TEST_DATABASE_URL`。
+  - 前端（在前端仓库）：`npm test`（`node --test test/*.test.mjs`）。
+  - CI：`.github/workflows/ci.yml`。每次推送都会跑类型检查、内嵌库和 PostgreSQL 两遍测试、构建生产镜像，并对容器做冒烟测试。
+- **代码检查（lint）与格式化命令**：**目前没有配置 lint 或格式化工具**（没有 ESLint / Prettier）。代码质量靠 `npm run typecheck`（TypeScript strict）和测试保证。请跟随所改文件已有的写法，不要整文件重新排版（会产生大量无关改动和合并冲突）。要加 lint 工具属于第 4 节"依赖与构建配置"，先在第 7 节登记。
+- **环境变量清单**（只列变量名；值在 Render 上配置，绝不写进代码或本文件；说明见 `render.yaml` 和 `README.md`）：
+  - 基础：`NODE_ENV`、`HOST`、`PORT`、`DATABASE_URL`、`PGLITE_DATA_DIR`、`APP_PUBLIC_URL`、`RENDER_EXTERNAL_URL`、`FRONTEND_CONNECTED`、`SEED_DEMO`、`ALLOW_DEV_LOGIN`、`DEV_LOGIN_SECRET`
+  - 团队与人员权限：`WORKOS_TEAM_MODE`、`WORKOS_TEAM_NAME`、`WORKOS_EXECUTIVE_USER_IDS`、`WORKOS_HR_USER_IDS`、`WORKOS_IT_USER_IDS`、`WORKOS_QUALITY_LEAD_IDS`、`WORKOS_QUALITY_FACTORY_DEPARTMENTS`、`WORKOS_SUPPORT_USER_IDS`、`WORKOS_SUPPORT_REVIEWER_IDS`、`WORKOS_SUPPORT_ORG_ID`、`WORKOS_SUPPORT_INGEST_TOKEN`
+  - 钉钉：`DINGTALK_CLIENT_ID`、`DINGTALK_CLIENT_SECRET`、`DINGTALK_CORP_ID`、`DINGTALK_AGENT_ID`、`DINGTALK_REDIRECT_URI`、`DINGTALK_ALLOWED_DEPARTMENT_IDS`、`DINGTALK_INCLUDE_SUBDEPARTMENTS`、`DINGTALK_ADDITIONAL_USER_IDS`、`DINGTALK_MANAGER_USER_IDS`、`DINGTALK_NOTIFICATIONS_ENABLED`
+  - 邮件：`RESEND_API_KEY`、`EMAIL_FROM`、`SMTP_HOST`、`SMTP_PORT`、`SMTP_USER`、`SMTP_PASS`、`FEEDBACK_EMAIL`
+  - AI：`AI_REVIEW_MODE`、`AI_PROVIDER_API_KEY`、`AI_PROVIDER_BASE_URL`、`AI_MODEL_ID`、`AI_SCORING_MODEL_ID`、`AI_TRANSLATION_MODEL_ID`、`AI_REVIEW_TIMEOUT_MS`、`REQUIRE_AI_ASSESSMENT`、`XAI_API_KEY`
+  - Grok Bot：`GROK_BOT_MCP_AUTH_MODE`、`GROK_BOT_ORG_ID`、`GROK_BOT_WORKER_TOKEN`、`GROK_BOT_WEBHOOK_URL`、`GROK_BOT_WEBHOOK_SECRET`、`GROK_BOT_WEBHOOK_ALLOWED_HOST`、`GROK_BOT_OAUTH_REDIRECT_URIS`、`GROK_BOT_OAUTH_PRE_REGISTERED_CLIENT_ID`
+  - HR 加密：`HR_DATA_KEY`、`HR_DATA_KEY_PREVIOUS`
+  - 公开 Wiki 助手：`PUBLIC_WIKI_API_KEY`、`PUBLIC_WIKI_DATA_DIR`、`PUBLIC_WIKI_MODEL_ENABLED`、`PUBLIC_WIKI_MODEL_ID`、`PUBLIC_WIKI_MODEL_DAILY_LIMIT`
+  - Shopify：`SHOPIFY_SHOP_DOMAIN`、`SHOPIFY_ACCESS_TOKEN`、`SHOPIFY_CLIENT_ID`、`SHOPIFY_CLIENT_SECRET`
+  - CalDock：`CALDOCK_ADMIN_USER_IDS`、`CALDOCK_STUDIO_OWNER_USER_IDS`、`CALDOCK_MARKETING_URL`、`CALDOCK_GOOGLE_CLIENT_ID`、`CALDOCK_GOOGLE_CLIENT_SECRET`、`CALDOCK_APPLE_SERVICE_ID`、`CALDOCK_APPLE_TEAM_ID`、`CALDOCK_APPLE_KEY_ID`、`CALDOCK_APPLE_PRIVATE_KEY`、`CALDOCK_STRIPE_SECRET_KEY`、`CALDOCK_STRIPE_WEBHOOK_SECRET`、`CALDOCK_STRIPE_ALLOW_LIVE`
+  - 其他：`OKR_TIMEZONE`、`NUDGE_INTERVAL_MS`、`FX_FALLBACK_CNY`
+  - 新增环境变量时，同时加进 `render.yaml`（密钥用 `sync: false`）和本清单。
+
+**发布方式（读 Render 配置得到，2026-11-03）**：线上服务是 Render 上的 `onelaser-workos-migration`（新加坡），它跟踪 `codex/company-migration-live-20261102` 分支，**自动部署是关闭的**，每次按指定提交手动部署。合并到 `main` 不等于上线。数据库 `onelaser-workos-db`：PostgreSQL 16，磁盘 1 GB，没有开自动扩容。`render.yaml` 里写的服务名和分支和线上实际不一致，以 Render 控制台为准。
+
+---
+
+## 3. 全局规则（所有会话必须遵守）
+
+### 3.1 开工前
+1. 先拉取最新的 main，确认自己的分支基于最新 main。
+2. 读完本文件，确认自己负责的模块和边界（第 6 节）。
+3. 看一下第 8 节变更日志里最近的改动，特别是共享区域的改动。
+
+### 3.2 改动前先出方案（KC 的硬性要求）
+- 任何改动开始前，先用中文列出：要改哪些文件、新增哪些表或字段、界面前后对比（before/after）。
+- KC 批准后再执行。KC 标注批准的条目直接执行，不需要再次确认。
+- 只改动 KC 批准范围内的东西，不顺手"优化"范围外的代码。
+
+### 3.3 模块边界
+- 每个会话只改自己模块的目录和文件（第 6 节登记）。
+- 需要改共享区域（第 4 节）时，不要自己动手。在第 7 节登记需求，由平台核心会话统一修改并合并，然后你再拉取 main 继续。
+- 需要调用其他模块的数据时，通过对方公开的接口或服务层调用，不直接读写对方的数据表。
+
+### 3.4 分支与 PR
+- 分支命名：feature/模块代号/简短描述（模块代号见第 6 节），例如 feature/wms/inbound-scan。
+- 不直接推送到 main。所有改动走 PR，默认开草稿 PR。
+- 小步提交：一个 PR 只做一件事，做完一小块就开 PR，不要让分支积压超过 2–3 天。
+- 不合并别人的 PR，不修改别人的分支。
+- PR 描述必须写：做了什么、改了哪些表或接口、如何测试、是否影响其他模块。
+
+### 3.5 数据库
+- 迁移文件只能由平台核心会话创建（见第 4 节）。
+- 表名统一加模块前缀，避免撞名。前缀方案见下方 3.5.1（core 按现有代码确认，待 KC 批准）。
+- 不删除和重命名已有字段；需要时先新增字段、迁移数据，再由 KC 批准后废弃旧字段。
+- 涉及金额的字段统一用【待填：整数分 / decimal】存储，并注明币种（USD / CNY）。（现状不统一，见第 7 节）
+
+#### 3.5.1 表名前缀方案（core 提案，待 KC 批准）
+
+读 main 和未合并分支后的结论：main 上现有的 106 张表里，大部分已经按模块加了前缀，但有些前缀和第 6 节的模块代号不一样。按 3.5"不改名"的规则，**已有的表一律不改名**，前缀就沿用现在的。规则只有三条：
+
+1. **新表的前缀 = 本模块已经在用的前缀**；模块还没有表的，用第 6 节的模块代号加下划线。
+2. 前缀之后用英文复数名词，全小写加下划线，例如 `wms_movements`、`kol_profiles`。
+3. 一张表只属于一个模块。别的模块要用这些数据，按 3.3 走接口或服务层，不直接读写别人的表。
+
+| 模块 | 代号 | 新表用的前缀 | 现有的表（截至 2026-11-03） |
+|---|---|---|---|
+| 平台核心 | core | 不加前缀（仅限核心表，新增要 KC 批准）；OKR、任务、项目沿用 `okr_` `kr_` `task_` `project_` | `users` `sessions` `departments` `external_identities` `oauth_states` `audit_events` `user_avatars` `member_invites` `login_codes` `inbox_items` `text_translations` `notification_requests` `notification_deliveries`；OKR：`objectives` `key_results` `kr_appraisals` `kr_scores` `objective_scores` `measurements` `okr_updates` `okr_import_batches` `okr_source_records` `okr_publications`；任务：`tasks` `submissions` `reviews` `task_attachments` `task_completions` `task_nudges` `task_updates` `task_board_config` `task_board_personal` `task_board_views`；项目：`projects` `project_updates`；AI 评审：`ai_evaluations` `ai_review_jobs` `bot_dispatch_budgets` `bot_oauth_*`（7 张）；反馈：`feedback` |
+| WMS 仓储管理 | wms | `wms_` | `wms_items` `wms_stock` `wms_movements` `wms_imports` |
+| PIM 与定价 | pim | `product_`（**不是** `pim_`，沿用现有） | `product_catalog` `product_pricing` `product_imports` `product_changes` `product_channel_prices` `product_price_changes` `pricing_rules`（例外：没有 `product_` 前缀，不改名） |
+| HRM 员工档案 | hrm | `hr_`（**不是** `hrm_`，沿用现有） | `hr_profiles` `hr_secrets` `hr_salary` `hr_documents` `hr_events` `hr_reminder_log` |
+| 电子与资产管理 | asset | `it_`（IT 账号与订阅已经用了这个前缀）；实物资产等新表用 `asset_` | `it_accounts` `it_account_users` `it_flags` `it_checks` `it_reminder_log` |
+| 客服系统 | support | `support_`；公开支持中心沿用 `public_wiki_` | `support_snapshots` `support_reviews` `support_reply_edits` `support_handovers` `support_knowledge_candidates` `support_knowledge_candidate_reviews` `public_wiki_*`（7 张） |
+| KOL 自动化 ROI | kol | `kol_` | 未合并分支 `kol-phase1`：`kol_profiles` `kol_collabs` `kol_referrals` `kol_sync_state` |
+| 经销商下单 portal | dealer | `dealer_` | 未合并分支 `dealer-portal`：`dealer_accounts` `dealer_identities` `dealer_sessions` `dealer_oauth_states` `dealer_orders` `dealer_order_lines` `dealer_order_events` `dealer_stripe_events` |
+| AR/AP 应收应付 | arap | `arap_` | 还没有 |
+| 企业网盘管理 | drive | `drive_` | 还没有 |
+| 钉钉与企业微信接入 | im | `im_` | 还没有（钉钉登录用的 `external_identities` `oauth_states` 和通知用的 `notification_*` 属于 core 共享区域） |
+| 数据与网络安全 | security | `security_` | 还没有 |
+| 公司数据中心 / ERP | erp | `erp_`（只放缓存或快照，不放业务数据，见 6.1） | 还没有 |
+| craftos 通用改进 | general | 不建表；需要表时先在第 7 节和对应模块协调 | — |
+| 产品质量追踪 | （未登记） | `quality_` | `quality_issues` `quality_plans` `quality_links` `quality_events` |
+| 退货与维修 RMA | （未登记） | `rma_` | `rma_cases` `rma_photos` `rma_events` |
+| CalDock（独立产品） | （未登记） | `caldock_` | `caldock_*`（13 张）、`caldock_studio_*`（5 张） |
+
+最后三行在第 6 节没有对应的模块和负责会话，已在第 7 节登记，请 KC 指定归属。
+
+### 3.6 安全与数据
+- 不把任何密钥、token、密码写进代码、提交记录、日志或本文件。只使用环境变量。
+- 测试只用虚构数据，不使用真实员工、客户、经销商、价格或成本数据。
+- 不在前端暴露成本价、毛利、薪资等敏感字段，权限必须在后端校验，不能只靠前端隐藏。
+- 发现安全问题（越权访问、密钥泄露、未校验的接口）时立即停下，在第 7 节登记并通知 KC。
+
+### 3.7 沟通方式
+- 每完成一个阶段（开 PR 或 PR 合并），更新第 6 节自己模块那一行，并在第 8 节变更日志顶部加一条。
+- 只改自己模块的那一行和那一段，不改其他模块的内容，避免本文件本身产生合并冲突。
+- 对其他模块有疑问或依赖时，写在第 7 节，不要猜测对方的实现。
+- 对 KC 的汇报用中文，简洁直接，先说结论。
+
+---
+
+## 4. 共享区域与负责人
+
+以下区域被多个模块共用，只能由"平台核心"会话修改（侧边栏里名为 [WorkOS] 的会话）：
+
+| 共享区域 | 内容 | 说明 |
+|---|---|---|
+| 数据库结构与迁移 | 所有迁移文件、核心表 | 其他模块提需求，平台核心统一出迁移 |
+| 认证与权限（RBAC） | 登录、角色、权限点 | 新增权限点必须登记在第 5 节 |
+| 侧边栏与路由 | 菜单、路由注册 | 按第 1 节的结构，变更需 KC 批准 |
+| 公共组件与样式 | 通用 UI 组件、主题 | 模块内部组件放模块自己的目录 |
+| 依赖与构建配置 | 依赖包、构建、lint 配置 | 新增依赖需在 PR 说明理由 |
+| 部署与环境变量 | 部署配置、环境变量清单 | 与 Yongger 的发布流程对齐 |
+| 通知与集成底座 | 消息推送、钉钉/企业微信底层连接 | 业务模块只调用，不改底座 |
+
+平台核心会话的工作顺序：先补全第 2 节，再处理第 7 节里其他模块登记的共享区域需求。
+
+---
+
+## 5. 权限与敏感数据规则（KC 已确认）
+
+| 数据 / 区域 | 可见范围 |
+|---|---|
+| 产品管理区（产品目录、成本核算、智能供应链） | 仅 KC、李帅、袁勇 |
+| 成本和价格的计算方式 | 仅 KC、李帅 |
+| HRM 美国区员工档案 | 仅 KC |
+| HRM 中国区员工档案 | KC 指定的负责人【待 KC 指定】 |
+| 集成与通知设置 | 仅管理员 |
+| AR/AP、薪资相关数据 | 【待 KC 确认】 |
+| 经销商下单 portal | 经销商只能看到自己的订单、价格和账期【待 KC 确认细则】 |
+
+新增任何敏感数据或权限点，必须先登记在这里并经 KC 确认。
+
+---
+
+## 6. 模块登记表
+
+状态取值：规划中 / 开发中 / 待 KC 审批 / PR 待合并 / 已上线 / 暂停
+
+| 模块 | 代号 | 负责会话 | 目录【待填】 | 状态 | 依赖的共享改动 | 最后更新 |
+|---|---|---|---|---|---|---|
+| 平台核心 | core | [WorkOS] | `src/app.ts` `src/server.ts` `src/db.ts` `src/auth.ts` `src/domain.ts` `src/org.ts` `src/members.ts` `src/integrations/` `deploy/` `render.yaml` `Dockerfile` | PR 待合并（CLAUDE.md 第 2 节、3.5.1） | — | 2026-11-03 |
+| WMS 仓储管理 | wms | [WorkOS] - WMS系统 |  | 开发中 |  | 2026-11-03 |
+| 企业网盘管理 | drive | [WorkOS] - 企业网盘管理 |  | 开发中 |  | 2026-11-03 |
+| KOL 自动化 ROI | kol | [WorkOS] - KOL自动化ROI系统 |  | 开发中 |  | 2026-11-03 |
+| 经销商下单 portal | dealer | [WorkOS] - 经销商下单portal |  | 开发中 |  | 2026-11-03 |
+| 电子与资产管理 | asset | [WorkOS] - 电子&资产管理 |  | 开发中 |  | 2026-11-03 |
+| 客服系统 | support | [WorkOS] - 客服系统 |  | 开发中 |  | 2026-11-03 |
+| PIM 与定价 | pim | [WorkOS] - PIM & 定价系统 |  | 开发中 |  | 2026-11-03 |
+| AR/AP 应收应付 | arap | [WorkOS] - AR/AP |  | 开发中 |  | 2026-11-03 |
+| 数据与网络安全 | security | [WorkOS] - 数据与网络安全 |  | 开发中 |  | 2026-11-03 |
+| 公司数据中心 / ERP 仪表板 | erp | [WorkOS] 公司数据中心 ERP 仪表板 |  | 开发中 |  | 2026-11-03 |
+| 钉钉与企业微信接入 | im | 接入钉钉与企业微信 |  | 开发中 |  | 2026-11-03 |
+| craftos 通用改进 | general | craftos.app 改进 |  | 开发中 |  | 2026-11-03 |
+| HRM 员工档案 | hrm | 【未开会话】 |  | 规划中 |  | 2026-11-03 |
+
+各会话首次读到本文件时，把自己那一行的"目录"和"状态"改成真实情况。
+
+### 6.1 模块要点（每个会话只维护自己的条目）
+
+**core 平台核心**：负责第 4 节的全部共享区域；首要任务是补全第 2 节，并确认表名前缀和金额存储方案。
+
+**wms 仓储管理**：范围【待填】。与 pim（SKU 主数据）、dealer（出库订单）有数据依赖，SKU 以 pim 为唯一来源，不在 wms 里另建 SKU 表。
+
+**drive 企业网盘管理**：范围【待填】。如涉及钉钉网盘（钉盘）的文件同步，底层连接走 im 模块提供的接口。
+
+**kol KOL 自动化 ROI**：范围【待填】。广告与销售数据如来自外部平台，只读不写；ROI 计算口径写在本条目里，供 erp 仪表板引用。
+
+**dealer 经销商下单 portal**：范围【待填】。经销商是外部用户，权限隔离是第一优先级；价格取自 pim，不得在本模块硬编码价格。
+
+**asset 电子与资产管理**：范围【待填】。
+
+**support 客服系统**：包括客服工作台和知识中心/Wiki。KC 的路线：公开支持中心（可搜索 Wiki、客户提问、员工审核后发布标准答案、带评分）先在 craftos.app 上线，之后迁移到 Shopify 官网 1laser.com 的支持页面，所以内容结构要便于导出和迁移。
+
+**pim PIM 与定价**：产品目录是 SKU 的唯一来源。每个 SKU 覆盖全生命周期属性（如 HS 编码、主机/配件类型、成本、毛重、随附配件等）。成本和定价逻辑属于第 5 节的受限数据。
+
+**arap 应收应付**：范围【待填】。金额字段遵守 3.5 节规定，注明币种。
+
+**security 数据与网络安全**：负责审查其他模块的权限校验、密钥管理和日志脱敏；发现问题时在第 7 节登记，不直接改其他模块的代码。
+
+**erp 公司数据中心 / ERP 仪表板**：只读汇总其他模块的数据，不反向写入。指标口径引用各模块条目里的定义，不自己另算。
+
+**im 钉钉与企业微信接入**：提供通知与消息的底层接口，供其他模块调用；业务逻辑留在各模块。
+
+**general craftos 通用改进**：处理不属于以上任何模块的小改进；如果改动碰到某个模块，先在第 7 节和该模块协调。
+
+**hrm 员工档案**：规划中。员工档案和资料分美国区、中国区存放，访问权限完全分开（见第 5 节）。
+
+---
+
+## 7. 跨模块需求与待 KC 决策
+
+格式：日期｜提出模块 → 目标模块或 KC｜事项｜状态（待处理 / 处理中 / 已完成）
+
+- 2026-11-03｜core → KC｜确认各模块的业务范围，补全第 6.1 节的"【待填】"｜待处理
+- 2026-11-03｜core → KC｜确认 AR/AP 与经销商 portal 的权限细则（第 5 节）｜待处理
+- 2026-11-03｜core → KC｜指定 HRM 中国区负责人｜待处理
+- 2026-11-03｜core → KC｜批准 3.5.1 表名前缀方案，特别是：pim 沿用 `product_`、hrm 沿用 `hr_`、asset 沿用 `it_`（都不改名）｜待处理
+- 2026-11-03｜core → KC｜产品质量追踪（`quality_`）、退货与维修 RMA（`rma_`）、CalDock（`caldock_`）在第 6 节没有对应模块，请指定归属（建议：RMA 归 wms，质量追踪新开 `quality` 模块，CalDock 单独登记）｜待处理
+- 2026-11-03｜core → KC｜金额存储方式（3.5）：现在有三种写法——CalDock 用整数分（`amount_cents integer` + `currency`），IT 订阅用 `numeric(14,2)` + `currency`，产品/定价用不限精度的 `numeric`、币种写在字段名里（如 `factory_rmb`、`landed_usd`）；HR 薪资是加密文本。请定新字段统一用哪种；已有字段按 3.5 不改｜待处理
+- 2026-11-03｜core → KC｜第 1 节的侧边栏和代码不一致：代码（前端 `dist/live-app.js` 的 `navs`）里多了"营销"（KOL 管理）和"其他"（个人设置、组织架构、人事档案、IT 账号与订阅、组织与权限、Bug 与建议、版本更新）两个分区；产品区叫"产品+供应链"，还多了"ERP 权限"；"任务中心"在代码里叫"个人任务"。以哪个为准？｜待处理
+- 2026-11-03｜core → Yongger｜`render.yaml` 写的是服务 `onelaser-workos`、分支 `main`、通过检查后自动部署，但线上实际是 `onelaser-workos-migration`、跟踪 `codex/company-migration-live-20261102`、自动部署关闭。是否要改 `render.yaml` 和线上保持一致？｜待处理
+
+---
+
+## 8. 变更日志（最新的写在最上面）
+
+格式：日期｜模块｜做了什么｜涉及的表或接口｜PR 链接
+
+- 2026-11-03｜core｜放入仓库根目录；补全第 2 节（技术栈、目录、命令、环境变量、发布方式）和 3.5.1 表名前缀方案；第 7 节登记 5 项待决定事项｜只改本文件，不涉及表或接口｜草稿 PR（链接见 PR 页面）
+- 2026-11-03｜core｜建立本文件 v1.0｜—｜—
