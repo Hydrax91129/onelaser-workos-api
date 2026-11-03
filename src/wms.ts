@@ -46,12 +46,13 @@ export const LOCATIONS = [
 ] as const;
 const LOC_IDS = LOCATIONS.map(l => l.id) as [string, ...string[]];
 
-export const ERP_GRANTS = ['products_manage', 'pricing_msrp', 'supply', 'supply_manage', 'warehouse', 'warehouse_manage'] as const;
+export const ERP_GRANTS = ['products_manage', 'pricing_msrp', 'supply', 'supply_manage', 'warehouse', 'warehouse_manage', 'dealers', 'dealers_manage'] as const;
 const AREAS: Record<string, Record<string, string[]>> = {
   products: { none: [], view: ['products'], manage: ['products', 'products_manage'] },
   pricing: { none: [], msrp: ['pricing_msrp'], full: ['product_cost_detail'] },
   supply: { none: [], view: ['supply'], manage: ['supply', 'supply_manage'] },
   warehouse: { none: [], view: ['warehouse'], manage: ['warehouse', 'warehouse_manage'] },
+  dealers: { none: [], view: ['dealers'], manage: ['dealers', 'dealers_manage'] },
 };
 const areaGrants = (area: string) => [...new Set(Object.values(AREAS[area]).flat())];
 const levelOf = (grants: string[], area: string) => {
@@ -288,7 +289,7 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     };
   });
 
-  const accessInput = z.object({ userId: uid, area: z.enum(['products', 'pricing', 'supply', 'warehouse']), level: z.string().min(1).max(20) }).strict();
+  const accessInput = z.object({ userId: uid, area: z.enum(['products', 'pricing', 'supply', 'warehouse', 'dealers']), level: z.string().min(1).max(20) }).strict();
   app.post('/erp/access', async req => {
     const u = actorOf(req), v = accessInput.parse(req.body), admin = o.isAdmin(u);
     if (!(v.level in AREAS[v.area])) deny(400, 'INVALID_ACCESS_LEVEL', 'Choose a valid access level');

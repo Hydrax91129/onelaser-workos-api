@@ -1,6 +1,8 @@
 import { registerCaldockStudio, type StudioOptions } from './caldock-studio.js';
 import { registerTaskBoardRoutes, validateBoardCreation, applyAutoStatus } from './task-board.js';
 import { registerCaldockRoutes, type CaldockOptions } from './caldock.js';
+import { registerDealerRoutes, type DealerOptions } from './dealer.js';
+import { registerDealerAdminRoutes } from './dealer-admin.js';
 import { registerSupportRoutes, supportPermissions, type SupportOptions } from './support.js';
 import { registerPublicWikiRoutes, PUBLIC_WIKI_PATHS, type PublicWikiOptions } from './public-wiki.js';
 import { registerShopifyRoutes, type ShopifyOptions } from './shopify.js';
@@ -59,7 +61,7 @@ async function okrListOwners(db:Database,user:User,executiveUserIds:string[]){
   const mine=rows.find(r=>r.id===user.id)?.manager_id;if(mine)for(const r of rows)if(r.manager_id===mine&&r.id!==user.id)out.add(r.id);
   return out;
 }
-export type AppOptions = { clock?:()=>number; nudgeIntervalMs?:number; translationModel?:JsonModel|null; mailer?:Mailer|null; completionModel?:JsonModel|null; fxFetcher?:typeof fetch; db:Database; environment?:string; allowDevLogin?:boolean; devLoginSecret?:string; closeDatabase?:boolean; integrations?:IntegrationOptions; support?:SupportOptions; publicWiki?:PublicWikiOptions; shopify?:ShopifyOptions; caldock?:CaldockOptions; studio?:StudioOptions };
+export type AppOptions = { clock?:()=>number; nudgeIntervalMs?:number; translationModel?:JsonModel|null; mailer?:Mailer|null; completionModel?:JsonModel|null; fxFetcher?:typeof fetch; db:Database; environment?:string; allowDevLogin?:boolean; devLoginSecret?:string; closeDatabase?:boolean; integrations?:IntegrationOptions; support?:SupportOptions; publicWiki?:PublicWikiOptions; shopify?:ShopifyOptions; caldock?:CaldockOptions; studio?:StudioOptions; dealer?:DealerOptions };
 
 function actor(req: FastifyRequest): User { return req.actor || deny(401,'UNAUTHENTICATED','Authentication is required'); }
 function scope(user: User) {
@@ -111,6 +113,8 @@ export async function buildApp(options:AppOptions) {
     // Commerce has its own customer identities, cookies, CSRF and admin checks.
     // Studio alone may bridge an independently scoped DingTalk employee session.
     if(requestPath.startsWith('/caldock/')) return;
+    // The dealer portal likewise has its own dealer accounts, cookie and CSRF; /dealer-admin/* is employee-only.
+    if(requestPath.startsWith('/dealer/')) return;
     if(publicPaths.has(requestPath)||isPublicMemberPath(requestPath)||/^\/integrations\/grok-bot\/oauth\/requests\/[A-Za-z0-9_-]{43}$/.test(requestPath)) return;
     const cookieToken=readCookie(req.headers.cookie,sessionCookieName(integrations.secureCookies));
     const token=req.headers.authorization?(req.headers.authorization.startsWith('Bearer ')?req.headers.authorization.slice(7):undefined):cookieToken;
@@ -139,7 +143,7 @@ export async function buildApp(options:AppOptions) {
     catch { return reply.code(503).send({status:'unavailable',service:'onelaser-workos-api'}); }
     return {status:'ok',service:'onelaser-workos-api',version:'0.1.0',database:db.kind,productionReady:false};
   });
-  app.get('/capabilities',async()=>({passwordLogin:true,emailCodeLogin:!!mailer,memberInvites:true,memberDisable:true,autoTranslate:true,assignTasks:true,simpleOkrScores:true,bilingualNames:true,projectsLive:true,wms:true,rma:true,erpAccess:true,productsData:true,pricingRules:true,feedback:true,okrCycle:true,okrPublish:true,taskCompletion:true,aiCompletionScore:!!completionModel,aiInsights:!!completionModel,liveFx:true,aiAssessmentRequired:aiAssessmentRequired(),tasks:true,objectives:true,okrCollaboration:true,orgProfiles:true,submissions:true,humanReviews:true,audit:true,devLogin:devEnabled,dingtalk:integrations.dingtalk?'configured':'not_integrated',aiReview:(integrations.aiReviewMode==='bot'?(integrations.bot&&(!(integrations.botMcpAuthMode==='oauth')||!!(integrations.botOAuth?.publicUrl&&integrations.botOAuth.orgId&&integrations.botOAuth.redirectUris.length))):integrations.ai)?'configured':'not_integrated',aiReviewMode:integrations.aiReviewMode||'api',botMcpAuthMode:integrations.botMcpAuthMode||'bearer',notificationDelivery:integrations.notificationsEnabled&&integrations.dingtalk?'configured':'not_integrated',notificationChannels:{dingtalk:!!(integrations.notificationsEnabled&&integrations.dingtalk),email:!!mailer},employeeDecisions:'not_supported',frontendConnected:integrations.frontendConnected===true,teamMode:integrations.teamMode||'department',auth:{provider:'dingtalk',loginEnabled:!!integrations.dingtalk,session:'httpOnlyCookie',csrfHeader:'X-CSRF-Token'},setup:integrations.setup||null}));
+  app.get('/capabilities',async()=>({passwordLogin:true,emailCodeLogin:!!mailer,memberInvites:true,memberDisable:true,autoTranslate:true,assignTasks:true,simpleOkrScores:true,bilingualNames:true,projectsLive:true,wms:true,rma:true,erpAccess:true,productsData:true,dealerPortal:!!options.dealer?.orgId,pricingRules:true,feedback:true,okrCycle:true,okrPublish:true,taskCompletion:true,aiCompletionScore:!!completionModel,aiInsights:!!completionModel,liveFx:true,aiAssessmentRequired:aiAssessmentRequired(),tasks:true,objectives:true,okrCollaboration:true,orgProfiles:true,submissions:true,humanReviews:true,audit:true,devLogin:devEnabled,dingtalk:integrations.dingtalk?'configured':'not_integrated',aiReview:(integrations.aiReviewMode==='bot'?(integrations.bot&&(!(integrations.botMcpAuthMode==='oauth')||!!(integrations.botOAuth?.publicUrl&&integrations.botOAuth.orgId&&integrations.botOAuth.redirectUris.length))):integrations.ai)?'configured':'not_integrated',aiReviewMode:integrations.aiReviewMode||'api',botMcpAuthMode:integrations.botMcpAuthMode||'bearer',notificationDelivery:integrations.notificationsEnabled&&integrations.dingtalk?'configured':'not_integrated',notificationChannels:{dingtalk:!!(integrations.notificationsEnabled&&integrations.dingtalk),email:!!mailer},employeeDecisions:'not_supported',frontendConnected:integrations.frontendConnected===true,teamMode:integrations.teamMode||'department',auth:{provider:'dingtalk',loginEnabled:!!integrations.dingtalk,session:'httpOnlyCookie',csrfHeader:'X-CSRF-Token'},setup:integrations.setup||null}));
   const attempts=new Map<string,{count:number;until:number}>();
   app.post('/auth/dev-login',async(req,reply)=>{
     if(!devEnabled) deny(404,'DEV_LOGIN_DISABLED','Development login is disabled');
@@ -165,6 +169,9 @@ export async function buildApp(options:AppOptions) {
       corpId:integrations.corpId,allowedDepartmentIds:integrations.allowedDepartmentIds||[],
       additionalUserIds:integrations.teamMode==='company'?integrations.additionalUserIds||[]:[],managerUserIds:integrations.managerUserIds||[]
     }:undefined,secureCookies:environment==='production'||options.studio?.secureCookies===true});
+  const dealerOptions={mailer,publicUrl:integrations.appPublicUrl,...options.dealer,secureCookies:environment==='production'||options.dealer?.secureCookies===true};
+  await registerDealerRoutes(app,db,dealerOptions);
+  await registerDealerAdminRoutes(app,db,{...dealerOptions,isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
   registerPublicWikiRoutes(app,db,options.publicWiki,options.support,integrations.executiveUserIds);
   registerShopifyRoutes(app,db,options.shopify,options.support,integrations.executiveUserIds);
   registerTaskBoardRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
