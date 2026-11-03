@@ -47,10 +47,10 @@ const taskInput = z.object({
   ownerId: identifier, reviewerId: identifier.optional(), criteria: z.array(z.string().trim().min(1).max(1000)).max(20).default([]),
   dueAt: z.string().datetime({ offset: true }), krId: identifier.optional(), boardGroupId:identifier.optional(), boardPriority:z.string().max(80).optional(), boardCategory:z.string().max(80).optional(), parentTaskId:identifier.optional()
 }).strict();
-const submissionInput = z.object({ expectedVersion, title:z.string().trim().min(1).max(200).optional(), description:z.string().trim().min(2).max(30000), evidenceUrl:evidenceUrl.optional() }).strict();
+const submissionInput = z.object({ expectedVersion, title:z.string().trim().min(1).max(200).optional(), description:z.string().trim().min(2).max(30000), evidenceUrl:evidenceUrl.optional(), attachmentIds:z.array(identifier).max(10).optional() }).strict();
 /** A submission needs only its progress note (files are attached to the task); the title defaults to the note's first line. */
 const submissionTitle=(t:string|undefined,d:string)=>{if(t)return t;const first=(d.split(/\r?\n/).find(l=>l.trim())||d).trim();return first.length>60?first.slice(0,60)+'…':first;};
-const reviewInput = z.object({ expectedVersion, submissionVersion:z.number().int().min(1), decision:z.enum(['accept','return']), quality:z.number().int().min(0).max(100).optional(), note:z.string().trim().min(5).max(4000), verifiedCurrentSubmission:z.boolean().optional() }).strict();
+const reviewInput = z.object({ expectedVersion, submissionVersion:z.number().int().min(1), decision:z.enum(['accept','return']), quality:z.number().int().min(0).max(10).optional(), note:z.string().trim().min(5).max(4000), verifiedCurrentSubmission:z.boolean().optional() }).strict();
 const measurementInput = z.object({ expectedVersion, actual:z.number().finite(), source:z.string().trim().min(3).max(2000), note:z.string().trim().min(5).max(4000) }).strict();
 /** Besides the department rules, a person may read the OKRs of everyone in their reporting line,
  * of peers who share their manager, and administrators read everyone's. Writing keeps the stricter rules. */
@@ -79,14 +79,26 @@ async function loadKr(tx: Queryable, id: string, lock=false) {
 async function audit(tx: Queryable, user:User, action:string, objectId:string, details:unknown, ownerId=user.id, departmentId=user.department_id) {
   await tx.query('INSERT INTO audit_events(id,org_id,department_id,owner_id,actor_id,action,object_id,details) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[randomUUID(),user.org_id,departmentId,ownerId,user.id,action,objectId,JSON.stringify(details)]);
 }
+/** The files a submission carries. Submissions made before attachment_ids existed only named their files in a trailing
+ *  "附件：a、b" / "Attachments: a、b" line; those are matched by name to files the submitter uploaded before submitting. */
+export function submissionFiles(s:any, files:any[]) {
+  const ids:string[]=s.attachment_ids||[];
+  if(ids.length) return ids.map(id=>files.find(f=>f.id===id)).filter(Boolean);
+  const line=String(s.description||'').split(/\r?\n/).reverse().find(l=>/^\s*(附件[：:]|Attachments:)/.test(l));
+  if(!line) return [];
+  const names=line.replace(/^\s*(附件[：:]|Attachments:)\s*/,'').split('、').map(n=>n.trim()).filter(Boolean), at=new Date(s.created_at).getTime(), used=new Set<string>();
+  return names.map(n=>{const f=[...files].reverse().find(f=>f.name===n&&f.uploader_id===s.submitted_by&&!used.has(f.id)&&new Date(f.created_at).getTime()<=at);if(f)used.add(f.id);return f;}).filter(Boolean);
+}
 async function taskDetail(db:Queryable, task:any) {
-  const submissions=(await db.query('SELECT * FROM submissions WHERE task_id=$1 ORDER BY version',[task.id])).rows;
+  const files=(await db.query('SELECT id,name,mime,size,uploader_id,created_at FROM task_attachments WHERE task_id=$1 ORDER BY created_at,id',[task.id])).rows;
+  const submissions=(await db.query('SELECT * FROM submissions WHERE task_id=$1 ORDER BY version',[task.id])).rows.map((s:any)=>({...s,attachments:submissionFiles(s,files)}));
   const reviews=(await db.query('SELECT * FROM reviews WHERE task_id=$1 ORDER BY created_at,id',[task.id])).rows;
   return {...task,submissions,reviews,currentReview:task.status==='accepted' ? [...reviews].reverse().find(r=>r.submission_version===task.submission_version&&r.decision==='accept') || null : null};
 }
 export async function buildApp(options:AppOptions) {
   const aiReviewConfigured=()=>{const integrations:any=(options as any).integrations||{};return !!(integrations.aiReviewMode==='bot'?integrations.bot:integrations.ai);};
-  const aiAssessmentRequired=()=>process.env.REQUIRE_AI_ASSESSMENT!=='false'&&aiReviewConfigured();
+  // The designated reviewer decides; the AI assessment is advice. Set REQUIRE_AI_ASSESSMENT=true to make a sufficient assessment a precondition for acceptance.
+  const aiAssessmentRequired=()=>process.env.REQUIRE_AI_ASSESSMENT==='true'&&aiReviewConfigured();
   const {db}=options, environment=options.environment || 'development';
   const completionModel=options.completionModel===undefined?jsonModel({apiKey:process.env.AI_PROVIDER_API_KEY||process.env.XAI_API_KEY,model:process.env.AI_SCORING_MODEL_ID||process.env.AI_MODEL_ID,baseUrl:process.env.AI_PROVIDER_BASE_URL}):options.completionModel||undefined;
   const mailer=options.mailer===undefined?mailerFromEnv(process.env):options.mailer;
@@ -208,7 +220,9 @@ export async function buildApp(options:AppOptions) {
       if(task.owner_id!==user.id) deny(403,'FORBIDDEN','Only the task owner can submit evidence');
       if(task.version!==input.expectedVersion) deny(409,'VERSION_CONFLICT','Task changed; reload before submitting');
       const version=task.submission_version+1;
-      const submission=(await tx.query('INSERT INTO submissions(id,task_id,version,submitted_by,title,description,evidence_url) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *',[randomUUID(),id,version,user.id,submissionTitle(input.title,input.description),input.description,input.evidenceUrl||null])).rows[0];
+      const attachmentIds=[...new Set(input.attachmentIds||[])];
+      if(attachmentIds.length){const own=(await tx.query('SELECT id FROM task_attachments WHERE task_id=$1 AND uploader_id=$2 AND id=ANY($3::text[])',[id,user.id,attachmentIds])).rows;if(own.length!==attachmentIds.length)deny(400,'INVALID_ATTACHMENT','Attach only files you uploaded to this task');}
+      const submission=(await tx.query('INSERT INTO submissions(id,task_id,version,submitted_by,title,description,evidence_url,attachment_ids) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *',[randomUUID(),id,version,user.id,submissionTitle(input.title,input.description),input.description,input.evidenceUrl||null,attachmentIds])).rows[0];
       await tx.query('UPDATE tasks SET version=version+1,submission_version=$2,status=$3,board_status=$4,board_done_at=NULL,updated_at=now(),updated_by=$5 WHERE id=$1',[id,version,'submitted','review',user.id]);
       await audit(tx,user,'submission.created',id,{submissionVersion:version,previousReviewInvalidated:true},task.owner_id);
       await pushInbox(tx,{orgId:task.org_id,recipients:[task.reviewer_id,task.assigned_by,task.created_by],actorId:user.id,kind:'submission',taskId:id,title:task.title,body:input.description});return {submission,taskVersion:task.version+1};

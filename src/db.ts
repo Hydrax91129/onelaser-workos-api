@@ -128,7 +128,7 @@ CREATE TABLE IF NOT EXISTS submissions (
 CREATE TABLE IF NOT EXISTS reviews (
  id text PRIMARY KEY, task_id text NOT NULL REFERENCES tasks(id), submission_version integer NOT NULL,
  reviewer_id text NOT NULL REFERENCES users(id), decision text NOT NULL CHECK(decision IN ('accept','return')),
- quality integer CHECK(quality BETWEEN 0 AND 100), note text NOT NULL,
+ quality integer CHECK(quality BETWEEN 0 AND 10), note text NOT NULL,
  created_at timestamptz NOT NULL DEFAULT now(),
  FOREIGN KEY(task_id, submission_version) REFERENCES submissions(task_id, version)
 );
@@ -210,6 +210,18 @@ CREATE TABLE IF NOT EXISTS notification_deliveries (
 );
 CREATE INDEX IF NOT EXISTS task_scope_idx ON tasks(org_id, department_id, owner_id);
 CREATE INDEX IF NOT EXISTS audit_scope_idx ON audit_events(org_id, department_id, owner_id);
+-- Each submission names the task attachments it carries as evidence.
+ALTER TABLE submissions ADD COLUMN IF NOT EXISTS attachment_ids text[] NOT NULL DEFAULT '{}';
+-- Human quality scores moved from 0-100 to 0-10. Rows that existed before the switch get scale 100,
+-- are converted once (rounded half up, original kept in quality_legacy_100) and marked scale 10;
+-- the default then flips to 10 so later rows are never converted again.
+ALTER TABLE reviews ADD COLUMN IF NOT EXISTS quality_legacy_100 integer;
+ALTER TABLE reviews ADD COLUMN IF NOT EXISTS quality_scale integer NOT NULL DEFAULT 100;
+ALTER TABLE reviews DROP CONSTRAINT IF EXISTS reviews_quality_check;
+UPDATE reviews SET quality_legacy_100=quality, quality=CASE WHEN quality IS NULL THEN NULL ELSE ROUND(quality/10.0)::integer END, quality_scale=10 WHERE quality_scale=100;
+ALTER TABLE reviews ALTER COLUMN quality_scale SET DEFAULT 10;
+ALTER TABLE reviews DROP CONSTRAINT IF EXISTS reviews_quality_0_10;
+ALTER TABLE reviews ADD CONSTRAINT reviews_quality_0_10 CHECK(quality IS NULL OR quality BETWEEN 0 AND 10);
 `;
 export const schema = coreSchema + boardSchema + supportSchema + okrImportSchema + okrCollabSchema + orgSchema + memberSchema + translationSchema + completionSchema + assignSchema + okrScoreSchema + projectSchema + wmsSchema + rmaSchema + qualitySchema + productSchema + inboxSchema + feedbackSchema + publicWikiSchema + caldockSchema + studioSchema + okrPublishSchema + hrSchema + itSchema;
 

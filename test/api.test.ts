@@ -43,7 +43,7 @@ async function submit(id:string,expectedVersion:number,userId='m2'){
   assert.equal(res.statusCode,201,res.body);return res.json();
 }
 async function accept(id:string,expectedVersion:number,submissionVersion:number){
-  const res=await call('m1','POST',`/tasks/${id}/reviews`,{expectedVersion,submissionVersion,decision:'accept',quality:85,note:'Evidence was manually checked in this synthetic test.',verifiedCurrentSubmission:true});
+  const res=await call('m1','POST',`/tasks/${id}/reviews`,{expectedVersion,submissionVersion,decision:'accept',quality:9,note:'Evidence was manually checked in this synthetic test.',verifiedCurrentSubmission:true});
   assert.equal(res.statusCode,201,res.body);return res.json();
 }
 
@@ -82,7 +82,7 @@ test('only owner can submit; evidence URL is metadata and credentials/non-HTTPS 
 });
 test('human review requires explicit verification and numeric quality; employees cannot approve',async()=>{
   const task=await newTask(),s=await submit(task.id,task.version);
-  const payload={expectedVersion:s.taskVersion,submissionVersion:1,decision:'accept',quality:85,note:'Manual verification required'};
+  const payload={expectedVersion:s.taskVersion,submissionVersion:1,decision:'accept',quality:9,note:'Manual verification required'};
   assert.equal((await call('m1','POST',`/tasks/${task.id}/reviews`,payload)).statusCode,400);
   assert.equal((await call('m2','POST',`/tasks/${task.id}/reviews`,{...payload,verifiedCurrentSubmission:true})).statusCode,403);
   assert.equal((await call('m4','POST',`/tasks/${task.id}/reviews`,{...payload,verifiedCurrentSubmission:true})).statusCode,404);
@@ -91,14 +91,14 @@ test('task owner cannot self-review even when owner has manager role',async()=>{
   const task=await newTask(),s=await submit(task.id,task.version);
   // Simulate a migrated or reassigned manager-owned task; API creation rejects self-reviewer pairs.
   await db.query('UPDATE tasks SET owner_id=$2 WHERE id=$1',[task.id,'m1']);
-  const res=await call('m1','POST',`/tasks/${task.id}/reviews`,{expectedVersion:s.taskVersion,submissionVersion:1,decision:'accept',quality:85,note:'Self review must be blocked',verifiedCurrentSubmission:true});
+  const res=await call('m1','POST',`/tasks/${task.id}/reviews`,{expectedVersion:s.taskVersion,submissionVersion:1,decision:'accept',quality:9,note:'Self review must be blocked',verifiedCurrentSubmission:true});
   assert.equal(res.statusCode,403);assert.equal(res.json().error.code,'SELF_REVIEW_FORBIDDEN');
 });
 test('new evidence invalidates current review, preserves history and rejects stale approvals',async()=>{
   const task=await newTask(),s1=await submit(task.id,task.version),r1=await accept(task.id,s1.taskVersion,1),s2=await submit(task.id,r1.taskVersion);
   const detail=(await call('m2','GET',`/tasks/${task.id}`)).json();
   assert.equal(detail.submission_version,2);assert.equal(detail.currentReview,null);assert.equal(detail.reviews.length,1);assert.equal(detail.submissions.length,2);
-  const old=await call('m1','POST',`/tasks/${task.id}/reviews`,{expectedVersion:s2.taskVersion,submissionVersion:1,decision:'accept',quality:90,note:'Stale evidence should fail',verifiedCurrentSubmission:true});assert.equal(old.statusCode,409);
+  const old=await call('m1','POST',`/tasks/${task.id}/reviews`,{expectedVersion:s2.taskVersion,submissionVersion:1,decision:'accept',quality:9,note:'Stale evidence should fail',verifiedCurrentSubmission:true});assert.equal(old.statusCode,409);
   await accept(task.id,s2.taskVersion,2);
   const final=(await call('m2','GET',`/tasks/${task.id}`)).json();assert.equal(final.status,'accepted');assert.equal(final.currentReview.submission_version,2);assert.equal(final.reviews.length,2);
 });
