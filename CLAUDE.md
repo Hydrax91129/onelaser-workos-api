@@ -4,37 +4,53 @@
 > 本文件同时承担两个职能：①所有会话共同遵守的规则；②各模块会话之间唯一的"沟通板"。
 > 会话之间没有共享记忆，彼此看不到对方未合并的工作。想让其他会话知道的事情，必须写进本文件并合并到 main。
 >
-> 版本：v1.0（2026-11-03）｜维护人：KC｜标注"【待填】"的地方由工程师或"平台核心"会话补全
+> 版本：v1.1（2026-11-03）｜维护人：KC｜标注"【待填】"的地方由工程师或"平台核心"会话补全
+>
+> **主版本在后端仓库 `Yonge6/onelaser-workos-api` 根目录。** 前端仓库 `Yonge6/onelaser-workos` 根目录放一份完全相同的副本，只读：要改本文件，一律改后端仓库的主版本，合并后由 core 同步到前端仓库。两边内容不一致时，以后端主版本为准。
 
 ---
 
 ## 1. 项目概况
 
 - **是什么**：craftos.app 是 OneLaser 正在线上使用的公司内部系统（WorkOS），美国团队和中国团队（武汉、东莞、济南/山东）共同使用。
-- **仓库**：GitHub，Yonge6 账号下【待填：仓库名】
-- **主分支**：main【待确认】
+- **仓库**：GitHub，Yonge6 账号下的 `onelaser-workos-api`（后端、数据库、部署，本文件主版本）和 `onelaser-workos`（网页前端），详见第 2 节
+- **主分支**：main（所有 PR 合并到这里）。注意线上部署跟踪的是另一个分支，合并到 main 不等于上线，见第 2 节"发布方式"
 - **部署**：由 Yongger 负责发布；托管正在迁移到 OneLaser 自己的 Render 工作区，目标是稳定、可控地发布。
 - **决策人**：KC（创始人）。涉及业务规则、权限、数据结构的取舍，以 KC 的确认为准。
 
-### 当前侧边栏结构（KC 2026-10-31 确定，未经 KC 同意不得改动）
+### 当前侧边栏结构（按线上代码更新，2026-11-03；未经 KC 同意不得改动）
 
-- **工作区**：个人工作台、OKR（参考飞书 OKR）、项目管理（monday.com + Asana 风格，项目任务自动流入个人任务列表）、任务中心
+> KC 2026-11-03 决定：侧边栏先以代码为准。下面是线上正在用的版本（后端固定的前端提交 `0c90f37`，定义在前端 `dist/live-app.js` 的 `navs`）。和 KC 2026-10-31 原描述不一致的地方列在第 7 节，等 KC 审批；审批前不要按任何一边去改代码。
+
+- **工作区**：个人工作台、OKR 目标（参考飞书 OKR）、项目管理（monday.com + Asana 风格，项目任务自动流入个人任务列表）、个人任务
 - **报表区**：OKR 分析、项目分析、任务分析
-- **产品管理区**（受限可见）：产品管理、成本核算、智能供应链
-- **产品开发测试区**：客服工作台、知识中心/Wiki、产品质量追踪
-- **集成与通知**：放在个人设置里，仅管理员可见
+- **产品+供应链**（受限可见）：
+  - 产品与库存：有 `products` 权限、有仓库权限、有经销商权限、是负责人（manager）或管理员时可见；
+  - 成本核算、智能供应链：只有 `products` 权限或管理员可见；
+  - ERP 权限：负责人（manager）和管理员可见。
+- **产品开发测试区**：客服工作台（有客服权限才可见）、知识中心 / Wiki、产品质量追踪（工厂账号登录后只能看到这一项）
+- **其他**：
+  - 所有人可见：个人设置、版本更新；
+  - 组织架构：开通组织资料后可见；
+  - 人事档案、IT 账号与订阅：开通对应功能后可见，具体数据权限由后端控制；
+  - 组织与权限、Bug 与建议：仅管理员可见。
+- **不在侧边栏、从其他入口进入**：
+  - 集成与通知：在个人设置里，仅管理员；
+  - 老板看板：仅 `WORKOS_EXECUTIVE_USER_IDS` 里的人；
+  - 库存管理（WMS）、成果验收、绩效参考：从对应页面进入。
+- 前端仓库最新代码里已经有"营销"分区（KOL 管理），但还没有固定到线上版本，所以上面没有列。
 - 新模块要进侧边栏时，先在第 7 节"待 KC 决策"里登记位置提案，不得自行添加。
 
 ---
 
-## 2. 技术栈与目录结构（core 读代码补全，基于 main `63a5dd3`，2026-11-03）
+## 2. 技术栈与目录结构（core 读代码补全，基于 main `23c5d1d`，2026-11-03）
 
 **两个仓库。** 改界面要动前端仓库，改接口和数据要动后端仓库。上线时一起发布。
 
 | 仓库 | 内容 | 本文件 |
 |---|---|---|
 | `Yonge6/onelaser-workos-api`（本仓库） | 后端 API、数据库结构、部署配置；构建时把固定版本的前端一起打进镜像 | 就在这里 |
-| `Yonge6/onelaser-workos` | 网页前端（`dist/` 下的静态文件） | 没有副本，以本文件为准 |
+| `Yonge6/onelaser-workos` | 网页前端（`dist/` 下的静态文件） | 只读副本，由 core 从这里同步 |
 
 - **前端**：原生 JavaScript + CSS，没有框架，也没有构建步骤，`dist/` 里的文件就是线上文件。每个模块一个文件，例如 `dist/wms.js` + `dist/wms.css`、`dist/kol.js`、`dist/dealers.js`；`dist/live-app.js` 是真实模式的主程序，`dist/api-client.js` 负责 Cookie、CSRF 和错误处理，`dist/i18n.js` 负责中英文。改了 JS/CSS 后要运行 `node tools/stamp-assets.mjs` 更新 `index.html` 里的版本号，否则浏览器会继续用缓存。
   - 后端用 `deploy/frontend-revision.txt` 固定前端的某个提交（40 位哈希）；`tools/fetch-frontend.mjs` 构建时按哈希下载并校验 `dist/`。**前端合并后，要在后端改这个哈希并发布，线上才会变。**
@@ -115,13 +131,17 @@
 
 ### 3.5 数据库
 - 迁移文件只能由平台核心会话创建（见第 4 节）。
-- 表名统一加模块前缀，避免撞名。前缀方案见下方 3.5.1（core 按现有代码确认，待 KC 批准）。
+- 表名统一加模块前缀，避免撞名。前缀方案见下方 3.5.1（KC 2026-11-03 已批准）。
 - 不删除和重命名已有字段；需要时先新增字段、迁移数据，再由 KC 批准后废弃旧字段。
-- 涉及金额的字段统一用【待填：整数分 / decimal】存储，并注明币种（USD / CNY）。（现状不统一，见第 7 节）
+- **金额字段规则（KC 2026-11-03 确定）**：
+  - **交易金额**（订单、付款、退款、发票、应收应付、佣金等实际发生的钱）：用整数分。类型 `bigint`，字段名以 `_cents` 结尾，例如 `total_cents`、`unit_cents`。经销商模块的 `dealer_orders` 就是这样存的，可以参考。
+  - **成本和定价计算**（出厂价、到岸成本、运费分摊、换汇后的成本、建议售价等需要中间精度的数）：用固定 4 位小数。类型 `numeric(18,4)`。
+  - **每个金额字段都要有币种字段**：字段名用 `currency`；一行里有多个币种时用 `xxx_currency`。值用三位大写代码，目前只用 `USD`、`CNY`。不要再把币种写进字段名（例如不要再新建 `xxx_rmb`、`xxx_usd` 这样的字段）。
+  - **已有字段不改**。下面这些是历史写法，继续用，但新字段不要照抄：产品/定价表里不限精度的 `numeric`、币种写在字段名里（如 `factory_rmb`、`landed_usd`），IT 订阅的 `cost numeric(14,2)`，CalDock 的 `amount_cents integer`。HR 薪资是加密存储，不受这条规则影响。
 
-#### 3.5.1 表名前缀方案（core 提案，待 KC 批准）
+#### 3.5.1 表名前缀方案（KC 2026-11-03 已批准）
 
-读 main 和未合并分支后的结论：main 上现有的 106 张表里，大部分已经按模块加了前缀，但有些前缀和第 6 节的模块代号不一样。按 3.5"不改名"的规则，**已有的表一律不改名**，前缀就沿用现在的。规则只有三条：
+读 main 和未合并分支后的结论：main 上现有的 114 张表里，大部分已经按模块加了前缀，但有些前缀和第 6 节的模块代号不一样。按 3.5"不改名"的规则，**已有的表一律不改名**，前缀就沿用现在的。规则只有三条：
 
 1. **新表的前缀 = 本模块已经在用的前缀**；模块还没有表的，用第 6 节的模块代号加下划线。
 2. 前缀之后用英文复数名词，全小写加下划线，例如 `wms_movements`、`kol_profiles`。
@@ -130,24 +150,23 @@
 | 模块 | 代号 | 新表用的前缀 | 现有的表（截至 2026-11-03） |
 |---|---|---|---|
 | 平台核心 | core | 不加前缀（仅限核心表，新增要 KC 批准）；OKR、任务、项目沿用 `okr_` `kr_` `task_` `project_` | `users` `sessions` `departments` `external_identities` `oauth_states` `audit_events` `user_avatars` `member_invites` `login_codes` `inbox_items` `text_translations` `notification_requests` `notification_deliveries`；OKR：`objectives` `key_results` `kr_appraisals` `kr_scores` `objective_scores` `measurements` `okr_updates` `okr_import_batches` `okr_source_records` `okr_publications`；任务：`tasks` `submissions` `reviews` `task_attachments` `task_completions` `task_nudges` `task_updates` `task_board_config` `task_board_personal` `task_board_views`；项目：`projects` `project_updates`；AI 评审：`ai_evaluations` `ai_review_jobs` `bot_dispatch_budgets` `bot_oauth_*`（7 张）；反馈：`feedback` |
-| WMS 仓储管理 | wms | `wms_` | `wms_items` `wms_stock` `wms_movements` `wms_imports` |
+| WMS 仓储管理（含退货与维修 RMA） | wms | `wms_`；RMA 沿用 `rma_` | `wms_items` `wms_stock` `wms_movements` `wms_imports`；RMA：`rma_cases` `rma_photos` `rma_events` |
 | PIM 与定价 | pim | `product_`（**不是** `pim_`，沿用现有） | `product_catalog` `product_pricing` `product_imports` `product_changes` `product_channel_prices` `product_price_changes` `pricing_rules`（例外：没有 `product_` 前缀，不改名） |
 | HRM 员工档案 | hrm | `hr_`（**不是** `hrm_`，沿用现有） | `hr_profiles` `hr_secrets` `hr_salary` `hr_documents` `hr_events` `hr_reminder_log` |
 | 电子与资产管理 | asset | `it_`（IT 账号与订阅已经用了这个前缀）；实物资产等新表用 `asset_` | `it_accounts` `it_account_users` `it_flags` `it_checks` `it_reminder_log` |
 | 客服系统 | support | `support_`；公开支持中心沿用 `public_wiki_` | `support_snapshots` `support_reviews` `support_reply_edits` `support_handovers` `support_knowledge_candidates` `support_knowledge_candidate_reviews` `public_wiki_*`（7 张） |
 | KOL 自动化 ROI | kol | `kol_` | 未合并分支 `kol-phase1`：`kol_profiles` `kol_collabs` `kol_referrals` `kol_sync_state` |
-| 经销商下单 portal | dealer | `dealer_` | 未合并分支 `dealer-portal`：`dealer_accounts` `dealer_identities` `dealer_sessions` `dealer_oauth_states` `dealer_orders` `dealer_order_lines` `dealer_order_events` `dealer_stripe_events` |
+| 经销商下单 portal | dealer | `dealer_` | `dealer_accounts` `dealer_identities` `dealer_sessions` `dealer_oauth_states` `dealer_orders` `dealer_order_lines` `dealer_order_events` `dealer_stripe_events` |
 | AR/AP 应收应付 | arap | `arap_` | 还没有 |
 | 企业网盘管理 | drive | `drive_` | 还没有 |
 | 钉钉与企业微信接入 | im | `im_` | 还没有（钉钉登录用的 `external_identities` `oauth_states` 和通知用的 `notification_*` 属于 core 共享区域） |
 | 数据与网络安全 | security | `security_` | 还没有 |
 | 公司数据中心 / ERP | erp | `erp_`（只放缓存或快照，不放业务数据，见 6.1） | 还没有 |
 | craftos 通用改进 | general | 不建表；需要表时先在第 7 节和对应模块协调 | — |
-| 产品质量追踪 | （未登记） | `quality_` | `quality_issues` `quality_plans` `quality_links` `quality_events` |
-| 退货与维修 RMA | （未登记） | `rma_` | `rma_cases` `rma_photos` `rma_events` |
-| CalDock（独立产品） | （未登记） | `caldock_` | `caldock_*`（13 张）、`caldock_studio_*`（5 张） |
+| 产品质量追踪 | quality | `quality_` | `quality_issues` `quality_plans` `quality_links` `quality_events` |
+| CalDock（不属于 OneLaser 业务，待迁出） | caldock | 不新建表（暂停新增功能） | `caldock_*`（13 张）、`caldock_studio_*`（5 张） |
 
-最后三行在第 6 节没有对应的模块和负责会话，已在第 7 节登记，请 KC 指定归属。
+归属按 KC 2026-11-03 决定：RMA 归 wms；产品质量追踪单独成为 quality 模块；CalDock 不属于 OneLaser 业务，单独登记，待迁出到独立仓库。
 
 ### 3.6 安全与数据
 - 不把任何密钥、token、密码写进代码、提交记录、日志或本文件。只使用环境变量。
@@ -203,7 +222,7 @@
 
 | 模块 | 代号 | 负责会话 | 目录【待填】 | 状态 | 依赖的共享改动 | 最后更新 |
 |---|---|---|---|---|---|---|
-| 平台核心 | core | [WorkOS] | `src/app.ts` `src/server.ts` `src/db.ts` `src/auth.ts` `src/domain.ts` `src/org.ts` `src/members.ts` `src/integrations/` `deploy/` `render.yaml` `Dockerfile` | PR 待合并（CLAUDE.md 第 2 节、3.5.1） | — | 2026-11-03 |
+| 平台核心 | core | [WorkOS] | `src/app.ts` `src/server.ts` `src/db.ts` `src/auth.ts` `src/domain.ts` `src/org.ts` `src/members.ts` `src/integrations/` `deploy/` `render.yaml` `Dockerfile` `CLAUDE.md` | PR 待合并（CLAUDE.md v1.1） | — | 2026-11-03 |
 | WMS 仓储管理 | wms | [WorkOS] - WMS系统 |  | 开发中 |  | 2026-11-03 |
 | 企业网盘管理 | drive | [WorkOS] - 企业网盘管理 |  | 开发中 |  | 2026-11-03 |
 | KOL 自动化 ROI | kol | [WorkOS] - KOL自动化ROI系统 |  | 开发中 |  | 2026-11-03 |
@@ -217,6 +236,8 @@
 | 钉钉与企业微信接入 | im | 接入钉钉与企业微信 |  | 开发中 |  | 2026-11-03 |
 | craftos 通用改进 | general | craftos.app 改进 |  | 开发中 |  | 2026-11-03 |
 | HRM 员工档案 | hrm | 【未开会话】 |  | 规划中 |  | 2026-11-03 |
+| 产品质量追踪 | quality | 【未开会话】 | `src/quality.ts`；前端 `dist/quality.js` | 已上线 |  | 2026-11-03 |
+| CalDock（不属于 OneLaser 业务） | caldock | 【未开会话】 | `src/caldock*.ts`；前端另有 CalDock 仓库，用 `deploy/caldock-revision.txt` 固定 | 暂停：待迁出到独立仓库，暂时不要新增功能 |  | 2026-11-03 |
 
 各会话首次读到本文件时，把自己那一行的"目录"和"状态"改成真实情况。
 
@@ -224,7 +245,7 @@
 
 **core 平台核心**：负责第 4 节的全部共享区域；首要任务是补全第 2 节，并确认表名前缀和金额存储方案。
 
-**wms 仓储管理**：范围【待填】。与 pim（SKU 主数据）、dealer（出库订单）有数据依赖，SKU 以 pim 为唯一来源，不在 wms 里另建 SKU 表。
+**wms 仓储管理**：范围【待填】。退货与维修 RMA 归本模块（KC 2026-11-03），代码在 `src/rma.ts`、前端 `dist/rma.js`。与 pim（SKU 主数据）、dealer（出库订单）有数据依赖，SKU 以 pim 为唯一来源，不在 wms 里另建 SKU 表。
 
 **drive 企业网盘管理**：范围【待填】。如涉及钉钉网盘（钉盘）的文件同步，底层连接走 im 模块提供的接口。
 
@@ -250,6 +271,10 @@
 
 **hrm 员工档案**：规划中。员工档案和资料分美国区、中国区存放，访问权限完全分开（见第 5 节）。
 
+**quality 产品质量追踪**：KC 2026-11-03 决定单独成为一个模块。已上线（侧边栏"产品开发测试区"）。工厂账号（`WORKOS_QUALITY_FACTORY_DEPARTMENTS` 里部门的成员）只能使用本模块，这个限制在 `src/app.ts` 的登录拦截里，属于 core。范围【待填】。
+
+**caldock CalDock**：不属于 OneLaser 业务（KC 2026-11-03）。待迁出到独立仓库，**暂时不要新增功能**，只允许修安全问题和线上故障。迁出前不要让 OneLaser 的模块依赖它的表或接口。
+
 ---
 
 ## 7. 跨模块需求与待 KC 决策
@@ -259,11 +284,17 @@
 - 2026-11-03｜core → KC｜确认各模块的业务范围，补全第 6.1 节的"【待填】"｜待处理
 - 2026-11-03｜core → KC｜确认 AR/AP 与经销商 portal 的权限细则（第 5 节）｜待处理
 - 2026-11-03｜core → KC｜指定 HRM 中国区负责人｜待处理
-- 2026-11-03｜core → KC｜批准 3.5.1 表名前缀方案，特别是：pim 沿用 `product_`、hrm 沿用 `hr_`、asset 沿用 `it_`（都不改名）｜待处理
-- 2026-11-03｜core → KC｜产品质量追踪（`quality_`）、退货与维修 RMA（`rma_`）、CalDock（`caldock_`）在第 6 节没有对应模块，请指定归属（建议：RMA 归 wms，质量追踪新开 `quality` 模块，CalDock 单独登记）｜待处理
-- 2026-11-03｜core → KC｜金额存储方式（3.5）：现在有三种写法——CalDock 用整数分（`amount_cents integer` + `currency`），IT 订阅用 `numeric(14,2)` + `currency`，产品/定价用不限精度的 `numeric`、币种写在字段名里（如 `factory_rmb`、`landed_usd`）；HR 薪资是加密文本。请定新字段统一用哪种；已有字段按 3.5 不改｜待处理
-- 2026-11-03｜core → KC｜第 1 节的侧边栏和代码不一致：代码（前端 `dist/live-app.js` 的 `navs`）里多了"营销"（KOL 管理）和"其他"（个人设置、组织架构、人事档案、IT 账号与订阅、组织与权限、Bug 与建议、版本更新）两个分区；产品区叫"产品+供应链"，还多了"ERP 权限"；"任务中心"在代码里叫"个人任务"。以哪个为准？｜待处理
-- 2026-11-03｜core → Yongger｜`render.yaml` 写的是服务 `onelaser-workos`、分支 `main`、通过检查后自动部署，但线上实际是 `onelaser-workos-migration`、跟踪 `codex/company-migration-live-20261102`、自动部署关闭。是否要改 `render.yaml` 和线上保持一致？｜待处理
+- 2026-11-03｜core → KC｜批准 3.5.1 表名前缀方案，特别是：pim 沿用 `product_`、hrm 沿用 `hr_`、asset 沿用 `it_`（都不改名）｜已完成：KC 已批准
+- 2026-11-03｜core → KC｜产品质量追踪（`quality_`）、退货与维修 RMA（`rma_`）、CalDock（`caldock_`）在第 6 节没有对应模块，请指定归属｜已完成：RMA 归 wms；质量追踪新开 quality 模块；CalDock 单独登记，待迁出到独立仓库，暂停新增功能（见第 6 节）
+- 2026-11-03｜core → KC｜金额存储方式（3.5）：现在有三种写法——CalDock 用整数分（`amount_cents integer` + `currency`），IT 订阅用 `numeric(14,2)` + `currency`，产品/定价用不限精度的 `numeric`、币种写在字段名里（如 `factory_rmb`、`landed_usd`）；HR 薪资是加密文本。请定新字段统一用哪种；已有字段按 3.5 不改｜已完成：交易金额用整数分，成本和定价计算用 4 位小数，都要带币种字段，已写进 3.5
+- 2026-11-03｜core → KC｜第 1 节的侧边栏和代码不一致｜已处理：按 KC 决定，第 1 节已改成线上代码的样子；具体差异拆成下面几条，等 KC 审批
+- 2026-11-03｜core → KC｜侧边栏差异 1：原描述的"产品管理区"在代码里叫"产品+供应链"，第一项叫"产品与库存"（原描述是"产品管理"）｜待 KC 审批
+- 2026-11-03｜core → KC｜侧边栏差异 2：原描述的"任务中心"在代码里叫"个人任务"；"OKR"在代码里叫"OKR 目标"｜待 KC 审批
+- 2026-11-03｜core → KC｜侧边栏差异 3：代码在"产品+供应链"里多了"ERP 权限"（给成员分配产品、仓库等权限的页面）｜待 KC 审批
+- 2026-11-03｜core → KC｜侧边栏差异 4（涉及第 5 节权限）：第 5 节说产品管理区"仅 KC、李帅、袁勇"可见，但代码里所有负责人（manager）都能看到"产品与库存"（只读库存）和"ERP 权限"（只能给自己的下属分配仓库权限）。后端也是这样判断的：`src/wms.ts` 的 `warehouseLevelFor` 和 `/erp/access`。成本核算、智能供应链、产品目录和成本数据，后端都要求 `products` 权限或管理员，这部分和第 5 节一致。谁实际持有 `products` 权限要看线上数据，我连不上生产库，查不了。请 KC 确认：负责人看库存和分配仓库权限是否允许｜待 KC 审批
+- 2026-11-03｜core → KC｜侧边栏差异 5：代码多了"其他"分区（个人设置、组织架构、人事档案、IT 账号与订阅、组织与权限、Bug 与建议、版本更新），原描述没有这个分区｜待 KC 审批
+- 2026-11-03｜core → KC｜侧边栏差异 6：前端仓库最新代码已经加了"营销"分区（KOL 管理），还没上线；按第 1 节规则，新分区要先经 KC 批准，请确认位置｜待 KC 审批
+- 2026-11-03｜core → Yongger｜`render.yaml` 写的是服务 `onelaser-workos`、分支 `main`、通过检查后自动部署，但线上实际是 `onelaser-workos-migration`、跟踪 `codex/company-migration-live-20261102`、自动部署关闭。是否要改 `render.yaml` 和线上保持一致？｜处理中：KC 去和 Yongger 确认
 
 ---
 
@@ -271,5 +302,6 @@
 
 格式：日期｜模块｜做了什么｜涉及的表或接口｜PR 链接
 
+- 2026-11-03｜core｜v1.1：按 KC 决定更新——前缀方案已批准；RMA 归 wms，新增 quality 模块，CalDock 单独登记并暂停；3.5 写入金额规则；第 1 节侧边栏按线上代码更新，6 处差异登记在第 7 节；补全第 1 节仓库名和主分支；前端仓库放只读副本｜只改本文件｜PR #18
 - 2026-11-03｜core｜放入仓库根目录；补全第 2 节（技术栈、目录、命令、环境变量、发布方式）和 3.5.1 表名前缀方案；第 7 节登记 5 项待决定事项｜只改本文件，不涉及表或接口｜草稿 PR（链接见 PR 页面）
 - 2026-11-03｜core｜建立本文件 v1.0｜—｜—
