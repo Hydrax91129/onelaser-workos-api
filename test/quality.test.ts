@@ -1,0 +1,86 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {createDatabase,schema,seedDemo} from '../src/db.js';
+import {buildApp} from '../src/app.js';
+import {issueSession} from '../src/auth.js';
+import {qualityOptionsFromEnv} from '../src/quality.js';
+
+test('quality options read leads and factory departments from env',()=>{
+ const o=qualityOptionsFromEnv({WORKOS_QUALITY_LEAD_IDS:'a, b',WORKOS_QUALITY_FACTORY_DEPARTMENTS:'dg:d1|d2,jn:d3,xx:d4'} as any);
+ assert.deepEqual(o.leadIds,['a','b']);
+ assert.deepEqual(o.factoryDepartments,{dg:['d1','d2'],jn:['d3']});
+});
+
+test('quality issue: lead sends to factory, factory plans, lead approves, factory implements, lead verifies; each step dated',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ let nowIso='2026-11-10T08:00:00Z';const clock=()=>new Date(nowIso).getTime();
+ // dg factory staff sit in a DingTalk department matched by external id; jn staff by internal id
+ await db.query("INSERT INTO departments(org_id,id,external_id,name) VALUES('demo','fdg','dt-889','东莞工厂'),('demo','fjn','dt-890','济南工厂')");
+ await db.query("INSERT INTO users(id,org_id,department_id,display_name,role) VALUES('f1','demo','fdg','东莞品质','employee'),('f2','demo','fjn','济南品质','employee')");
+ const app=await buildApp({db,integrations:{executiveUserIds:['m1']},quality:{leadIds:['m4'],factoryDepartments:{dg:['dt-889'],jn:['fjn']}},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0,clock});
+ const tokens:Record<string,string>={};
+ const call=async(who:string,method:'GET'|'POST',url:string,payload?:any)=>{tokens[who]??=(await issueSession(db,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who]}});};
+ const base={title:'Hydra 13 Pro 电源板过热断电',category:'ELE',defect:'01',model:'Hydra 13 Pro',severity:'S1',factory:'dg',foundAt:'2026-11-01'};
+ try{
+  assert.equal((await call('m1','GET','/capabilities')).json().quality,true);
+  assert.equal((await call('m2','POST','/quality',base)).statusCode,403,'only leads create');
+  assert.equal((await call('m4','POST','/quality',{...base,defect:'99'})).statusCode,400,'strict defect codes');
+  assert.equal((await call('m4','POST','/quality',{...base,foundAt:'2026-12-01'})).statusCode,400,'no future dates');
+  const c=await call('m4','POST','/quality',{...base,batch:'2026-09 批次',affected:3});
+  assert.equal(c.statusCode,201,c.body);assert.equal(c.json().number,'Q-2026-0001');const id=c.json().id;
+  // the factory cannot see the issue until it is sent; the other factory never sees it
+  assert.equal((await call('f1','GET','/quality')).json().items.length,0);
+  assert.equal((await call('f1','GET',`/quality/${id}`)).statusCode,404);
+  assert.equal((await call('m2','GET','/quality')).json().items.length,1,'colleagues can read');
+  assert.equal((await call('m2','GET','/quality')).json().role,'viewer');
+  assert.equal((await call('m4','POST',`/quality/${id}/plan`,{rootCause:'xxxxx',corrective:'xxxxx',preventive:'xxxxx',implDue:'2026-11-20'})).statusCode,409,'not sent yet');
+  const s=await call('m4','POST',`/quality/${id}/send`,{sentAt:'2026-11-02',note:'附 9 张工单'});
+  assert.equal(s.statusCode,200,s.body);assert.equal(s.json().planDue,'2026-11-09','default 7 days for the factory plan');
+  const fl=(await call('f1','GET','/quality')).json();assert.equal(fl.role,'factory');assert.equal(fl.factory,'dg');assert.equal(fl.items.length,1);
+  assert.equal(fl.items[0].overdue,'plan','plan due 11-09, today 11-10');
+  assert.equal((await call('f2','GET','/quality')).json().items.length,0,'other factory');
+  assert.equal((await call('f2','GET',`/quality/${id}`)).statusCode,404);
+  assert.equal((await call('f1','POST',`/quality/${id}/update`,{title:'改个标题看看'})).statusCode,403,'factory cannot edit the issue');
+  assert.equal((await call('m4','POST',`/quality/${id}/update`,{factory:'jn'})).statusCode,409,'factory locked after sending');
+  // factory plan v1 → returned → v2 → approved
+  const p1=await call('f1','POST',`/quality/${id}/plan`,{rootCause:'电源板散热片面积不足',corrective:'更换散热片',preventive:'来料检验加温升测试',implDue:'2026-11-20'});
+  assert.equal(p1.statusCode,201,p1.body);assert.equal(p1.json().version,1);
+  assert.equal((await call('f1','POST',`/quality/${id}/decision`,{decision:'approve'})).statusCode,403,'factory cannot approve itself');
+  assert.equal((await call('m4','POST',`/quality/${id}/decision`,{decision:'return'})).statusCode,400,'a returned plan needs a reason');
+  assert.equal((await call('m4','POST',`/quality/${id}/decision`,{decision:'return',note:'请附温升测试数据'})).json().status,'sent');
+  nowIso='2026-11-12T08:00:00Z';
+  assert.equal((await call('f1','GET','/quality')).json().items[0].overdue,null,'a returned plan gets a few more days');
+  assert.equal((await call('f1','POST',`/quality/${id}/plan`,{rootCause:'散热片面积不足，温升 38K',corrective:'更换加大散热片',preventive:'每批抽检温升',implDue:'2026-11-08'})).statusCode,400,'implementation cannot be before the plan');
+  assert.equal((await call('f1','POST',`/quality/${id}/plan`,{rootCause:'散热片面积不足，温升 38K',corrective:'更换加大散热片',preventive:'每批抽检温升',implDue:'2026-11-25'})).json().version,2);
+  assert.equal((await call('m4','POST',`/quality/${id}/decision`,{decision:'approve',note:'同意'})).json().status,'doing');
+  assert.equal((await call('f2','POST',`/quality/${id}/implemented`,{implementedAt:'2026-11-12',effectiveBatch:'2026-11 批次'})).statusCode,404,'other factory');
+  nowIso='2026-11-20T08:00:00Z';
+  assert.equal((await call('f1','POST',`/quality/${id}/implemented`,{implementedAt:'2026-11-18',effectiveBatch:'SN 2611-0001 起'})).statusCode,200);
+  assert.equal((await call('f1','POST',`/quality/${id}/verify`,{result:'pass',note:'自己验证一下'})).statusCode,403);
+  assert.equal((await call('m4','POST',`/quality/${id}/verify`,{result:'fail',note:'新批次仍有 1 台过热'})).json().status,'doing');
+  assert.equal((await call('f1','POST',`/quality/${id}/implemented`,{implementedAt:'2026-11-20',effectiveBatch:'SN 2611-0050 起'})).statusCode,200);
+  nowIso='2026-11-30T08:00:00Z';
+  assert.equal((await call('m4','POST',`/quality/${id}/verify`,{result:'pass',verifiedAt:'2026-11-29',note:'新批次 30 台无复发'})).json().status,'closed');
+  const d=(await call('m4','GET',`/quality/${id}`)).json();
+  assert.deepEqual(d.dates,{sentAt:'2026-11-02',planDue:'2026-11-13',planAt:'2026-11-12',approvedAt:'2026-11-12',implDue:'2026-11-25',implementedAt:'2026-11-20',verifiedAt:'2026-11-29',closedAt:'2026-11-29'});
+  assert.deepEqual(d.durations,{toSend:1,factoryReply:10,implementation:8,verification:9,total:28});
+  assert.equal(d.resolution,'fixed');assert.equal(d.effectiveBatch,'SN 2611-0050 起');
+  assert.equal(d.plans.length,2);assert.equal(d.plans[1].decision,'return');assert.equal(d.plans[0].decision,'approve');
+  assert.ok(d.events.map((e:any)=>e.action).join(',').includes('created,sent,plan,plan_return,plan,plan_approve,implemented,verify_fail,implemented,verify_pass'));
+  assert.equal(d.can.edit,false);
+  assert.equal((await call('m4','POST',`/quality/${id}/update`,{title:'关闭后不能改'})).statusCode,409);
+  const audit=(await db.query("SELECT count(*)::int n FROM audit_events WHERE action LIKE 'quality.%' AND object_id=$1",[id])).rows[0].n;assert.ok(audit>=9);
+  // evidence links raise the affected count; a second issue can be cancelled with a reason
+  const c2=(await call('m1','POST','/quality',{...base,title:'Cobra 升降台卡滞',category:'MEC',defect:'03',model:'Cobra',severity:'S2',factory:'jn',foundAt:'2026-11-29'})).json();
+  assert.equal(c2.number,'Q-2026-0002','admins act as leads');
+  for(const ref of ['#8812','#8820'])assert.equal((await call('m4','POST',`/quality/${c2.id}/links`,{kind:'ticket',ref})).statusCode,201);
+  assert.equal((await call('m4','POST',`/quality/${c2.id}/links`,{kind:'reddit',ref:'r/lasercutting',url:'javascript:alert(1)'})).statusCode,400);
+  assert.equal((await call('m4','GET',`/quality/${c2.id}`)).json().affected,2);
+  assert.equal((await call('m4','POST',`/quality/${c2.id}/cancel`,{reason:'不'})).statusCode,400);
+  assert.equal((await call('m4','POST',`/quality/${c2.id}/cancel`,{reason:'用户操作问题，转为 FAQ'})).statusCode,200);
+  const list=(await call('m4','GET','/quality')).json();
+  assert.equal(list.items.length,2);assert.equal(list.items.find((i:any)=>i.id===c2.id).resolution,'cancelled');
+  assert.deepEqual(list.leads.map((l:any)=>l.id).sort(),['m1','m4']);
+  assert.ok(list.categories.ELE.defects['01']);
+ }finally{await app.close();}
+});
