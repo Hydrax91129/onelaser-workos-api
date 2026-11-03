@@ -14,6 +14,7 @@ import { registerProjectRoutes } from './projects.js';
 import { registerWmsRoutes } from './wms.js';
 import { registerRmaRoutes } from './rma.js';
 import { registerProductRoutes } from './products.js';
+import { registerInboxRoutes, pushInbox, taskFollowers } from './inbox.js';
 import { registerFeedbackRoutes } from './feedback.js';
 import { registerOkrCycle } from './okr-cycle.js';
 import { registerOkrPublish } from './okr-publish.js';
@@ -189,7 +190,8 @@ export async function buildApp(options:AppOptions) {
       const groupId=await validateBoardCreation(tx,user,input);
       const id=randomUUID();
       const task=(await tx.query('INSERT INTO tasks(id,org_id,department_id,owner_id,reviewer_id,created_by,title,description,criteria,baseline_due_at,due_at,kr_id,board_group_id,board_priority,board_category,parent_task_id,updated_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10,$11,$12,$13,$14,$15,$6) RETURNING *',[id,user.org_id,user.department_id,owner.id,reviewer.id,user.id,input.title,input.description,JSON.stringify(input.criteria),input.dueAt,input.krId||null,groupId,input.boardPriority||'',input.boardCategory||'',input.parentTaskId||null])).rows[0];
-      await audit(tx,user,'task.created',id,{version:1},owner.id);return task;
+      await audit(tx,user,'task.created',id,{version:1},owner.id);
+      await pushInbox(tx,{orgId:user.org_id,recipients:[owner.id],actorId:user.id,kind:'task_new',taskId:id,title:input.title,body:String(input.description||'').slice(0,200)});return task;
     });return reply.code(201).send(result);
   });
   app.post<{Params:{id:string}}>('/tasks/:id/submissions',async(req,reply)=>{
@@ -201,7 +203,8 @@ export async function buildApp(options:AppOptions) {
       const version=task.submission_version+1;
       const submission=(await tx.query('INSERT INTO submissions(id,task_id,version,submitted_by,title,description,evidence_url) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *',[randomUUID(),id,version,user.id,submissionTitle(input.title,input.description),input.description,input.evidenceUrl||null])).rows[0];
       await tx.query('UPDATE tasks SET version=version+1,submission_version=$2,status=$3,board_status=$4,board_done_at=NULL,updated_at=now(),updated_by=$5 WHERE id=$1',[id,version,'submitted','review',user.id]);
-      await audit(tx,user,'submission.created',id,{submissionVersion:version,previousReviewInvalidated:true},task.owner_id);return {submission,taskVersion:task.version+1};
+      await audit(tx,user,'submission.created',id,{submissionVersion:version,previousReviewInvalidated:true},task.owner_id);
+      await pushInbox(tx,{orgId:task.org_id,recipients:[task.reviewer_id,task.assigned_by,task.created_by],actorId:user.id,kind:'submission',taskId:id,title:task.title,body:input.description});return {submission,taskVersion:task.version+1};
     });return reply.code(201).send(result);
   });
   app.post<{Params:{id:string}}>('/tasks/:id/reviews',async(req,reply)=>{
@@ -221,7 +224,8 @@ export async function buildApp(options:AppOptions) {
       }
       const review=(await tx.query('INSERT INTO reviews(id,task_id,submission_version,reviewer_id,decision,quality,note) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *',[randomUUID(),id,input.submissionVersion,user.id,input.decision,input.decision==='accept'?input.quality:null,input.note])).rows[0];
       await tx.query('UPDATE tasks SET version=version+1,status=$2,board_status=$3,board_done_at=$4,updated_at=now(),updated_by=$5 WHERE id=$1',[id,input.decision==='accept'?'accepted':'revision',input.decision==='accept'?'done':'working',input.decision==='accept'?new Date().toISOString():null,user.id]);
-      await audit(tx,user,'review.'+input.decision,id,{submissionVersion:input.submissionVersion,quality:review.quality},task.owner_id);return {review,taskVersion:task.version+1};
+      await audit(tx,user,'review.'+input.decision,id,{submissionVersion:input.submissionVersion,quality:review.quality},task.owner_id);
+      await pushInbox(tx,{orgId:task.org_id,recipients:[task.owner_id],actorId:user.id,kind:input.decision==='accept'?'review_accept':'review_revise',taskId:id,title:task.title,body:input.note||''});return {review,taskVersion:task.version+1};
     });return reply.code(201).send(result);
   });
   app.get('/objectives',async req=>{
@@ -271,6 +275,7 @@ export async function buildApp(options:AppOptions) {
   await registerProjectRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
   await registerWmsRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
   await registerRmaRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),now:options.clock});
+  await registerInboxRoutes(app,db);
   await registerProductRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
   await registerFeedbackRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),mailer,to:process.env.FEEDBACK_EMAIL,appUrl:integrations.appPublicUrl});
   await registerOkrScoreRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),visible:visibleObjective});

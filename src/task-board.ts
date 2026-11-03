@@ -1,3 +1,4 @@
+import { pushInbox, taskFollowers } from './inbox.js';
 import { COMPLETION_LOCK_MS } from './completions.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
@@ -192,6 +193,7 @@ export function registerTaskBoardRoutes(app:FastifyInstance,db:Database,o:{isAdm
    // The owner's first progress update starts the task; an update also revives an abandoned one.
    if(user.id===task.owner_id&&['not_started','abandoned'].includes(task.board_status))await tx.query("UPDATE tasks SET board_status=CASE WHEN due_at<now() THEN 'overdue' ELSE 'working' END,version=version+1,updated_at=now() WHERE id=$1",[taskId]);
    await log(tx,user,'task.update.posted',taskId,{updateId:v.requestId,acceptanceUnchanged:true},task.owner_id);
+   await pushInbox(tx,{orgId:task.org_id,recipients:taskFollowers(task),actorId:user.id,kind:'task_update',taskId,title:task.title,body:v.body});
    reply.code(201);return {id:v.requestId,stored:true,notificationsSent:false};
   });
  });

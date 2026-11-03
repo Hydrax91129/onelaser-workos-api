@@ -8,6 +8,7 @@
  *  - Within 3 days the owner may reopen and resubmit; after 3 days the task moves to Completed and
  *    the completion is locked. An unscored result can still be scored by its owner or reviewer. Successful scores are immutable.
  */
+import { pushInbox, taskFollowers } from './inbox.js';
 import { randomUUID, createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
@@ -144,6 +145,7 @@ export async function registerCompletionRoutes(app: FastifyInstance, db: Databas
       const completion = (await tx.query('INSERT INTO task_completions(id,org_id,task_id,result,self_review,attachment_ids,completed_by) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *', [randomUUID(), task.org_id, taskId, input.result, input.selfReview, JSON.stringify(input.attachmentIds), user.id])).rows[0];
       const next = (await tx.query("UPDATE tasks SET board_status='done',board_done_at=now(),version=version+1,updated_at=now(),updated_by=$2 WHERE id=$1 RETURNING *", [taskId, user.id])).rows[0];
       await tx.query('INSERT INTO audit_events(id,org_id,department_id,owner_id,actor_id,action,object_id,details) VALUES($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), task.org_id, task.department_id, task.owner_id, user.id, 'task.completed', taskId, JSON.stringify({ completionId: completion.id, attachments: atts.length })]);
+      await pushInbox(tx, { orgId: task.org_id, recipients: taskFollowers(task), actorId: user.id, kind: 'completion', taskId, title: task.title, body: input.result });
       return { task: next, completion, names: atts.map((a: any) => a.name) };
     });
     void runScore(completion.id, task, { result: input.result, selfReview: input.selfReview, attachments: names }, user.id).catch(()=>{ /* A database interruption is recovered through the pending-attempt lease. */ });
