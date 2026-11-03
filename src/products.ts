@@ -19,8 +19,44 @@ CREATE TABLE IF NOT EXISTS product_catalog(org_id text NOT NULL, sku text NOT NU
   ship_fee numeric, best text NOT NULL DEFAULT '', note text NOT NULL DEFAULT '', updated_by text, updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(org_id,sku));
 CREATE TABLE IF NOT EXISTS product_pricing(org_id text NOT NULL, sku text NOT NULL, factory_rmb numeric, factory_usd numeric, extra_rmb numeric,
   ddp_rate numeric, last_mile_rmb numeric, updated_by text, updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(org_id,sku));
+ALTER TABLE product_pricing ADD COLUMN IF NOT EXISTS price_class text;
+ALTER TABLE product_pricing ADD COLUMN IF NOT EXISTS landed_usd numeric;
+ALTER TABLE product_pricing ADD COLUMN IF NOT EXISTS last_mile_usd numeric;
+ALTER TABLE product_pricing ADD COLUMN IF NOT EXISTS actual_price numeric;
+CREATE TABLE IF NOT EXISTS pricing_rules(org_id text PRIMARY KEY, rules jsonb NOT NULL, updated_by text, updated_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS product_imports(id text PRIMARY KEY, org_id text NOT NULL, kind text NOT NULL, rows integer NOT NULL, created_by text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
 `;
+
+/* Company pricing rules (KC, Nov 2026). Every price is backed out from cost:
+ *   price = (delivered cost − shipping the customer pays separately) ÷ (1 − selling rate − target contribution margin)
+ * Retail selling rate 17%, wholesale 7%, Amazon/eBay +10%. MSRP targets by product class, promotion tiers,
+ * and wholesale discounts off MSRP with the dealer paying freight (Option 2). */
+export const PRICE_CLASSES = ['standard', 'rd', 'accessory'] as const;
+export const DEFAULT_PRICING_RULES = {
+  retail: [
+    { key: 'ads', zh: '广告', en: 'Advertising', pct: 5 }, { key: 'txn', zh: '交易费', en: 'Transaction fees', pct: 3 },
+    { key: 'kol', zh: 'KOL', en: 'KOL', pct: 1.5 }, { key: 'brand', zh: '品牌', en: 'Brand & PR', pct: 1.5 },
+    { key: 'commission', zh: '线下提成', en: 'Sales commission', pct: 1 }, { key: 'rma', zh: '退换货及保修售后', en: 'Returns & warranty', pct: 2.5 },
+    { key: 'mgmt', zh: '管理费', en: 'Management fee', pct: 2.5 },
+  ],
+  wholesalePct: 7,
+  platformExtraPct: 10,
+  classes: { standard: 30, rd: 40, accessory: 50 },
+  tiers: { everyday: [25, 30], small: [20, 25], major: [15, 20], clearance: [10, 15] },
+  floorPct: 15,
+  majorPerYear: 2,
+  wholesale: { base: 25, large: 30, over50k: 2, over100k: 5 },
+};
+const pctN = z.number().min(0).max(100);
+const range = z.tuple([pctN, pctN]).refine(([a, b]) => a <= b, 'The low end of a range must not exceed the high end');
+export const pricingRulesSchema = z.object({
+  retail: z.array(z.object({ key: z.string().trim().min(1).max(40), zh: z.string().trim().min(1).max(40), en: z.string().trim().min(1).max(60), pct: pctN }).strict()).min(1).max(20),
+  wholesalePct: pctN, platformExtraPct: pctN,
+  classes: z.object({ standard: pctN, rd: pctN, accessory: pctN }).strict(),
+  tiers: z.object({ everyday: range, small: range, major: range, clearance: range }).strict(),
+  floorPct: pctN, majorPerYear: z.number().int().min(0).max(12),
+  wholesale: z.object({ base: pctN, large: pctN, over50k: pctN, over100k: pctN }).strict(),
+}).strict();
 
 export const PRODUCT_STATUSES = ['dev', 'launch', 'live', 'clearance', 'eolPlanned', 'eol'] as const;
 const sku = z.string().trim().min(1).max(80).regex(/^[A-Za-z0-9][A-Za-z0-9._\-/ ]*$/, 'Use letters, digits, dot, dash, slash or underscore in the SKU');
@@ -42,6 +78,11 @@ export async function registerProductRoutes(app: FastifyInstance, db: Database, 
     return r ? { at: r.created_at, rows: r.rows } : null;
   };
 
+  const rulesFor = async (org: string) => {
+    const r = (await db.query('SELECT rules,updated_at,updated_by FROM pricing_rules WHERE org_id=$1', [org])).rows[0];
+    return r ? { ...r.rules, updatedAt: r.updated_at, updatedBy: r.updated_by } : { ...DEFAULT_PRICING_RULES, updatedAt: null, updatedBy: null };
+  };
+
   app.get('/products', async req => {
     const u = actorOf(req);
     if (!canView(u)) deny(403, 'PRODUCTS_FORBIDDEN', 'You do not have access to the product area');
@@ -54,10 +95,12 @@ export async function registerProductRoutes(app: FastifyInstance, db: Database, 
           sku: r.sku, name: { zh: r.name_zh || r.name_en || r.sku, en: r.name_en || r.name_zh || r.sku }, type: r.type, status: r.status,
           gross: num_(r.gross), dims: Array.isArray(r.dims) ? r.dims.map(Number) : null, lead: r.lead, msrp: num_(r.msrp), low: num_(r.low), shipFee: num_(r.ship_fee),
           best: r.best, note: r.note,
-          ...(p ? { factoryRmb: num_(p.factory_rmb), factoryUsd: num_(p.factory_usd), extraRmb: num_(p.extra_rmb), ddpRate: num_(p.ddp_rate), lastMileRmb: num_(p.last_mile_rmb) } : {}),
+          ...(p ? { factoryRmb: num_(p.factory_rmb), factoryUsd: num_(p.factory_usd), extraRmb: num_(p.extra_rmb), ddpRate: num_(p.ddp_rate), lastMileRmb: num_(p.last_mile_rmb),
+            priceClass: p.price_class || null, landedUsd: num_(p.landed_usd), lastMileUsd: num_(p.last_mile_usd), actualPrice: num_(p.actual_price) } : {}),
         };
       }),
       canImportCatalog: canEditCatalog(u), canImportPricing: canPricing(u), canSeePricing: canPricing(u),
+      ...(canPricing(u) ? { pricingRules: await rulesFor(u.org_id), canEditRules: o.isAdmin(u) } : {}),
       lastCatalogImport: await lastImport(u.org_id, 'catalog'), lastPricingImport: canPricing(u) ? await lastImport(u.org_id, 'pricing') : null,
     };
   });
@@ -122,6 +165,44 @@ export async function registerProductRoutes(app: FastifyInstance, db: Database, 
       await tx.query('INSERT INTO product_imports(id,org_id,kind,rows,created_by) VALUES($1,$2,$3,$4,$5)', [importId, u.org_id, 'pricing', v.rows.length, u.id]);
       await audit(tx, u, 'products.pricing_import', importId, { rows: v.rows.length });
       return { rows: v.rows.length };
+    });
+  });
+
+  app.get('/products/pricing-rules', async req => {
+    const u = actorOf(req);
+    if (!canPricing(u)) deny(403, 'PRICING_RULES_FORBIDDEN', 'Only people with the full price build-up can see the pricing rules');
+    return { rules: await rulesFor(u.org_id), canEdit: o.isAdmin(u) };
+  });
+  app.put('/products/pricing-rules', async req => {
+    const u = actorOf(req);
+    if (!o.isAdmin(u)) deny(403, 'PRICING_RULES_EDIT_FORBIDDEN', 'Only company administrators can change the pricing rules');
+    const v = pricingRulesSchema.parse(req.body);
+    return db.transaction(async tx => {
+      await tx.query(`INSERT INTO pricing_rules(org_id,rules,updated_by,updated_at) VALUES($1,$2,$3,now())
+        ON CONFLICT(org_id) DO UPDATE SET rules=$2,updated_by=$3,updated_at=now()`, [u.org_id, JSON.stringify(v), u.id]);
+      await audit(tx, u, 'products.pricing_rules', u.org_id, v);
+      return { rules: { ...v, updatedAt: new Date().toISOString(), updatedBy: u.id }, canEdit: true };
+    });
+  });
+
+  // One SKU's pricing inputs: product class (decides the MSRP target), landed-cost override, last mile and the actual selling price.
+  const planBody = z.object({ priceClass: z.enum(PRICE_CLASSES).nullable().optional(), landedUsd: num, lastMileUsd: num, actualPrice: num }).strict();
+  app.patch('/products/:sku/pricing-plan', async req => {
+    const u = actorOf(req);
+    if (!canPricing(u)) deny(403, 'PRICING_PLAN_FORBIDDEN', 'Only people with the full price build-up can change pricing inputs');
+    const v = planBody.parse(req.body);
+    const raw = String((req.params as any).sku || '');
+    return db.transaction(async tx => {
+      const cat = (await tx.query('SELECT sku FROM product_catalog WHERE org_id=$1 AND lower(sku)=lower($2)', [u.org_id, raw])).rows[0];
+      if (!cat) deny(404, 'PRODUCT_NOT_FOUND', 'This SKU is not in the product catalog');
+      const cur = (await tx.query('SELECT * FROM product_pricing WHERE org_id=$1 AND sku=$2 FOR UPDATE', [u.org_id, cat.sku])).rows[0];
+      const pick = (val: any, old: any) => val === undefined ? (old ?? null) : val;
+      const next = { price_class: pick(v.priceClass, cur?.price_class), landed_usd: pick(v.landedUsd, cur?.landed_usd), last_mile_usd: pick(v.lastMileUsd, cur?.last_mile_usd), actual_price: pick(v.actualPrice, cur?.actual_price) };
+      await tx.query(`INSERT INTO product_pricing(org_id,sku,price_class,landed_usd,last_mile_usd,actual_price,updated_by,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,now())
+        ON CONFLICT(org_id,sku) DO UPDATE SET price_class=$3,landed_usd=$4,last_mile_usd=$5,actual_price=$6,updated_by=$7,updated_at=now()`,
+        [u.org_id, cat.sku, next.price_class, next.landed_usd, next.last_mile_usd, next.actual_price, u.id]);
+      await audit(tx, u, 'products.pricing_plan', cat.sku, v);
+      return { sku: cat.sku, priceClass: next.price_class, landedUsd: num_(next.landed_usd), lastMileUsd: num_(next.last_mile_usd), actualPrice: num_(next.actual_price) };
     });
   });
 }
