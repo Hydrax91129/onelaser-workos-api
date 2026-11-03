@@ -128,11 +128,11 @@ test('A human review changes the task version; only an explicit fresh analyze ca
   // This scenario covers a reviewer deciding before the bot replies, which needs the documented opt-out of the AI requirement.
   process.env.REQUIRE_AI_ASSESSMENT='false';t.after(()=>{delete process.env.REQUIRE_AI_ASSESSMENT;});
   const h=await harness(t),task=await h.createSubmission(),job=await h.enqueue(task.id),leased=toolData(await h.rpc('workos_get_review_job',{jobId:job.id}));
-  const accepted=await h.call('m1','POST',`/tasks/${task.id}/reviews`,{expectedVersion:task.version,submissionVersion:1,decision:'accept',quality:85,note:'Human explicitly inspected this synthetic evidence.',verifiedCurrentSubmission:true});assert.equal(accepted.statusCode,201,accepted.body);
+  const accepted=await h.call('m1','POST',`/tasks/${task.id}/reviews`,{expectedVersion:task.version,submissionVersion:1,decision:'accept',quality:9,note:'Human explicitly inspected this synthetic evidence.',verifiedCurrentSubmission:true});assert.equal(accepted.statusCode,201,accepted.body);
   toolError(await h.rpc('workos_submit_review',{jobId:job.id,leaseToken:leased.leaseToken,result:assessment(leased)}),'BOT_JOB_STALE',409);assert.equal(h.dispatches.length,1);
   const fresh=await h.enqueue(task.id);assert.notEqual(fresh.id,job.id);assert.equal(h.dispatches.length,2);
   assert.equal((await h.call('m2','GET',`/tasks/${task.id}/analysis-jobs/${job.id}`)).json().job.status,'superseded');
-  const detail=(await h.call('m1','GET',`/tasks/${task.id}`)).json();assert.equal(detail.status,'accepted');assert.equal(detail.currentReview.quality,85);
+  const detail=(await h.call('m1','GET',`/tasks/${task.id}`)).json();assert.equal(detail.status,'accepted');assert.equal(detail.currentReview.quality,9);
 });
 test('Timeout has an unknown outcome, non-200 is failed, and neither path automatically replays or claims completion',async t=>{
   for(const outcome of ['timeout','non200']as const){
