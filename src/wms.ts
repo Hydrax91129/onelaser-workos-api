@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS wms_movements(id text PRIMARY KEY, org_id text NOT NU
   qty integer NOT NULL, counted integer, system_qty integer, reason text NOT NULL, reference text, status text NOT NULL DEFAULT 'done',
   created_by text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), decided_by text, decided_at timestamptz);
 CREATE INDEX IF NOT EXISTS wms_movements_org ON wms_movements(org_id,created_at);
+CREATE INDEX IF NOT EXISTS wms_movements_sku ON wms_movements(org_id,sku,created_at);
+CREATE INDEX IF NOT EXISTS wms_movements_pending ON wms_movements(org_id,created_at) WHERE status='pending';
 CREATE TABLE IF NOT EXISTS wms_imports(id text PRIMARY KEY, org_id text NOT NULL, as_of date NOT NULL, rows integer NOT NULL, created_by text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
 `;
 
@@ -98,6 +100,14 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
   // A count adjustment is confirmed by the submitter's manager; company admins can confirm any.
   const canDecide = (u: User, m: any, submitter: any) => m.status === 'pending' && (o.isAdmin(u) || (!!submitter && submitter.manager_id === u.id && submitter.id !== u.id));
 
+  const peopleOf = async (org: string) => new Map((await db.query('SELECT id,display_name,name_zh,name_en,manager_id FROM users WHERE org_id=$1', [org])).rows.map((p: any) => [p.id, p]));
+  const movementOut = (u: User, people: Map<any, any>) => (m: any) => ({
+    id: m.id, type: m.type, sku: m.sku, location: m.location, toLocation: m.to_location || undefined, qty: Number(m.qty), counted: m.counted, systemQty: m.system_qty,
+    reason: m.reason, reference: m.reference || '', status: m.status, createdAt: m.created_at, byName: nameOf(people.get(m.created_by)),
+    approvedByName: m.status !== 'pending' && m.decided_by ? nameOf(people.get(m.decided_by)) : '',
+    canDecide: canDecide(u, m, people.get(m.created_by)),
+  });
+
   app.get('/wms/summary', async req => {
     const u = actorOf(req); requireView(u);
     const items = (await db.query('SELECT sku,name,type FROM wms_items WHERE org_id=$1 ORDER BY sku', [u.org_id])).rows;
@@ -105,22 +115,27 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     const qty = new Map<string, Record<string, number>>();
     for (const r of stock) { if (!qty.has(r.sku)) qty.set(r.sku, {}); qty.get(r.sku)![r.location] = Number(r.qty); }
     const moves = (await db.query('SELECT * FROM wms_movements WHERE org_id=$1 ORDER BY created_at DESC, id DESC LIMIT 500', [u.org_id])).rows;
-    const pendingOld = (await db.query(`SELECT * FROM wms_movements WHERE org_id=$1 AND status='pending' ORDER BY created_at`, [u.org_id])).rows.filter((m: any) => !moves.some((x: any) => x.id === m.id));
-    const all = [...moves, ...pendingOld];
-    const people = new Map((await db.query('SELECT id,display_name,name_zh,name_en,manager_id FROM users WHERE org_id=$1', [u.org_id])).rows.map((p: any) => [p.id, p]));
+    // Pending adjustments older than the latest 500 movements still need a decision, so they are always included.
+    const recent = new Set(moves.map((m: any) => m.id));
+    const pendingOld = (await db.query(`SELECT * FROM wms_movements WHERE org_id=$1 AND status='pending' ORDER BY created_at`, [u.org_id])).rows.filter((m: any) => !recent.has(m.id));
+    const people = await peopleOf(u.org_id);
     const lastImport = (await db.query('SELECT as_of,created_at FROM wms_imports WHERE org_id=$1 ORDER BY created_at DESC LIMIT 1', [u.org_id])).rows[0];
-    const movements = all.map((m: any) => ({
-      id: m.id, type: m.type, sku: m.sku, location: m.location, toLocation: m.to_location || undefined, qty: Number(m.qty), counted: m.counted, systemQty: m.system_qty,
-      reason: m.reason, reference: m.reference || '', status: m.status, createdAt: m.created_at, byName: nameOf(people.get(m.created_by)),
-      approvedByName: m.status === 'done' && m.decided_by ? nameOf(people.get(m.decided_by)) : m.status === 'rejected' ? nameOf(people.get(m.decided_by)) : '',
-      canDecide: canDecide(u, m, people.get(m.created_by)),
-    }));
+    const movements = [...moves, ...pendingOld].map(movementOut(u, people));
     const level = warehouseLevel(u);
     return {
       locations: LOCATIONS, items: items.map((it: any) => ({ ...it, qty: qty.get(it.sku) || {} })), movements,
       canOperate: level === 'manage', canApprove: movements.some(m => m.canDecide), canAssign: o.isAdmin(u) || (u as any).role === 'manager',
       canImport: o.isAdmin(u), lastImport: lastImport ? { asOf: lastImport.as_of, at: lastImport.created_at } : null,
     };
+  });
+
+  // Full history of one SKU (the summary only carries the latest 500 movements across all SKUs).
+  const historyQuery = z.object({ sku, limit: z.coerce.number().int().min(1).max(2000).optional() });
+  app.get('/wms/movements', async req => {
+    const u = actorOf(req); requireView(u);
+    const v = historyQuery.parse(req.query);
+    const rows = (await db.query('SELECT * FROM wms_movements WHERE org_id=$1 AND lower(sku)=lower($2) ORDER BY created_at DESC, id DESC LIMIT $3', [u.org_id, v.sku, v.limit ?? 1000])).rows;
+    return { sku: v.sku, movements: rows.map(movementOut(u, await peopleOf(u.org_id))) };
   });
 
   const itemInput = z.object({ sku, name: z.string().trim().min(1).max(200), type: z.string().trim().max(60).optional() }).strict();
@@ -233,16 +248,22 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     return db.transaction(async tx => {
       let created = 0, changed = 0;
       const reason = `期初导入（截至 ${v.asOf}）`;
+      // Read the org's SKUs and stock once (stock locked) instead of once per row and location:
+      // a 5000-row file used to cost tens of thousands of round trips inside one transaction.
+      const known = new Map((await tx.query('SELECT sku,name,type FROM wms_items WHERE org_id=$1', [u.org_id])).rows.map((i: any) => [i.sku.toLowerCase(), i]));
+      const key = (s: string, loc: string) => s + '\u0000' + loc;
+      const stock = new Map((await tx.query('SELECT sku,location,qty FROM wms_stock WHERE org_id=$1 FOR UPDATE', [u.org_id])).rows.map((r: any) => [key(r.sku, r.location), Number(r.qty)]));
       for (const r of v.rows) {
-        const existing = (await tx.query('SELECT sku FROM wms_items WHERE org_id=$1 AND lower(sku)=lower($2)', [u.org_id, r.sku])).rows[0];
+        const existing = known.get(r.sku.toLowerCase());
         const s = existing?.sku || r.sku;
         if (!existing) { await tx.query('INSERT INTO wms_items(org_id,sku,name,type,created_by) VALUES($1,$2,$3,$4,$5)', [u.org_id, s, r.name || s, r.type || '', u.id]); created++; }
-        else if (r.name || r.type) await tx.query('UPDATE wms_items SET name=COALESCE(NULLIF($3,\'\'),name),type=COALESCE(NULLIF($4,\'\'),type) WHERE org_id=$1 AND sku=$2', [u.org_id, s, r.name || '', r.type || '']);
+        else if ((r.name && r.name !== existing.name) || (r.type && r.type !== existing.type)) await tx.query('UPDATE wms_items SET name=COALESCE(NULLIF($3,\'\'),name),type=COALESCE(NULLIF($4,\'\'),type) WHERE org_id=$1 AND sku=$2', [u.org_id, s, r.name || '', r.type || '']);
         for (const [loc, target] of Object.entries(r.qty as Record<string, number | undefined>)) {
           if (target === undefined) continue;
-          const have = await stockOf(tx, u.org_id, s, loc, true), delta = target - have;
+          const have = stock.get(key(s, loc)) ?? 0, delta = target - have;
           if (!delta) continue;
-          await addStock(tx, u.org_id, s, loc, delta); changed++;
+          await tx.query('INSERT INTO wms_stock(org_id,sku,location,qty) VALUES($1,$2,$3,$4) ON CONFLICT(org_id,sku,location) DO UPDATE SET qty=$4', [u.org_id, s, loc, target]);
+          stock.set(key(s, loc), target); changed++;
           await tx.query(`INSERT INTO wms_movements(id,org_id,type,sku,location,qty,counted,system_qty,reason,reference,status,created_by,decided_by,decided_at) VALUES($1,$2,'adjust',$3,$4,$5,$6,$7,$8,'IMPORT','done',$9,$9,now())`,
             [randomUUID(), u.org_id, s, loc, delta, target, have, reason, u.id]);
         }
