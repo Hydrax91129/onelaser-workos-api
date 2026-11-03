@@ -13,7 +13,8 @@
     "start": "node build/src/server.js",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test --test-concurrency=1 test/*.test.ts"
+    "test": "tsx --test --test-concurrency=1 test/*.test.ts",
+    "dealer:local": "tsx tools/dealer-local.ts"
   },
   "dependencies": {
     "@electric-sql/pglite": "0.5.12",

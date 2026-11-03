@@ -16,6 +16,7 @@ import { inboxSchema } from './inbox.js';
 import { feedbackSchema } from './feedback.js';
 import { okrPublishSchema } from './okr-publish.js';
 import { caldockSchema } from './caldock-schema.js';
+import { dealerSchema } from './dealer.js';
 import { supportSchema } from './support.js';
 import { publicWikiSchema } from './public-wiki.js';
 import { okrImportSchema } from './okr-import.js';
@@ -223,7 +224,7 @@ ALTER TABLE reviews ALTER COLUMN quality_scale SET DEFAULT 10;
 ALTER TABLE reviews DROP CONSTRAINT IF EXISTS reviews_quality_0_10;
 ALTER TABLE reviews ADD CONSTRAINT reviews_quality_0_10 CHECK(quality IS NULL OR quality BETWEEN 0 AND 10);
 `;
-export const schema = coreSchema + boardSchema + supportSchema + okrImportSchema + okrCollabSchema + orgSchema + memberSchema + translationSchema + completionSchema + assignSchema + okrScoreSchema + projectSchema + wmsSchema + rmaSchema + qualitySchema + productSchema + inboxSchema + feedbackSchema + publicWikiSchema + caldockSchema + studioSchema + okrPublishSchema + hrSchema + itSchema;
+export const schema = coreSchema + boardSchema + supportSchema + okrImportSchema + okrCollabSchema + orgSchema + memberSchema + translationSchema + completionSchema + assignSchema + okrScoreSchema + projectSchema + wmsSchema + rmaSchema + qualitySchema + dealerSchema + productSchema + inboxSchema + feedbackSchema + publicWikiSchema + caldockSchema + studioSchema + okrPublishSchema + hrSchema + itSchema;
 
 export async function seedDemo(db: Database) {
   const users = [
