@@ -25,6 +25,7 @@
 | `DINGTALK_CLIENT_ID` / `DINGTALK_CLIENT_SECRET` | 独立企业内部应用的凭据 |
 | `DINGTALK_CORP_ID` | 批准接入的企业 |
 | `DINGTALK_ALLOWED_DEPARTMENT_IDS` | 明确批准的真实部门 ID，逗号分隔；公司模式仍须指定 |
+| `DINGTALK_INCLUDE_SUBDEPARTMENTS` | 默认开启：允许部门下任意层级子部门的成员也可登录和同步，归入该允许部门。设为 `false` 只收直属成员 |
 | `DINGTALK_MANAGER_USER_IDS` | 明确批准的主管 userId，逗号分隔 |
 | `REQUIRE_AI_ASSESSMENT` | 默认不设：验收人可以不等 Bot 评估直接人工验收。设为 `true` 时，必须先有评估通过才能验收 |
 | `AI_REVIEW_MODE` | 模板选择 `bot`；代码默认 `api`。配置缺失时评审保持关闭 |
