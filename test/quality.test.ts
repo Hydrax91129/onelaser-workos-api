@@ -106,3 +106,48 @@ test('factory accounts are limited to quality tracking; leads in the same depart
   assert.equal((await call('f1','DELETE','/auth/session')).statusCode<400,true,'factory staff can sign out');
  }finally{await app.close();}
 });
+
+test('quality reminders: each step tells the next person; due-tomorrow and overdue reminders reach the factory once per day',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ let nowIso='2026-11-02T08:00:00Z';const clock=()=>new Date(nowIso).getTime();
+ await db.query("INSERT INTO departments(org_id,id,external_id,name) VALUES('demo','fdg','dt-889','东莞工厂')");
+ await db.query("INSERT INTO users(id,org_id,department_id,display_name,role) VALUES('f1','demo','fdg','东莞品质','employee'),('f2','demo','fdg','东莞工程','employee')");
+ await db.query("UPDATE users SET email='f1@factory.example' WHERE id='f1'");
+ const mails:any[]=[];
+ const app=await buildApp({db,integrations:{executiveUserIds:['m1']},quality:{leadIds:['m4'],factoryDepartments:{dg:['dt-889']}},completionModel:null,translationModel:null,mailer:(async(m:any)=>{mails.push(m);}) as any,nudgeIntervalMs:0,clock});
+ const tokens:Record<string,string>={};
+ const call=async(who:string,method:'GET'|'POST',url:string,payload?:any)=>{tokens[who]??=(await issueSession(db,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who]}});};
+ const inbox=async(who:string)=>(await call(who,'GET','/inbox')).json().items.filter((i:any)=>i.kind==='quality');
+ try{
+  const id=(await call('m4','POST','/quality',{title:'Hydra 电源板过热',category:'ELE',defect:'01',model:'Hydra 13 Pro',severity:'S1',factory:'dg',foundAt:'2026-11-01'})).json().id;
+  assert.equal((await call('m4','POST',`/quality/${id}/send`,{planDue:'2026-11-05'})).statusCode,200);
+  const sent=await inbox('f1');assert.equal(sent.length,1);assert.equal(sent[0].issueId,id);assert.match(sent[0].body,/已提交给你们工厂.*11月5日/);
+  assert.equal((await inbox('f2')).length,1,'every factory member is told');
+  assert.equal((await inbox('m4')).length,0,'the actor is not told about their own step');
+  assert.ok(mails.some(m=>m.to==='f1@factory.example'&&/Q-2026-0001/.test(m.subject)),'email copy goes out');
+  assert.equal((await call('f1','POST','/quality/reminders/run',{})).statusCode,403,'only leads trigger a scan by hand');
+  // due tomorrow
+  nowIso='2026-11-04T08:00:00Z';
+  assert.equal((await call('m4','POST','/quality/reminders/run',{})).json().sent,2);
+  assert.equal((await call('m4','POST','/quality/reminders/run',{})).json().sent,0,'once per day');
+  assert.match((await inbox('f1'))[0].body,/整改方案明天（11月5日）到期/);
+  // overdue day 1 → factory and owner; day 2 quiet; day 3 again
+  nowIso='2026-11-06T08:00:00Z';
+  assert.equal((await call('m4','POST','/quality/reminders/run',{})).json().sent,3);
+  assert.match((await inbox('m4'))[0].body,/已逾期 1 天/);
+  nowIso='2026-11-07T08:00:00Z';assert.equal((await call('m4','POST','/quality/reminders/run',{})).json().sent,0);
+  nowIso='2026-11-08T08:00:00Z';assert.equal((await call('m4','POST','/quality/reminders/run',{})).json().sent,3);
+  // plan → owner; approve → factory with the implementation date
+  assert.equal((await call('f1','POST',`/quality/${id}/plan`,{rootCause:'散热片面积不足',corrective:'更换加大散热片',preventive:'每批抽检温升',implDue:'2026-11-20'})).statusCode,201);
+  assert.match((await inbox('m4'))[0].body,/工厂已提交.*请审批/);
+  assert.equal((await call('m4','POST',`/quality/${id}/decision`,{decision:'approve'})).statusCode,200);
+  assert.match((await inbox('f2'))[0].body,/方案已批准，请在 11月20日 前落实/);
+  nowIso='2026-11-21T08:00:00Z';
+  assert.equal((await call('m4','POST','/quality/reminders/run',{})).json().sent,3,'implementation overdue');
+  assert.match((await inbox('f1'))[0].body,/整改落实已逾期 1 天/);
+  assert.equal((await call('f1','POST',`/quality/${id}/implemented`,{implementedAt:'2026-11-21',effectiveBatch:'SN 2611-0050 起'})).statusCode,200);
+  assert.match((await inbox('m4'))[0].body,/从 SN 2611-0050 起.*请安排验证/);
+  nowIso='2026-11-28T08:00:00Z';
+  assert.equal((await call('m4','POST','/quality/reminders/run',{})).json().sent,0,'nothing is due while awaiting verification');
+ }finally{await app.close();}
+});

@@ -18,6 +18,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
 import { deny } from './errors.js';
+import { sentChannels } from './assign.js';
 
 export const qualitySchema = `
 CREATE TABLE IF NOT EXISTS quality_issues(id text PRIMARY KEY, org_id text NOT NULL, number text NOT NULL, title text NOT NULL, description text NOT NULL DEFAULT '',
@@ -85,7 +86,8 @@ const ymd = (v: any) => v ? (v instanceof Date ? v.toISOString().slice(0, 10) : 
 const days = (a: any, b: any) => a && b ? Math.max(0, Math.round((new Date(ymd(b)!).getTime() - new Date(ymd(a)!).getTime()) / 86400000)) : null;
 const addDays = (d: string, n: number) => new Date(new Date(d).getTime() + n * 86400000).toISOString().slice(0, 10);
 
-export async function registerQualityRoutes(app: FastifyInstance, db: Database, o: QualityOptions & { isAdmin: (u: User) => boolean; now?: () => number }) {
+export async function registerQualityRoutes(app: FastifyInstance, db: Database, o: QualityOptions & { isAdmin: (u: User) => boolean; now?: () => number;
+  notify?: ((userId: string, content: string) => Promise<boolean | string[]>) | null; intervalMs?: number }) {
   const now = o.now || Date.now;
   const today = () => new Date(now()).toISOString().slice(0, 10);
   const actorOf = (req: FastifyRequest): User => req.actor || deny(401, 'UNAUTHENTICATED', 'Authentication is required');
@@ -116,6 +118,64 @@ export async function registerQualityRoutes(app: FastifyInstance, db: Database, 
   const requireStatus = (i: any, ...allowed: string[]) => {
     if (!allowed.includes(i.status)) deny(409, 'QUALITY_WRONG_STEP', 'This issue is not at that step', '这个问题当前不在这一步，请刷新后再试。');
   };
+  /* ---------- reminders ----------
+   * Stored in task_nudges (task_id 'quality:<issue id>'), so they appear in the in-app inbox, are de-duplicated per
+   * kind and day, and go out by DingTalk / email through the same notify channel as task and OKR reminders. */
+  const factoryMembers = async (org: string, factory: string) => {
+    const depts = (o.factoryDepartments || {})[factory] || [];
+    if (!depts.length) return [] as string[];
+    return (await db.query(`SELECT u.id FROM users u LEFT JOIN departments d ON d.org_id=u.org_id AND d.id=u.department_id
+      WHERE u.org_id=$1 AND u.active=true AND u.disabled_at IS NULL AND (u.department_id=ANY($2::text[]) OR d.external_id=ANY($2::text[]))`, [org, depts])).rows.map((r: any) => r.id as string);
+  };
+  const remind = async (i: any, userIds: (string | null | undefined)[], kind: string, dayKey: string, message: string, actorId?: string) => {
+    let sent = 0;
+    for (const userId of new Set(userIds.filter((x): x is string => !!x && x !== actorId))) {
+      const row = (await db.query('INSERT INTO task_nudges(id,org_id,task_id,user_id,kind,day,message) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(task_id,kind,day) DO NOTHING RETURNING id',
+        [randomUUID(), i.org_id, 'quality:' + i.id, userId, kind, dayKey + ':' + userId, message.slice(0, 500)])).rows[0];
+      if (!row) continue;
+      const channels = ['app'];
+      if (o.notify) { try { channels.push(...sentChannels(await o.notify(userId, `【WorkOS】${message}`))); } catch { /* in-app copy stands */ } }
+      await db.query('UPDATE task_nudges SET channels=$2 WHERE id=$1', [row.id, JSON.stringify(channels)]);
+      sent++;
+    }
+    return sent;
+  };
+  const label = (i: any) => `${i.number}「${i.title}」`;
+  const zhDate = (d: any) => { const [, m, dd] = String(ymd(d)).split('-').map(Number); return `${m}月${dd}日`; };
+  /* After each workflow step, tell whoever has to act next. */
+  const stepNotice = async (u: User, issueId: string, step: string, note = '') => {
+    const i = (await db.query('SELECT * FROM quality_issues WHERE id=$1', [issueId])).rows[0];
+    if (!i) return;
+    const factory = () => factoryMembers(i.org_id, i.factory), key = `${today()}#${randomUUID().slice(0, 8)}`;
+    const why = note ? `意见：${note.slice(0, 200)}。` : '';
+    if (step === 'sent') await remind(i, await factory(), 'quality_sent', key, `品质问题 ${label(i)} 已提交给你们工厂，请在 ${zhDate(i.plan_due)} 前填写根本原因、纠正和预防措施。`, u.id);
+    if (step === 'plan') await remind(i, [i.owner_id], 'quality_plan', key, `工厂已提交品质问题 ${label(i)} 的整改方案，请审批。`, u.id);
+    if (step === 'plan_return') await remind(i, await factory(), 'quality_plan_return', key, `品质问题 ${label(i)} 的方案被退回。${why}请在 ${zhDate(i.plan_due)} 前重新提交。`, u.id);
+    if (step === 'plan_approve') await remind(i, await factory(), 'quality_plan_approve', key, `品质问题 ${label(i)} 的方案已批准，请在 ${zhDate(i.impl_due)} 前落实，落实后填写生效批次。`, u.id);
+    if (step === 'implemented') await remind(i, [i.owner_id], 'quality_implemented', key, `工厂已落实品质问题 ${label(i)}（从 ${i.effective_batch} 起），请安排验证。`, u.id);
+    if (step === 'verify_fail') await remind(i, await factory(), 'quality_verify_fail', key, `品质问题 ${label(i)} 验证未通过。${why}请继续落实。`, u.id);
+  };
+  /* Daily scan: due tomorrow → the factory; overdue on day 1, 3, 7 and then weekly → the factory and the issue owner. */
+  const overdueDay = (n: number) => n === 1 || n === 3 || (n >= 7 && n % 7 === 0);
+  async function runReminders() {
+    const t = today(), rows = (await db.query("SELECT * FROM quality_issues WHERE (status='sent' AND plan_due IS NOT NULL) OR (status='doing' AND impl_due IS NOT NULL)")).rows;
+    let sent = 0;
+    for (const i of rows) {
+      const plan = i.status === 'sent', due = ymd(plan ? i.plan_due : i.impl_due)!, late = days(due, t) || 0, what = plan ? '整改方案' : '整改落实';
+      const members = await factoryMembers(i.org_id, i.factory);
+      if (due === addDays(t, 1)) sent += await remind(i, members, plan ? 'quality_plan_due' : 'quality_impl_due', t, `品质问题 ${label(i)} 的${what}明天（${zhDate(due)}）到期。`);
+      else if (due < t && overdueDay(late)) sent += await remind(i, [...members, i.owner_id], plan ? 'quality_plan_overdue' : 'quality_impl_overdue', t,
+        `品质问题 ${label(i)} 的${what}已逾期 ${late} 天（期限 ${zhDate(due)}），${plan ? '请工厂尽快提交方案' : '请工厂尽快落实并填写生效批次'}。`);
+    }
+    return { checked: rows.length, sent };
+  }
+  app.post('/quality/reminders/run', async req => { requireLead(actorOf(req)); return runReminders(); });
+  if (o.intervalMs && o.intervalMs > 0) {
+    const timer = setInterval(() => { runReminders().catch(() => undefined); }, o.intervalMs);
+    timer.unref?.();
+    app.addHook('onClose', async () => clearInterval(timer));
+  }
+
   const people = async (org: string) => new Map((await db.query('SELECT id,display_name,name_zh,name_en,active,is_admin FROM users WHERE org_id=$1', [org])).rows.map((p: any) => [p.id, p]));
   const shape = (i: any, ppl: Map<string, any>, links = 0) => {
     const t = today();
@@ -225,7 +285,7 @@ export async function registerQualityRoutes(app: FastifyInstance, db: Database, 
 
   app.post<{ Params: { id: string } }>('/quality/:id/send', async req => {
     const u = actorOf(req), v = z.object({ sentAt: day.optional(), planDue: day.optional(), note: longText().optional() }).strict().parse(req.body ?? {}), issueId = id.parse(req.params.id); requireLead(u);
-    return db.transaction(async tx => {
+    const out = await db.transaction(async tx => {
       const i = await issueOf(tx, u, issueId, { role: 'lead', factory: null }, true); requireStatus(i, 'new');
       const sent = v.sentAt || today(), due = v.planDue || addDays(sent, DEFAULT_PLAN_DAYS);
       if (sent > today()) deny(400, 'QUALITY_FUTURE_DATE', 'The date cannot be in the future', '日期不能晚于今天。');
@@ -235,6 +295,8 @@ export async function registerQualityRoutes(app: FastifyInstance, db: Database, 
       await audit(tx, u, 'quality.sent', issueId, { factory: i.factory, sentAt: sent, planDue: due });
       return { ok: true, sentAt: sent, planDue: due };
     });
+    await stepNotice(u, issueId, 'sent').catch(() => undefined);
+    return out;
   });
 
   const planInput = z.object({ rootCause: longText(5), corrective: longText(5), preventive: longText(5), implDue: day, planAt: day.optional() }).strict();
@@ -254,6 +316,7 @@ export async function registerQualityRoutes(app: FastifyInstance, db: Database, 
       await audit(tx, u, 'quality.plan', issueId, { version, implDue: v.implDue });
       return { id: planId, version };
     });
+    await stepNotice(u, issueId, 'plan').catch(() => undefined);
     reply.code(201);
     return out;
   });
@@ -262,7 +325,7 @@ export async function registerQualityRoutes(app: FastifyInstance, db: Database, 
     .refine(v => v.decision === 'approve' || v.note.length >= 5, { message: 'Explain what the factory must change', path: ['note'] });
   app.post<{ Params: { id: string } }>('/quality/:id/decision', async req => {
     const u = actorOf(req), v = decisionInput.parse(req.body), issueId = id.parse(req.params.id); requireLead(u);
-    return db.transaction(async tx => {
+    const out = await db.transaction(async tx => {
       const i = await issueOf(tx, u, issueId, { role: 'lead', factory: null }, true); requireStatus(i, 'plan_review');
       const p = (await tx.query('SELECT * FROM quality_plans WHERE issue_id=$1 ORDER BY version DESC LIMIT 1', [issueId])).rows[0];
       await tx.query('UPDATE quality_plans SET decision=$2,decision_note=$3,decided_by=$4,decided_at=now() WHERE id=$1', [p.id, v.decision, v.note, u.id]);
@@ -272,12 +335,14 @@ export async function registerQualityRoutes(app: FastifyInstance, db: Database, 
       await audit(tx, u, 'quality.plan_' + v.decision, issueId, { version: p.version });
       return { ok: true, status: v.decision === 'approve' ? 'doing' : 'sent' };
     });
+    await stepNotice(u, issueId, 'plan_' + v.decision, v.note).catch(() => undefined);
+    return out;
   });
 
   const implInput = z.object({ implementedAt: day, effectiveBatch: z.string().trim().min(1).max(200), note: longText().optional() }).strict();
   app.post<{ Params: { id: string } }>('/quality/:id/implemented', async req => {
     const u = actorOf(req), v = implInput.parse(req.body), issueId = id.parse(req.params.id), r = await roleOf(u);
-    return db.transaction(async tx => {
+    const out = await db.transaction(async tx => {
       const i = await issueOf(tx, u, issueId, r, true); requireFactoryOrLead(r, i); requireStatus(i, 'doing');
       if (v.implementedAt > today()) deny(400, 'QUALITY_FUTURE_DATE', 'The date cannot be in the future', '日期不能晚于今天。');
       if (v.implementedAt < ymd(i.approved_at)!) deny(400, 'QUALITY_DATE_ORDER', 'Dates must follow the order of the steps', '日期顺序不对：后一步的日期不能早于前一步。');
@@ -286,12 +351,14 @@ export async function registerQualityRoutes(app: FastifyInstance, db: Database, 
       await audit(tx, u, 'quality.implemented', issueId, { implementedAt: v.implementedAt, effectiveBatch: v.effectiveBatch });
       return { ok: true };
     });
+    await stepNotice(u, issueId, 'implemented').catch(() => undefined);
+    return out;
   });
 
   const verifyInput = z.object({ result: z.enum(['pass', 'fail']), verifiedAt: day.optional(), note: z.string().trim().min(5).max(4000) }).strict();
   app.post<{ Params: { id: string } }>('/quality/:id/verify', async req => {
     const u = actorOf(req), v = verifyInput.parse(req.body), issueId = id.parse(req.params.id); requireLead(u);
-    return db.transaction(async tx => {
+    const out = await db.transaction(async tx => {
       const i = await issueOf(tx, u, issueId, { role: 'lead', factory: null }, true); requireStatus(i, 'verify');
       const at = v.verifiedAt || today();
       if (at > today()) deny(400, 'QUALITY_FUTURE_DATE', 'The date cannot be in the future', '日期不能晚于今天。');
@@ -302,6 +369,8 @@ export async function registerQualityRoutes(app: FastifyInstance, db: Database, 
       await audit(tx, u, 'quality.verify_' + v.result, issueId, { verifiedAt: at });
       return { ok: true, status: v.result === 'pass' ? 'closed' : 'doing' };
     });
+    await stepNotice(u, issueId, 'verify_' + v.result, v.note).catch(() => undefined);
+    return out;
   });
 
   app.post<{ Params: { id: string } }>('/quality/:id/cancel', async req => {
