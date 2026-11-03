@@ -97,7 +97,8 @@ async function taskDetail(db:Queryable, task:any) {
 }
 export async function buildApp(options:AppOptions) {
   const aiReviewConfigured=()=>{const integrations:any=(options as any).integrations||{};return !!(integrations.aiReviewMode==='bot'?integrations.bot:integrations.ai);};
-  const aiAssessmentRequired=()=>process.env.REQUIRE_AI_ASSESSMENT!=='false'&&aiReviewConfigured();
+  // The designated reviewer decides; the AI assessment is advice. Set REQUIRE_AI_ASSESSMENT=true to make a sufficient assessment a precondition for acceptance.
+  const aiAssessmentRequired=()=>process.env.REQUIRE_AI_ASSESSMENT==='true'&&aiReviewConfigured();
   const {db}=options, environment=options.environment || 'development';
   const completionModel=options.completionModel===undefined?jsonModel({apiKey:process.env.AI_PROVIDER_API_KEY||process.env.XAI_API_KEY,model:process.env.AI_SCORING_MODEL_ID||process.env.AI_MODEL_ID,baseUrl:process.env.AI_PROVIDER_BASE_URL}):options.completionModel||undefined;
   const mailer=options.mailer===undefined?mailerFromEnv(process.env):options.mailer;
