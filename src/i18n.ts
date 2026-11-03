@@ -76,6 +76,7 @@ const zh:Record<string,string>={
   'Only the designated reviewer can confirm this task':'只有指定验收人可以确认本任务。',
   'Review must match the currently submitted version':'验收必须对应当前成果版本，请重新读取任务。',
   'A quality score and actual evidence verification are required':'通过验收需要填写质量评分，并确认已实际核对当前成果。',
+  'Attach only files you uploaded to this task':'只能附上你在本任务中上传的文件。',
   'Run the AI assessment on the current evidence before accepting':'当前成果还没有 AI 评分。请先运行 AI 成果评审，评审通过后才能验收。',
   'The AI assessment found the evidence insufficient; ask the owner to add evidence':'AI 评审认为成果证据不足，请退回让负责人补充清楚的结果后再提交。',
   'Write the result and a self-evaluation to complete this task':'完成任务前，请先写清楚完成结果和自我评价，AI 会根据你的结果打分。',
@@ -223,6 +224,18 @@ const zh:Record<string,string>={
   'Contact details of UpPromote KOLs are edited in UpPromote':'来自 UpPromote 的 KOL，联系方式和社媒账号请在 UpPromote 里修改，系统会自动同步过来。',
   'UpPromote KOLs are removed in UpPromote':'来自 UpPromote 的 KOL 不能在这里删除，请在 UpPromote 里处理。',
   'Choose a person in your company as the owner':'负责人必须是公司里的同事。',
-  'Nothing to change':'没有需要保存的修改。'
+  'Nothing to change':'没有需要保存的修改。',
+  'Only HR can do this':'只有人事（HR）可以进行这项操作。',
+  'Sensitive HR data is not set up: HR_DATA_KEY is missing or invalid':'敏感人事资料还没有启用：加密密钥 HR_DATA_KEY 未设置或格式不对，请联系管理员。',
+  'This value was saved with a data key that is no longer configured':'这项资料是用已停用的加密密钥保存的，请联系管理员恢复旧密钥。',
+  'This value could not be decrypted':'这项资料无法解密，请联系管理员。',
+  'Person not found':'找不到这位员工。',
+  'This record changed since you opened it; reload and try again':'这份档案在你打开后已被修改，请刷新后再试。',
+  'Only HR and the person themself can see sensitive details':'只有人事（HR）和员工本人可以查看敏感资料。',
+  'Give a reason for viewing this detail':'请填写查看这项资料的原因（至少 4 个字）。',
+  'Documents must be PDF, PNG, JPEG or WebP':'文件只能是 PDF、PNG、JPEG 或 WebP 格式。',
+  'Documents must be 10 MB or smaller':'文件不能超过 10 MB。',
+  'A person can have at most 50 documents':'每位员工最多保存 50 份文件。',
+  'Document not found':'找不到这份文件。'
 };
 export function message(text:string,lang:Language) {return lang==='en'?text:(zh[text]||'请求未能处理，请核对输入或联系管理员。');}

@@ -202,7 +202,7 @@ export async function registerOrgRoutes(app: FastifyInstance, db: Database, o: O
         completionRate: list.length ? Math.round(accepted.length / list.length * 100) : null,
         onTimeRate: timed.length ? Math.round(onTime / timed.length * 100) : null,
         onTimeKnown: timed.length, onTimeUnknown: accepted.length - timed.length,
-        avgQuality: qualities.length ? Math.round(qualities.reduce((s: number, q: number) => s + q, 0) / qualities.length) : null,
+        avgQuality: qualities.length ? Math.round(qualities.reduce((s: number, q: number) => s + q, 0) / qualities.length * 10) / 10 : null,
       };
     };
     const out = members.map((m: any) => {

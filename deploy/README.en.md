@@ -26,6 +26,7 @@ The production host supplies an HTTPS subdomain. GitHub Pages remains a public d
 | `DINGTALK_CORP_ID` | Approved enterprise |
 | `DINGTALK_ALLOWED_DEPARTMENT_IDS` | Approved real department IDs, comma separated; required in company mode |
 | `DINGTALK_MANAGER_USER_IDS` | Explicit manager user IDs, comma separated |
+| `REQUIRE_AI_ASSESSMENT` | Unset by default: the reviewer can accept without waiting for the Bot assessment. Set `true` to require a sufficient assessment before acceptance |
 | `AI_REVIEW_MODE` | Template selects `bot`; code defaults to `api`. Incomplete integration settings disable assessment |
 | `GROK_BOT_MCP_AUTH_MODE` | Render selects `oauth`; code defaults to `bearer` compatibility |
 | `GROK_BOT_OAUTH_REDIRECT_URIS` | Exact OAuth callback allowlist, empty by default; an administrator must verify the actual client before setting it |
