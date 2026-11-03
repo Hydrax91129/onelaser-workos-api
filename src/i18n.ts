@@ -76,6 +76,7 @@ const zh:Record<string,string>={
   'Only the designated reviewer can confirm this task':'只有指定验收人可以确认本任务。',
   'Review must match the currently submitted version':'验收必须对应当前成果版本，请重新读取任务。',
   'A quality score and actual evidence verification are required':'通过验收需要填写质量评分，并确认已实际核对当前成果。',
+  'Attach only files you uploaded to this task':'只能附上你在本任务中上传的文件。',
   'Run the AI assessment on the current evidence before accepting':'当前成果还没有 AI 评分。请先运行 AI 成果评审，评审通过后才能验收。',
   'The AI assessment found the evidence insufficient; ask the owner to add evidence':'AI 评审认为成果证据不足，请退回让负责人补充清楚的结果后再提交。',
   'Write the result and a self-evaluation to complete this task':'完成任务前，请先写清楚完成结果和自我评价，AI 会根据你的结果打分。',

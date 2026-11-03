@@ -41,6 +41,7 @@ export async function registerInboxRoutes(app: FastifyInstance, db: Database) {
     const items = [
       ...own.map((r: any) => ({ id: r.id, source: 'inbox', kind: r.kind, taskId: r.task_id, title: r.title, body: r.body, actorName: r.actor_name, actorNames: r.actor_names, createdAt: r.created_at, read: !!r.read_at })),
       ...nudges.map((r: any) => { const okr = String(r.kind).startsWith('okr_') || String(r.task_id).startsWith('okr:');
+        if (String(r.task_id).startsWith('quality:')) return { id: r.id, source: 'nudge', kind: 'quality', taskId: null, issueId: String(r.task_id).slice(8), title: '', body: r.message, actorName: null, actorNames: null, createdAt: r.created_at, read: !!r.read_at };
         return { id: r.id, source: 'nudge', kind: okr ? 'okr' : r.kind === 'assigned' ? 'assigned' : 'nudge', taskId: okr ? null : r.task_id, title: r.task_title || '', body: r.message, actorName: null, actorNames: null, createdAt: r.created_at, read: !!r.read_at }; }),
     ].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, 60);
     return { items, unread: items.filter(i => !i.read).length };
