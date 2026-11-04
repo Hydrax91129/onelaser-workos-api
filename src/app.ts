@@ -197,7 +197,7 @@ export async function buildApp(options:AppOptions) {
   registerTaskBoardRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
   app.get('/tasks',async req=>{
     const user=actor(req),[where,params]=scope(user);await applyAutoStatus(db,user.org_id);
-    return {items:(await db.query(`SELECT tasks.*,CASE WHEN tasks.status='accepted' THEN (SELECT r.created_at FROM reviews r WHERE r.task_id=tasks.id AND r.submission_version=tasks.submission_version AND r.decision='accept' ORDER BY r.created_at DESC,r.id DESC LIMIT 1) ELSE NULL END AS accepted_at,(SELECT json_build_object('ai_status',c.ai_status,'ai_score',c.ai_score) FROM task_completions c WHERE c.task_id=tasks.id AND c.superseded_at IS NULL ORDER BY c.created_at DESC LIMIT 1) AS completion,${TASK_SOURCE_COLUMNS} FROM tasks WHERE ${where} ORDER BY created_at,id LIMIT 100`,[...params])).rows,limit:100};
+    return {items:(await db.query(`SELECT tasks.*,CASE WHEN tasks.status='accepted' THEN (SELECT r.created_at FROM reviews r WHERE r.task_id=tasks.id AND r.submission_version=tasks.submission_version AND r.decision='accept' ORDER BY r.created_at DESC,r.id DESC LIMIT 1) ELSE NULL END AS accepted_at,(SELECT json_build_object('ai_status',c.ai_status,'ai_score',c.ai_score,'human_score',c.human_score,'final_score',COALESCE(c.human_score,CASE WHEN c.ai_status='scored' THEN c.ai_score END),'score_source',CASE WHEN c.human_score IS NOT NULL THEN 'human' WHEN c.ai_status='scored' THEN 'ai' END,'score_due_at',c.created_at+interval '24 hours') FROM task_completions c WHERE c.task_id=tasks.id AND c.superseded_at IS NULL ORDER BY c.created_at DESC LIMIT 1) AS completion,${TASK_SOURCE_COLUMNS} FROM tasks WHERE ${where} ORDER BY created_at,id LIMIT 100`,[...params])).rows,limit:100};
   });
   app.get<{Params:{id:string}}>('/tasks/:id',async req=>taskDetail(db,await loadTask(db,actor(req),identifier.parse(req.params.id))));
   app.post('/tasks',async(req,reply)=>{
@@ -312,7 +312,7 @@ export async function buildApp(options:AppOptions) {
   await registerProductRoutes(app,db,{isAdmin:isExecutive /* sensitive ERP data: only deployment-configured executives bypass grants; in-app admins need grants */});
   await registerFeedbackRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),mailer,to:process.env.FEEDBACK_EMAIL,appUrl:integrations.appPublicUrl});
   await registerOkrScoreRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),visible:visibleObjective});
-  await registerCompletionRoutes(app,db,{model:completionModel,fxFetcher:options.fxFetcher,fxFallback:Number(process.env.FX_FALLBACK_CNY)||7.1});
+  await registerCompletionRoutes(app,db,{model:completionModel,fxFetcher:options.fxFetcher,fxFallback:Number(process.env.FX_FALLBACK_CNY)||7.1,intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0),isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
   await registerIntegrationRoutes(app,db,integrations);
   if(options.closeDatabase!==false) app.addHook('onClose',async()=>db.close());
   return app;
