@@ -155,7 +155,7 @@ export async function registerIntegrationRoutes(app:FastifyInstance,db:Database,
   app.get('/directory',async req=>{const user=currentUser(req);
     const items=(await db.query(`SELECT ${PUBLIC_USER_COLUMNS} FROM users WHERE org_id=$1 AND department_id=$2 AND active=true ORDER BY display_name,id`,[user.org_id,user.department_id])).rows;
     // Managers outside the department who manage someone in it may review that person's tasks.
-    const outside=(await db.query(`SELECT ${PUBLIC_USER_COLUMNS} FROM users WHERE org_id=$1 AND active=true AND department_id<>$2 AND id IN (SELECT manager_id FROM users WHERE org_id=$1 AND department_id=$2 AND active=true AND manager_id IS NOT NULL) ORDER BY display_name,id`,[user.org_id,user.department_id])).rows;
+    const outside=(await db.query(`SELECT ${PUBLIC_USER_COLUMNS} FROM users WHERE org_id=$1 AND active=true AND department_id<>$2 AND id IN (SELECT manager_id FROM users WHERE org_id=$1 AND department_id=$2 AND active=true AND manager_id IS NOT NULL UNION SELECT second_manager_id FROM users WHERE org_id=$1 AND department_id=$2 AND active=true AND second_manager_id IS NOT NULL) ORDER BY display_name,id`,[user.org_id,user.department_id])).rows;
     // Former members keep their name on historical tasks (shown as "disabled").
     const former=(await db.query('SELECT id,display_name,department_id FROM users WHERE org_id=$1 AND department_id=$2 AND active=false ORDER BY display_name,id',[user.org_id,user.department_id])).rows;
     return {items,reviewers:outside.map((u:any)=>({...u,outsideDepartment:true})),former:former.map((u:any)=>({...u,active:false}))};});

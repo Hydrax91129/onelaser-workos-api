@@ -89,9 +89,11 @@ export async function personalGroups(tx:Queryable,user:User){
  return [...base.filter((g:any)=>g.id!=='completed'),done];
 }
 async function reportsSet(db:Queryable,orgId:string,userId:string){
- const rows=(await db.query('SELECT id,manager_id FROM users WHERE org_id=$1',[orgId])).rows as {id:string;manager_id:string|null}[];
+ const rows=(await db.query('SELECT id,manager_id,second_manager_id FROM users WHERE org_id=$1',[orgId])).rows as {id:string;manager_id:string|null;second_manager_id:string|null}[];
  const out=new Set<string>();let frontier=[userId];
- for(let d=0;d<20&&frontier.length;d++){const next=rows.filter(r=>r.manager_id&&frontier.includes(r.manager_id)&&!out.has(r.id)&&r.id!==userId).map(r=>r.id);next.forEach(x=>out.add(x));frontier=next;}
+ // Both lines: a second leader has the same rights as the first leader.
+ const under=(r:any)=>(r.manager_id&&frontier.includes(r.manager_id))||(r.second_manager_id&&frontier.includes(r.second_manager_id));
+ for(let d=0;d<20&&frontier.length;d++){const next=rows.filter(r=>under(r)&&!out.has(r.id)&&r.id!==userId).map(r=>r.id);next.forEach(x=>out.add(x));frontier=next;}
  return out;
 }
 export function registerTaskBoardRoutes(app:FastifyInstance,db:Database,o:{isAdmin?:(u:User)=>boolean}={}){

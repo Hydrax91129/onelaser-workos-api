@@ -144,6 +144,8 @@ export async function registerMemberRoutes(app: FastifyInstance, db: Database, o
       await tx.query('DELETE FROM sessions WHERE user_id=$1', [member.id]);
       // Direct reports move up one level so their reporting line stays intact.
       const reports = (await tx.query('UPDATE users SET manager_id=$2 WHERE manager_id=$1 AND org_id=$3 RETURNING id', [member.id, member.manager_id && member.manager_id !== member.id ? member.manager_id : null, user.org_id])).rows.length;
+      // Second leader lines to the disabled member end; a second leader that now equals the first leader is dropped.
+      await tx.query('UPDATE users SET second_manager_id=NULL WHERE org_id=$2 AND (second_manager_id=$1 OR second_manager_id=manager_id)', [member.id, user.org_id]);
       let owned = 0, reviewing = 0;
       if (heir) {
         const open = "status<>'accepted' AND COALESCE(board_status,'')<>'done'";

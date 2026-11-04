@@ -23,6 +23,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS wechat text NOT NULL DEFAULT '';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS location text NOT NULL DEFAULT '';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone text NOT NULL DEFAULT '';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS manager_id text REFERENCES users(id);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS second_manager_id text REFERENCES users(id);
 ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin boolean NOT NULL DEFAULT false;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS role_override text;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_version integer NOT NULL DEFAULT 0;
@@ -32,11 +33,12 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS dingtalk_location text NOT NULL DEFAU
 ALTER TABLE users ADD COLUMN IF NOT EXISTS name_zh text NOT NULL DEFAULT '';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS name_en text NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS users_manager ON users(manager_id);
+CREATE INDEX IF NOT EXISTS users_second_manager ON users(second_manager_id);
 CREATE TABLE IF NOT EXISTS user_avatars(user_id text PRIMARY KEY REFERENCES users(id), content_type text NOT NULL, data text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now());
 `;
 
 /** Columns safe to show colleagues (contact directory). */
-export const PUBLIC_USER_COLUMNS = 'id,display_name,name_zh,name_en,department_id,role,title,phone,email,wechat,location,timezone,manager_id,avatar_version,quality_factory';
+export const PUBLIC_USER_COLUMNS = 'id,display_name,name_zh,name_en,department_id,role,title,phone,email,wechat,location,timezone,manager_id,second_manager_id,avatar_version,quality_factory';
 
 /** Feature grants an admin can give in the app. `products` opens the product test area; `product_cost_detail` shows how prices are calculated. */
 export const GRANTS = ['products', 'product_cost_detail', 'products_manage', 'pricing_msrp', 'supply', 'supply_manage', 'warehouse', 'warehouse_manage', 'dealers', 'dealers_manage'] as const;
@@ -56,6 +58,8 @@ const avatarInput = z.object({ dataUrl: z.string().max(400_000) }).strict();
 const memberPatch = z.object({
   factory: z.enum(['', ...QUALITY_FACTORY_IDS]).optional(),
   managerId: id.nullable().optional(),
+  /** Second leader (dotted line): the same rights over the person as the first leader. */
+  secondManagerId: id.nullable().optional(),
   title: text(80).optional(),
   location: text(80).optional(),
   nameZh: text(40).optional(),
@@ -77,11 +81,12 @@ async function audit(tx: Queryable, user: User, action: string, objectId: string
     [randomUUID(), user.org_id, user.department_id, ownerId, user.id, action, objectId, JSON.stringify(details)]);
 }
 
-/** All direct and indirect reports of a user (cycle-safe). */
+/** All direct and indirect reports of a user along both lines, first and second leader (cycle-safe). */
 export async function reportsOf(db: Queryable, orgId: string, userId: string) {
-  const rows = (await db.query('SELECT id,manager_id FROM users WHERE org_id=$1 AND active=true', [orgId])).rows as { id: string; manager_id: string | null }[];
+  const rows = (await db.query('SELECT id,manager_id,second_manager_id FROM users WHERE org_id=$1 AND active=true', [orgId])).rows as { id: string; manager_id: string | null; second_manager_id: string | null }[];
   const children = new Map<string, string[]>();
-  for (const r of rows) if (r.manager_id) { if (!children.has(r.manager_id)) children.set(r.manager_id, []); children.get(r.manager_id)!.push(r.id); }
+  const add = (m: string | null, c: string) => { if (!m || m === c) return; if (!children.has(m)) children.set(m, []); children.get(m)!.push(c); };
+  for (const r of rows) { add(r.manager_id, r.id); add(r.second_manager_id, r.id); }
   const out = new Map<string, number>(), queue: [string, number][] = (children.get(userId) || []).map(x => [x, 1]);
   while (queue.length) { const [cur, depth] = queue.shift()!; if (out.has(cur) || cur === userId) continue; out.set(cur, depth); for (const c of children.get(cur) || []) queue.push([c, depth + 1]); }
   return out;
@@ -144,7 +149,7 @@ export async function registerOrgRoutes(app: FastifyInstance, db: Database, o: O
   // Contact details stay in the department directory and the admin member list.
   app.get('/org/chart', async req => {
     const user = actorOf(req);
-    const rows = (await db.query(`SELECT id,display_name,name_zh,name_en,department_id,title,location,timezone,manager_id,avatar_version,role FROM users WHERE org_id=$1 AND active=true ORDER BY display_name,id`, [user.org_id])).rows;
+    const rows = (await db.query(`SELECT id,display_name,name_zh,name_en,department_id,title,location,timezone,manager_id,second_manager_id,avatar_version,role FROM users WHERE org_id=$1 AND active=true ORDER BY display_name,id`, [user.org_id])).rows;
     return { items: rows };
   });
 
@@ -164,6 +169,17 @@ export async function registerOrgRoutes(app: FastifyInstance, db: Database, o: O
           if ((await reportsOf(tx, user.org_id, member.id)).has(manager)) deny(400, 'REPORTING_CYCLE', 'A person cannot report to themselves or their own reports');
         }
       }
+      let second = member.second_manager_id || null;
+      if (input.secondManagerId !== undefined) {
+        second = input.secondManagerId;
+        if (second) {
+          if (second === member.id) deny(400, 'SECOND_MANAGER_SELF', 'A person cannot be their own second leader');
+          const m = (await tx.query('SELECT id FROM users WHERE id=$1 AND org_id=$2 AND active=true', [second, user.org_id])).rows[0];
+          if (!m) deny(400, 'INVALID_SECOND_MANAGER', 'Select an active member as second leader');
+          if ((await reportsOf(tx, user.org_id, member.id)).has(second)) deny(400, 'SECOND_MANAGER_CYCLE', 'The second leader cannot be someone who reports to this person');
+        }
+      }
+      if (second && second === manager) deny(400, 'SECOND_MANAGER_SAME', 'The second leader must be different from the first leader');
       if (input.isAdmin === false && member.id === user.id && !o.executiveUserIds.includes(user.id)) deny(400, 'ADMIN_SELF_REMOVAL', 'You cannot remove your own administrator access');
       // Feature grants open sensitive ERP data (costs, prices, stock, dealers). Only deployment-configured
       // executives may change them, so an in-app admin cannot widen anyone's access, including their own.
@@ -171,9 +187,11 @@ export async function registerOrgRoutes(app: FastifyInstance, db: Database, o: O
       const role = input.role ?? member.role, override = input.role ?? member.role_override;
       const grants = input.grants ? [...new Set(input.grants)] : member.grants;
       if (input.grants?.includes('product_cost_detail') && !input.grants.includes('products')) deny(400, 'GRANT_DEPENDENCY', 'Cost details require product area access');
-      const row = (await tx.query(`UPDATE users SET manager_id=$2,title=$3,role=$4,role_override=$5,is_admin=$6,grants=$7,location=$8,name_zh=$9,name_en=$10,email=$11,email_locked=$12,quality_factory=$13 WHERE id=$1 RETURNING ${PUBLIC_USER_COLUMNS},active,is_admin,role_override,grants,email_locked`,
-        [member.id, manager, input.title ?? member.title, role, override, input.isAdmin ?? member.is_admin, JSON.stringify(grants), input.location ?? member.location, input.nameZh ?? member.name_zh, input.nameEn ?? member.name_en, input.email ?? member.email, input.email !== undefined ? true : member.email_locked === true, input.factory ?? member.quality_factory ?? ''])).rows[0];
+      const row = (await tx.query(`UPDATE users SET manager_id=$2,title=$3,role=$4,role_override=$5,is_admin=$6,grants=$7,location=$8,name_zh=$9,name_en=$10,email=$11,email_locked=$12,quality_factory=$13,second_manager_id=$14 WHERE id=$1 RETURNING ${PUBLIC_USER_COLUMNS},active,is_admin,role_override,grants,email_locked`,
+        [member.id, manager, input.title ?? member.title, role, override, input.isAdmin ?? member.is_admin, JSON.stringify(grants), input.location ?? member.location, input.nameZh ?? member.name_zh, input.nameEn ?? member.name_en, input.email ?? member.email, input.email !== undefined ? true : member.email_locked === true, input.factory ?? member.quality_factory ?? '', second])).rows[0];
       await audit(tx, user, 'org.member_updated', member.id, input, member.id);
+      if (input.secondManagerId !== undefined && (input.secondManagerId || null) !== (member.second_manager_id || null))
+        await audit(tx, user, 'org.second_manager_changed', member.id, { from: member.second_manager_id || null, to: second }, member.id);
       return { ...row, executive: o.executiveUserIds.includes(row.id), admin: o.executiveUserIds.includes(row.id) || row.is_admin === true };
     });
   });
@@ -215,7 +233,8 @@ export async function registerOrgRoutes(app: FastifyInstance, db: Database, o: O
       const attention = own.filter((t: any) => t.status !== 'accepted' && (new Date(t.due_at).getTime() < now || t.status === 'revision'))
         .sort((a: any, b: any) => new Date(a.due_at).getTime() - new Date(b.due_at).getTime()).slice(0, 5)
         .map((t: any) => ({ id: t.id, title: t.title, dueAt: t.due_at, status: t.status, overdue: new Date(t.due_at).getTime() < now }));
-      return { ...m, depth: depthMap.get(m.id) ?? 0, stats: statsFor(own), attention };
+      // line 'second': this person's second leader (dotted line) is the caller.
+      return { ...m, depth: depthMap.get(m.id) ?? 0, line: scope !== 'all' && m.second_manager_id === user.id && m.manager_id !== user.id ? 'second' : 'first', stats: statsFor(own), attention };
     });
     return { scope, canViewAll: admin, members: out, totals: statsFor(tasks), generatedAt: new Date(now).toISOString() };
   });
