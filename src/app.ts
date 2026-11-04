@@ -191,7 +191,7 @@ export async function buildApp(options:AppOptions) {
     }:undefined,secureCookies:environment==='production'||options.studio?.secureCookies===true});
   const dealerOptions={mailer,publicUrl:integrations.appPublicUrl,...options.dealer,secureCookies:environment==='production'||options.dealer?.secureCookies===true};
   await registerDealerRoutes(app,db,dealerOptions);
-  await registerDealerAdminRoutes(app,db,{...dealerOptions,isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
+  await registerDealerAdminRoutes(app,db,{...dealerOptions,isAdmin:isExecutive /* sensitive ERP data: only deployment-configured executives bypass grants; in-app admins need grants */});
   registerPublicWikiRoutes(app,db,options.publicWiki,options.support,integrations.executiveUserIds);
   registerShopifyRoutes(app,db,options.shopify,options.support,integrations.executiveUserIds);
   registerTaskBoardRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
@@ -303,13 +303,13 @@ export async function buildApp(options:AppOptions) {
   await registerAssignRoutes(app,db,{model:completionModel||null,notify,intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0),isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
   await registerOkrCycle(app,db,{now:options.clock,notify,timeZone:process.env.OKR_TIMEZONE||'America/Los_Angeles',intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0),isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
   await registerProjectRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
-  await registerWmsRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
-  await registerRmaRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),now:options.clock});
+  await registerWmsRoutes(app,db,{isAdmin:isExecutive /* sensitive ERP data: only deployment-configured executives bypass grants; in-app admins need grants */});
+  await registerRmaRoutes(app,db,{isAdmin:isExecutive /* sensitive ERP data: only deployment-configured executives bypass grants; in-app admins need grants */,now:options.clock});
   await registerHrRoutes(app,db,{...options.hr,now:options.clock,intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0)});
   await registerQualityRoutes(app,db,{...options.quality,notify,intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0),isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),now:options.clock});
   await registerItRoutes(app,db,{...options.it,quality:options.quality,executiveIds:integrations.executiveUserIds||[],now:options.clock,intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0)});
   await registerInboxRoutes(app,db);
-  await registerProductRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
+  await registerProductRoutes(app,db,{isAdmin:isExecutive /* sensitive ERP data: only deployment-configured executives bypass grants; in-app admins need grants */});
   await registerFeedbackRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),mailer,to:process.env.FEEDBACK_EMAIL,appUrl:integrations.appPublicUrl});
   await registerOkrScoreRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),visible:visibleObjective});
   await registerCompletionRoutes(app,db,{model:completionModel,fxFetcher:options.fxFetcher,fxFallback:Number(process.env.FX_FALLBACK_CNY)||7.1});

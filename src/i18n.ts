@@ -19,6 +19,7 @@ const zh:Record<string,string>={
   'The image is too large':'图片太大，请换一张小一点的图片。',
   'Avatar not found':'未找到头像。',
   'Administrator access is required':'需要管理员权限。',
+  'Only the company owner can change feature access':'只有公司负责人（主管理员）可以修改功能权限。',
   'Cost details require product area access':'查看成本明细前，需要先开通产品管理区权限。',
   'Member not found':'未找到该成员。',
   'Update not found':'找不到这条更新，可能已被删除。',
