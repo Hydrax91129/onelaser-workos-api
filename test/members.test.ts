@@ -131,3 +131,26 @@ test('a department with one manager can still create the manager\'s own task: th
   const dir=(await call('m1','GET','/directory')).json();assert.ok(dir.reviewers.some((u:any)=>u.id==='m4'&&u.outsideDepartment));
  }finally{await app.close();}
 });
+
+test('factory contact invite: quality tracking only, no feature grants, left out of the IT quarterly check',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ const app=await buildApp({db,integrations:{executiveUserIds:['m1'],appPublicUrl:'https://craftos.example'},it:{userIds:['m4']},mailer:null,nudgeIntervalMs:0});
+ const tokens:Record<string,string>={};
+ const call=async(who:string,method:'GET'|'POST'|'PATCH',url:string,payload?:any)=>{tokens[who]??=(await issueSession(db,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who]}});};
+ try{
+  assert.equal((await call('m1','POST','/org/invites',{displayName:'X',email:'x@example.com',factory:'sz'})).statusCode,400,'unknown factory');
+  const inv=await call('m1','POST','/org/invites',{displayName:'Factory QC (fictional)',email:'qc@factory.example',factory:'dg',role:'manager',grants:['products']});
+  assert.equal(inv.statusCode,201,inv.body);assert.equal(inv.json().factory,'dg');assert.equal(inv.json().role,'employee');assert.deepEqual(inv.json().grants,[],'factory contacts get no feature grants');
+  const accept=await app.inject({method:'POST',url:'/auth/invite/'+tokenFrom(inv.json().url)+'/accept',payload:{password:'factory-pass-2026'}});
+  assert.equal(accept.statusCode,200,accept.body);
+  const id=(await db.query("SELECT id,quality_factory FROM users WHERE login_email='qc@factory.example'")).rows[0];assert.equal(id.quality_factory,'dg');
+  const t=(await issueSession(db,id.id)).accessToken,as=(url:string)=>app.inject({method:'GET',url,headers:{authorization:'Bearer '+t}});
+  assert.equal((await as('/quality')).statusCode,200,'factory contact uses quality tracking');
+  assert.equal((await as('/task-board')).json().error.code,'FACTORY_SCOPE','and nothing else');
+  const round=(await call('m4','POST','/it/checks/start')).json();
+  assert.ok(!round.people.some((p:any)=>p.userId===id.id),'not asked to confirm IT accounts');
+  // an admin can clear the tag: the person becomes an ordinary member
+  const cleared=await call('m1','PATCH','/org/members/'+id.id,{factory:''});assert.equal(cleared.statusCode,200,cleared.body);assert.equal(cleared.json().quality_factory,'');
+  assert.notEqual((await as('/task-board')).statusCode,403);
+ }finally{await app.close();}
+});

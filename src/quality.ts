@@ -52,6 +52,7 @@ export const QUALITY_FACTORIES = [{ id: 'dg', zh: '东莞工厂', en: 'Dongguan 
 export const QUALITY_STATUSES = ['new', 'sent', 'plan_review', 'doing', 'verify', 'closed'] as const;
 const SEVERITIES = ['S1', 'S2', 'S3'] as const;
 const LINK_KINDS = ['ticket', 'rma', 'review', 'forum', 'reddit', 'amazon', 'other'] as const;
+export const QUALITY_FACTORY_IDS = ['dg', 'jn'] as const;
 const FACTORY_IDS = QUALITY_FACTORIES.map(f => f.id) as [string, ...string[]];
 const DEFAULT_PLAN_DAYS = 7;
 
@@ -67,6 +68,9 @@ export function qualityOptionsFromEnv(env: NodeJS.ProcessEnv): QualityOptions {
 
 /* Factory membership comes from the person's department (internal id or DingTalk external id). */
 export async function qualityFactoryOf(db: Queryable, o: QualityOptions, u: User): Promise<string | null> {
+  /* Factory contacts invited as such (users.quality_factory, set from the invite or by an admin) come first. */
+  const tagged = (u as any).quality_factory ?? (await db.query('SELECT quality_factory FROM users WHERE id=$1', [u.id])).rows[0]?.quality_factory;
+  if (tagged && FACTORY_IDS.includes(tagged)) return tagged;
   const map = o.factoryDepartments || {};
   if (!Object.keys(map).length) return null;
   const ext = (await db.query('SELECT external_id FROM departments WHERE org_id=$1 AND id=$2', [u.org_id, u.department_id])).rows[0]?.external_id;
@@ -77,9 +81,8 @@ export async function qualityFactoryOf(db: Queryable, o: QualityOptions, u: User
  * IT quarterly account check skip. Same department matching as qualityFactoryOf. */
 export async function factoryUserIds(db: Queryable, o: QualityOptions, orgId: string): Promise<Set<string>> {
   const depts = Object.values(o.factoryDepartments || {}).flat();
-  if (!depts.length) return new Set();
   const rows = (await db.query(`SELECT u.id FROM users u LEFT JOIN departments d ON d.org_id=u.org_id AND d.id=u.department_id
-    WHERE u.org_id=$1 AND (u.department_id=ANY($2::text[]) OR d.external_id=ANY($2::text[]))`, [orgId, depts])).rows;
+    WHERE u.org_id=$1 AND (u.quality_factory<>'' OR u.department_id=ANY($2::text[]) OR d.external_id=ANY($2::text[]))`, [orgId, depts])).rows;
   const leads = new Set(o.leadIds || []);
   return new Set(rows.map((r: any) => r.id as string).filter(id => !leads.has(id)));
 }
