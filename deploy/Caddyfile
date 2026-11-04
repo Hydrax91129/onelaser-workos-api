@@ -65,15 +65,12 @@ http://:{$PORT:10000} {
         root * /app/caldock/decision-studio
         file_server
     }
+    # The storefront moved to its own domain; old links keep their path and query.
     handle /caldock {
-        redir * /caldock/?{http.request.uri.query} 308
+        redir * https://wodemac.com/?{http.request.uri.query} 308
     }
-    @caldock_public_assets path /caldock/assets/*
-    header @caldock_public_assets Cache-Control "public, max-age=86400"
     handle_path /caldock/* {
-        header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-src https://www.youtube-nocookie.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
-        root * /app/caldock
-        file_server
+        redir * https://wodemac.com{uri} 308
     }
     handle /wiki {
         redir * /wiki/?{http.request.uri.query} 308
