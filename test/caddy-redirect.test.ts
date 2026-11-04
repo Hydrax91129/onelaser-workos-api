@@ -96,6 +96,8 @@ test('canonical origin switches only the approved Render host and retains health
             assert.match(upstreamPolicy, /(?:^|;)\s*frame-src 'self';/, path);
             assert.doesNotMatch(upstreamPolicy, /https:\/\/wiki\.1laser\.com/, path);
           }
+          assert.equal((await get('wodemac.com', '/healthz')).status, 200);
+          assert.equal((await get('wodemac.com', '/api/tasks')).status, 404);
           const moved = await get('craftos.app', '/caldock/?lang=zh');
           assert.equal(moved.status, 308); assert.equal(moved.location, 'https://wodemac.com/?lang=zh');
           assert.equal((await get('craftos.app', '/caldock')).location?.startsWith('https://wodemac.com/'), true);
