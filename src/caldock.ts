@@ -7,7 +7,7 @@ import { deny } from './errors.js';
 import { createCaldockGateway, type CaldockGateway, type CaldockProvider } from './caldock-oidc.js';
 import { applyCaldockOffer, recordCaldockRenewalCommission, caldockAudit, caldockOfferStatus, caldockStockStatus, CALDOCK_OFFER, CALDOCK_PRICES, createCaldockOrder, recordVerifiedCaldockPayment } from './caldock-domain.js';
 import { ApiError } from './errors.js';
-import type { Mailer } from './members.js';
+import { mailerFromEnv, type Mailer } from './members.js';
 import { isStaleTestSession, stripeFromEnv, verifyStripeEvent, StripeRequestError, STRIPE_RECURRING, type CaldockStripe } from './caldock-stripe.js';
 
 type Customer = {id:string;display_name:string;email:string|null;active:boolean;created_at:string};
@@ -35,7 +35,8 @@ export function caldockOptionsFromEnv(env:NodeJS.ProcessEnv):CaldockOptions {
   let stripe:CaldockStripe|undefined;
   // A Stripe misconfiguration disables CalDock payments only; it must never stop the shared Work OS service.
   try{stripe=stripeFromEnv(env);}catch(error){console.error('CalDock payments disabled: '+(error as Error).message);}
-  return {stripe,firstPeriodOffer:true,liveStock:true,orderNotifyEmails:(env.CALDOCK_ORDER_NOTIFY_EMAILS||'').split(',').map(x=>x.trim()).filter(Boolean),publicUrl:env.APP_PUBLIC_URL||env.RENDER_EXTERNAL_URL||'http://localhost:4173',siteUrl:'https://wodemac.com',secureCookies:env.NODE_ENV==='production',marketingUrl:env.CALDOCK_MARKETING_URL||'https://yonge6.github.io/mac-mini-rental/',adminUserIds:(env.CALDOCK_ADMIN_USER_IDS||'').split(',').map(x=>x.trim()).filter(Boolean),providers};
+  // Its own mail settings: the shared ones would also switch on Work OS email sign-in and invites.
+  return {stripe,firstPeriodOffer:true,liveStock:true,mailer:mailerFromEnv({RESEND_API_KEY:env.CALDOCK_RESEND_API_KEY,EMAIL_FROM:env.CALDOCK_EMAIL_FROM}),orderNotifyEmails:(env.CALDOCK_ORDER_NOTIFY_EMAILS||'').split(',').map(x=>x.trim()).filter(Boolean),publicUrl:env.APP_PUBLIC_URL||env.RENDER_EXTERNAL_URL||'http://localhost:4173',siteUrl:'https://wodemac.com',secureCookies:env.NODE_ENV==='production',marketingUrl:env.CALDOCK_MARKETING_URL||'https://yonge6.github.io/mac-mini-rental/',adminUserIds:(env.CALDOCK_ADMIN_USER_IDS||'').split(',').map(x=>x.trim()).filter(Boolean),providers};
 }
 export async function registerCaldockRoutes(app:FastifyInstance,db:Database,options:CaldockOptions={}) {
   const publicUrl=new URL(options.publicUrl||'http://localhost:4173');
@@ -218,6 +219,15 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
           await viaStripe(()=>stripe.request('POST','/v1/subscriptions/'+encodeURIComponent(row.stripe_subscription_id),{trial_end:String(next),proration_behavior:'none'},'caldock-deliver-'+order.id));
         }
         await caldockAudit(tx,current.user.id,'order.'+input.status,order.id);return row;});
+    });
+    routes.post('/admin/order-mail-test',async req=>{
+      const current=admin(req),mailer=options.mailer,recipients=options.orderNotifyEmails||[];
+      if(!mailer||!recipients.length)deny(503,'CALDOCK_ORDER_MAIL_UNCONFIGURED','Order email is not configured');
+      const sent=await Promise.allSettled(recipients.map(to=>mailer({to,subject:'wodeMac 新订单邮件测试',text:'这是一封测试邮件，收到说明新订单通知配置正常。',html:'<p>这是一封测试邮件，收到说明新订单通知配置正常。</p>'})));
+      const failed=sent.filter(r=>r.status==='rejected').length;
+      await caldockAudit(db,current.user.id,'notify.order_mail_test','1',{recipients:recipients.length,failed});
+      if(failed)deny(502,'CALDOCK_ORDER_MAIL_FAILED','The test email could not be delivered');
+      return {sent:recipients.length};
     });
     routes.get('/admin/settings',async req=>{admin(req);return (await db.query('SELECT * FROM caldock_settings WHERE id=1')).rows[0];});
     routes.get('/admin/customers',async req=>{admin(req);return {items:(await db.query('SELECT u.id,u.display_name,u.email,u.active,u.created_at,(SELECT count(*)::int FROM caldock_orders o WHERE o.customer_id=u.id) AS orders FROM caldock_users u ORDER BY u.created_at DESC LIMIT 100')).rows};});

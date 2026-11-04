@@ -222,6 +222,31 @@ test('paid orders update the live stock, mail the owners once, and sold-out stop
   }finally{await db.query("UPDATE caldock_orders SET paid_at='2026-01-01' WHERE paid_at IS NOT NULL");await stockApp.close();}
 });
 
+test('order mail uses its own settings and an admin can send a test',async()=>{
+  assert.equal(caldockOptionsFromEnv({RESEND_API_KEY:'re_shared',EMAIL_FROM:'a@example.test'}).mailer,null);
+  assert.equal(typeof caldockOptionsFromEnv({CALDOCK_RESEND_API_KEY:'re_own',CALDOCK_EMAIL_FROM:'a@example.test'}).mailer,'function');
+  const sent:string[]=[];let failing=false;
+  const shared=async()=>{throw new Error('the shared mailer must not be used');};
+  const mailApp=await buildApp({db,environment:'production',closeDatabase:false,mailer:shared,caldock:{publicUrl:origin,providers:gateways,adminUserIds:[adminId],stripe,mailer:async m=>{if(failing)throw new Error('down');sent.push(m.to);},orderNotifyEmails:['a@example.test','b@example.test']}});
+  const plainApp=await buildApp({db,environment:'production',closeDatabase:false,caldock:{publicUrl:origin,providers:gateways,adminUserIds:[adminId],stripe,mailer:null}});
+  const signIn=async(target:typeof mailApp,code:string)=>{
+    const start=await target.inject('/caldock/auth/google/start?next=account&lang=zh&interval=month');
+    const state=new URL(start.headers.location!).searchParams.get('state')!,flow=cookieList(start).map(c=>c.split(';')[0]).join('; ');
+    const back=await target.inject({url:`/caldock/auth/google/callback?state=${state}&code=${code}`,headers:{cookie:flow}});
+    const cookie=cookieList(back).find(c=>c.startsWith('__Host-caldock_session='))!.split(';')[0];
+    return {cookie,csrf:(await target.inject({url:'/caldock/me',headers:{cookie}})).json().csrfToken};
+  };
+  const test=(target:typeof mailApp,who:{cookie:string;csrf:string})=>target.inject({method:'POST',url:'/caldock/admin/order-mail-test',payload:{},headers:{cookie:who.cookie,origin,'x-csrf-token':who.csrf}});
+  try{
+    assert.equal((await test(mailApp,await signIn(mailApp,'mail-test-customer'))).statusCode,403);
+    const owner=await signIn(mailApp,'stripe-owner');
+    const ok=await test(mailApp,owner);assert.equal(ok.statusCode,200);assert.equal(ok.json().sent,2);assert.deepEqual(sent,['a@example.test','b@example.test']);
+    failing=true;
+    const down=await test(mailApp,owner);assert.equal(down.statusCode,502);assert.equal(down.json().error.code,'CALDOCK_ORDER_MAIL_FAILED');
+    const off=await test(plainApp,await signIn(plainApp,'stripe-owner'));assert.equal(off.statusCode,503);assert.equal(off.json().error.code,'CALDOCK_ORDER_MAIL_UNCONFIGURED');
+  }finally{await mailApp.close();await plainApp.close();}
+});
+
 test('a partner signed up through another partner earns that partner a second tier, on renewals too, and never a third',async()=>{
   const base=await db.query('SELECT commission_bps,commission_mode FROM caldock_settings WHERE id=1');
   await db.query("UPDATE caldock_settings SET commission_bps=2000,commission_mode='first_order',second_tier_bps=500 WHERE id=1");
