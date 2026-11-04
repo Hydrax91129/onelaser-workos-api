@@ -11,7 +11,7 @@ import { isStaleTestSession, stripeFromEnv, verifyStripeEvent, StripeRequestErro
 
 type Customer = {id:string;display_name:string;email:string|null;active:boolean;created_at:string};
 type Session = {user:Customer;csrf:string;token:string};
-export type CaldockOptions = {publicUrl?:string;firstPeriodOffer?:boolean;marketingUrl?:string;secureCookies?:boolean;adminUserIds?:string[];providers?:Partial<Record<CaldockProvider,CaldockGateway>>;stripe?:CaldockStripe};
+export type CaldockOptions = {publicUrl?:string;siteUrl?:string;firstPeriodOffer?:boolean;marketingUrl?:string;secureCookies?:boolean;adminUserIds?:string[];providers?:Partial<Record<CaldockProvider,CaldockGateway>>;stripe?:CaldockStripe};
 const id=z.string().uuid(),providerName=z.enum(['google','apple']);
 const status=z.enum(['pending_payment','paid','provisioning','active','cancelled','refunded']);
 const interval=z.enum(['week','month','quarter','half','year']);
@@ -34,7 +34,7 @@ export function caldockOptionsFromEnv(env:NodeJS.ProcessEnv):CaldockOptions {
   let stripe:CaldockStripe|undefined;
   // A Stripe misconfiguration disables CalDock payments only; it must never stop the shared Work OS service.
   try{stripe=stripeFromEnv(env);}catch(error){console.error('CalDock payments disabled: '+(error as Error).message);}
-  return {stripe,firstPeriodOffer:true,publicUrl:env.APP_PUBLIC_URL||env.RENDER_EXTERNAL_URL||'http://localhost:4173',secureCookies:env.NODE_ENV==='production',marketingUrl:env.CALDOCK_MARKETING_URL||'https://yonge6.github.io/mac-mini-rental/',adminUserIds:(env.CALDOCK_ADMIN_USER_IDS||'').split(',').map(x=>x.trim()).filter(Boolean),providers};
+  return {stripe,firstPeriodOffer:true,publicUrl:env.APP_PUBLIC_URL||env.RENDER_EXTERNAL_URL||'http://localhost:4173',siteUrl:'https://wodemac.com',secureCookies:env.NODE_ENV==='production',marketingUrl:env.CALDOCK_MARKETING_URL||'https://yonge6.github.io/mac-mini-rental/',adminUserIds:(env.CALDOCK_ADMIN_USER_IDS||'').split(',').map(x=>x.trim()).filter(Boolean),providers};
 }
 export async function registerCaldockRoutes(app:FastifyInstance,db:Database,options:CaldockOptions={}) {
   const publicUrl=new URL(options.publicUrl||'http://localhost:4173');
@@ -47,9 +47,14 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
   const viaStripe=async<T>(call:()=>Promise<T>):Promise<T>=>{try{return await call();}catch(error){if(error instanceof StripeRequestError)deny(502,'CALDOCK_PAYMENT_PROVIDER_ERROR','The payment provider could not complete the request; try again');throw error;}};
   const stopStripeRenewal=async(subscriptionId:string|null)=>{if(stripe&&subscriptionId)await viaStripe(()=>stripe.request('POST','/v1/subscriptions/'+encodeURIComponent(subscriptionId),{cancel_at_period_end:'true'},'caldock-stop-'+subscriptionId));};
   const sessions=new WeakMap<FastifyRequest,Session>();
-  const actor=(req:FastifyRequest)=>sessions.get(req)||deny(401,'CALDOCK_UNAUTHENTICATED','Sign in to CalDock to continue');
-  const admin=(req:FastifyRequest)=>{const current=actor(req);if(!admins.has(current.user.id))deny(403,'CALDOCK_ADMIN_REQUIRED','CalDock administrator access is required');return current;};
-  const checkOrigin=(req:FastifyRequest)=>{if(req.headers.origin!==origin)deny(403,'CALDOCK_CSRF_INVALID','Request origin or security token is invalid');};
+  const actor=(req:FastifyRequest)=>sessions.get(req)||deny(401,'CALDOCK_UNAUTHENTICATED','Sign in to wodeMac to continue');
+  const admin=(req:FastifyRequest)=>{const current=actor(req);if(!admins.has(current.user.id))deny(403,'CALDOCK_ADMIN_REQUIRED','wodeMac administrator access is required');return current;};
+  // The storefront has its own domain; requests on the shared host keep that host's origin and /caldock/ path.
+  const site=options.siteUrl?new URL(options.siteUrl):undefined;
+  const onSite=(req:FastifyRequest)=>!!site&&(req.headers.host||'').toLowerCase()===site.host;
+  const originFor=(req:FastifyRequest)=>onSite(req)?site!.origin:origin;
+  const appPath=(req:FastifyRequest)=>onSite(req)?'/':'/caldock/';
+  const checkOrigin=(req:FastifyRequest)=>{if(req.headers.origin!==originFor(req))deny(403,'CALDOCK_CSRF_INVALID','Request origin or security token is invalid');};
   const attempts=new Map<string,{count:number;expires:number}>();
   const limit=(req:FastifyRequest)=>{
     const now=Date.now(),key=hash(req.ip),record=attempts.get(key);
@@ -57,7 +62,7 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
     else attempts.set(key,{count:1,expires:now+60000});
     if(attempts.size>1000)for(const[k,v]of attempts)if(v.expires<=now)attempts.delete(k);
   };
-  const returnUrl=(view:string,language:string,billing:string,error?:string)=>{const u=new URL(view==='studio'?'/decision-studio/':'/caldock/',origin);u.searchParams.set('view',view);u.searchParams.set('lang',language);u.searchParams.set('interval',billing);if(error)u.searchParams.set('error',error);return u.toString();};
+  const returnUrl=(req:FastifyRequest,view:string,language:string,billing:string,error?:string)=>{const u=new URL(view==='studio'?'/decision-studio/':appPath(req),originFor(req));u.searchParams.set('view',view);u.searchParams.set('lang',language);u.searchParams.set('interval',billing);if(error)u.searchParams.set('error',error);return u.toString();};
   async function referral(req:FastifyRequest,reply:any,code?:string) {
     const old=readCookie(req.headers.cookie,caldockCookieName(secure,'ref'));
     if(old){const row=(await db.query('SELECT token_hash FROM caldock_referral_visits WHERE token_hash=$1 AND expires_at>now()',[hash(old)])).rows[0];if(row)return row.token_hash;}
@@ -75,16 +80,16 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
       const path=req.url.split('?')[0];
       if(path==='/caldock/capabilities'||path==='/caldock/referral-visits'||/^\/caldock\/auth\/(google|apple)\/(start|callback)$/.test(path))return;
       const value=readCookie(req.headers.cookie,caldockCookieName(secure));
-      if(!value)deny(401,'CALDOCK_UNAUTHENTICATED','Sign in to CalDock to continue');
+      if(!value)deny(401,'CALDOCK_UNAUTHENTICATED','Sign in to wodeMac to continue');
       const row=(await db.query('SELECT u.*,s.csrf_token FROM caldock_sessions s JOIN caldock_users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now() AND u.active=true',[hash(value)])).rows[0];
-      if(!row)deny(401,'CALDOCK_UNAUTHENTICATED','Sign in to CalDock to continue');
+      if(!row)deny(401,'CALDOCK_UNAUTHENTICATED','Sign in to wodeMac to continue');
       const {csrf_token,...user}=row;sessions.set(req,{user,csrf:csrf_token,token:value});
       if(!['GET','HEAD','OPTIONS'].includes(req.method)){
         checkOrigin(req);const supplied=req.headers['x-csrf-token'];
         if(typeof supplied!=='string'||!sameSecret(supplied,csrf_token))deny(403,'CALDOCK_CSRF_INVALID','Request origin or security token is invalid');
       }
     });
-    routes.get('/capabilities',async()=>({service:'caldock',offer:options.firstPeriodOffer?await caldockOfferStatus(db):null,accountApp:origin+'/caldock/',providers:{google:!!providers.google,apple:!!providers.apple},payments:!!stripe,paymentMode:stripe?.mode??null,currency:'USD',prices:CALDOCK_PRICES,auth:{session:'httpOnlyCookie',csrf:true},referrals:{attributionDays:30,automaticPayouts:false}}));
+    routes.get('/capabilities',async req=>({service:'caldock',offer:options.firstPeriodOffer?await caldockOfferStatus(db):null,accountApp:originFor(req)+appPath(req),providers:{google:!!providers.google,apple:!!providers.apple},payments:!!stripe,paymentMode:stripe?.mode??null,currency:'USD',prices:CALDOCK_PRICES,auth:{session:'httpOnlyCookie',csrf:true},referrals:{attributionDays:30,automaticPayouts:false}}));
     routes.post('/referral-visits',async(req,reply)=>{checkOrigin(req);limit(req);const input=z.object({code:z.string().regex(/^[A-Z0-9]{12}$/)}).strict().parse(req.body);await referral(req,reply,input.code);return {recorded:true};});
     for(const provider of ['google','apple'] as const){
       routes.get(`/auth/${provider}/start`,async(req,reply)=>{
@@ -95,7 +100,7 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
         await db.query('DELETE FROM caldock_oauth_states WHERE expires_at<now()');
         await db.query("INSERT INTO caldock_oauth_states(state_hash,browser_hash,provider,nonce,verifier,next_view,interval,language,referral_hash,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,now()+interval '10 minutes')",[hash(state),hash(browser),provider,nonce,verifier,input.next,input.interval,input.lang,referralHash]);
         appendCookie(reply,sessionCookie(secure,browser,600,'oauth_'+provider,provider==='apple'&&secure));
-        return reply.redirect(gateway.authorizationUrl({state,nonce,challenge:createHash('sha256').update(verifier).digest('base64url'),redirectUri:origin+`/api/caldock/auth/${provider}/callback`}));
+        return reply.redirect(gateway.authorizationUrl({state,nonce,challenge:createHash('sha256').update(verifier).digest('base64url'),redirectUri:originFor(req)+`/api/caldock/auth/${provider}/callback`}));
       });
       routes.route({method:provider==='apple'?'POST':'GET',url:`/auth/${provider}/callback`,handler:async(req,reply)=>{
         limit(req);const gateway=providers[provider];if(!gateway)deny(503,'CALDOCK_PROVIDER_NOT_CONFIGURED','This sign-in method is not available yet');
@@ -105,24 +110,24 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
         const state=(await db.query('DELETE FROM caldock_oauth_states WHERE state_hash=$1 AND browser_hash=$2 AND provider=$3 AND expires_at>now() RETURNING *',[hash(input.state),hash(browser),provider])).rows[0];
         if(!state)deny(400,'CALDOCK_OAUTH_STATE_INVALID','Sign-in expired; please start again');
         appendCookie(reply,sessionCookie(secure,'',0,'oauth_'+provider,provider==='apple'&&secure));
-        if(input.error||!input.code)return reply.redirect(returnUrl('login',state.language,state.interval,'oauth_cancelled'));
+        if(input.error||!input.code)return reply.redirect(returnUrl(req,'login',state.language,state.interval,'oauth_cancelled'));
         let identity;
-        try {identity=await gateway.authenticate({code:input.code,nonce:state.nonce,verifier:state.verifier,redirectUri:origin+`/api/caldock/auth/${provider}/callback`});}
-        catch {return reply.redirect(returnUrl('login',state.language,state.interval,'oauth_failed'));}
+        try {identity=await gateway.authenticate({code:input.code,nonce:state.nonce,verifier:state.verifier,redirectUri:originFor(req)+`/api/caldock/auth/${provider}/callback`});}
+        catch {return reply.redirect(returnUrl(req,'login',state.language,state.interval,'oauth_failed'));}
         if(identity.provider!==provider||!identity.subject||identity.subject.length>255)deny(400,'CALDOCK_IDENTITY_INVALID','Identity could not be verified');
         const user=await db.transaction(async tx=>{
           // One insert wins concurrent first logins; provider subject, never email, is the key.
           const newId=randomUUID();
           const prior=(await tx.query('SELECT u.* FROM caldock_identities i JOIN caldock_users u ON u.id=i.user_id WHERE i.provider=$1 AND i.subject=$2',[provider,identity.subject])).rows[0];
-          if(prior){if(!prior.active)deny(403,'CALDOCK_ACCOUNT_DISABLED','This CalDock account is disabled');return prior;}
-          await tx.query('INSERT INTO caldock_users(id,display_name,email) VALUES($1,$2,$3)',[newId,identity.name.slice(0,100)||'CalDock user',identity.email]);
+          if(prior){if(!prior.active)deny(403,'CALDOCK_ACCOUNT_DISABLED','This wodeMac account is disabled');return prior;}
+          await tx.query('INSERT INTO caldock_users(id,display_name,email) VALUES($1,$2,$3)',[newId,identity.name.slice(0,100)||'wodeMac user',identity.email]);
           const linked=await tx.query('INSERT INTO caldock_identities(provider,subject,user_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING RETURNING user_id',[provider,identity.subject,newId]);
           if(!linked.rows.length){await tx.query('DELETE FROM caldock_users WHERE id=$1',[newId]);const current=(await tx.query('SELECT u.* FROM caldock_identities i JOIN caldock_users u ON u.id=i.user_id WHERE i.provider=$1 AND i.subject=$2',[provider,identity.subject])).rows[0];if(!current?.active)deny(403,'CALDOCK_ACCOUNT_DISABLED','This CalDock account is disabled');return current;}
           if(state.referral_hash){const visit=(await tx.query('SELECT v.affiliate_id FROM caldock_referral_visits v JOIN caldock_affiliates a ON a.user_id=v.affiliate_id WHERE v.token_hash=$1 AND v.expires_at>now() AND a.active=true AND v.affiliate_id<>$2',[state.referral_hash,newId])).rows[0];if(visit)await tx.query('INSERT INTO caldock_referrals(customer_id,affiliate_id) VALUES($1,$2) ON CONFLICT DO NOTHING',[newId,visit.affiliate_id]);}
           await caldockAudit(tx,newId,'account.created',newId,{provider});return (await tx.query('SELECT * FROM caldock_users WHERE id=$1',[newId])).rows[0];
         });
         const issued=await issueCaldockSession(db,user.id);appendCookie(reply,sessionCookie(secure,issued.token));
-        return reply.redirect(returnUrl(state.next_view,state.language,state.interval));
+        return reply.redirect(returnUrl(req,state.next_view,state.language,state.interval));
       }});
     }
     routes.get('/me',async req=>{const current=actor(req);return {user:current.user,isAdmin:admins.has(current.user.id),csrfToken:current.csrf};});
@@ -145,7 +150,7 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
           if(existing.status==='complete')deny(409,'CALDOCK_PAYMENT_IN_PROGRESS','Payment for this order is being confirmed; reload in a moment');
         }
         if(options.firstPeriodOffer)order=await applyCaldockOffer(tx,order);
-        const back=(view:string,result:string)=>{const u=new URL('/caldock/',origin);u.searchParams.set('view',view);u.searchParams.set('lang',input.lang);u.searchParams.set('interval',order.interval);u.searchParams.set('checkout',result);return u.toString();};
+        const back=(view:string,result:string)=>{const u=new URL(appPath(req),originFor(req));u.searchParams.set('view',view);u.searchParams.set('lang',input.lang);u.searchParams.set('interval',order.interval);u.searchParams.set('checkout',result);return u.toString();};
         const names={week:['Weekly','周付'],month:['Monthly','月付'],quarter:['Quarterly','季付'],half:['Half-yearly','半年付'],year:['Yearly','年付']}[order.interval as 'week'|'month'|'quarter'|'half'|'year'];
         const recurring=STRIPE_RECURRING[order.interval as 'week'|'month'|'quarter'|'half'|'year'];
         const params:Record<string,string>={
@@ -156,7 +161,7 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
           'line_items[0][price_data][unit_amount]':String(order.list_amount_cents??order.amount_cents),
           'line_items[0][price_data][recurring][interval]':recurring.interval,
           'line_items[0][price_data][recurring][interval_count]':recurring.interval_count,
-          'line_items[0][price_data][product_data][name]':`CalDock Dedicated Mac mini · ${names[0]} / 独享 Mac mini · ${names[1]}`,
+          'line_items[0][price_data][product_data][name]':`wodeMac Dedicated Mac mini · ${names[0]} / 独享 Mac mini · ${names[1]}`,
           'metadata[caldock_order_id]':order.id,'subscription_data[metadata][caldock_order_id]':order.id,
         };
         if(current.user.email)params.customer_email=current.user.email;

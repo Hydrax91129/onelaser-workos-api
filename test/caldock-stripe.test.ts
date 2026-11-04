@@ -194,6 +194,25 @@ test('amount mismatch is recorded for review and never marks the order paid',asy
   assert.equal(sessions.get(sessionId)!.status,'expired');
 });
 
+test('the storefront domain gets its own sign-in and payment return addresses; the shared host is unchanged',async()=>{
+  const site=await buildApp({db,environment:'production',closeDatabase:false,caldock:{publicUrl:origin,siteUrl:'https://wodemac.example',providers:gateways,stripe}});
+  try{
+    const host={host:'wodemac.example'},cap=(await site.inject({url:'/caldock/capabilities',headers:host})).json();
+    assert.equal(cap.accountApp,'https://wodemac.example/');
+    assert.equal((await site.inject('/caldock/capabilities')).json().accountApp,origin+'/caldock/');
+    assert.equal((await site.inject({url:'/caldock/capabilities',headers:{host:'evil.example'}})).json().accountApp,origin+'/caldock/');
+    const start=await site.inject({url:'/caldock/auth/google/start?next=account&lang=zh&interval=year',headers:host});
+    const state=new URL(start.headers.location!).searchParams.get('state')!,flow=cookieList(start).map(c=>c.split(';')[0]).join('; ');
+    const back=await site.inject({url:`/caldock/auth/google/callback?state=${state}&code=stripe-site`,headers:{...host,cookie:flow}});
+    assert.match(String(back.headers.location),/^https:\/\/wodemac\.example\/\?view=account/);
+    const cookie=cookieList(back).find(c=>c.startsWith('__Host-caldock_session='))!.split(';')[0];
+    const csrf=(await site.inject({url:'/caldock/me',headers:{...host,cookie}})).json().csrfToken;
+    const post=(from:string)=>site.inject({method:'POST',url:'/caldock/affiliate',payload:{},headers:{...host,cookie,origin:from,'x-csrf-token':csrf}});
+    assert.equal((await post(origin)).statusCode,403);
+    assert.equal((await post('https://wodemac.example')).statusCode,200);
+  }finally{await site.close();}
+});
+
 test('after going live, an order left with a test session can still be paid or cancelled',async()=>{
   const buyer=await login('stripe-stale-pay'),canceller=await login('stripe-stale-cancel');
   const order=(await send(buyer,'POST','/orders',{interval:'month',requestKey:randomUUID()})).json();
