@@ -78,6 +78,7 @@ assert.match(caldockPage.headers['content-security-policy'],/frame-ancestors 'no
 const caldockBuild=JSON.parse((await onSite('/build-info.json')).body);
 assert.equal(caldockBuild.caldockCommit,(await readFile(new URL('../deploy/caldock-revision.txt',import.meta.url),'utf8')).trim());
 assert.equal((await onSite('/api/caldock/capabilities')).status,200);
+assert.equal((await onSite('/healthz')).status,200);
 for(const closed of ['/api/health','/api/tasks','/wiki/','/caldock/.env'])assert.equal((await onSite(closed)).status,404,closed);
 const legacyRedirect=await fetch(origin+'/caldock/?view=login&lang=zh',{redirect:'manual'});assert.equal(legacyRedirect.status,308);assert.equal(legacyRedirect.headers.get('location'),'https://wodemac.com/?view=login&lang=zh');
 const caldockCapabilities=await (await fetch(origin+'/api/caldock/capabilities')).json();
