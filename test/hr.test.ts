@@ -13,7 +13,7 @@ async function setup(hr:{dataKey?:string;previousKeys?:string[]}={dataKey:KEY},d
  if(!db){db=await createDatabase();await db.exec(schema);await seedDemo(db);
   // m2 reports to m1; m4 is HR (and a manager of another department)
   await db.query("UPDATE users SET manager_id='m1' WHERE id='m2'");}
- const app=await buildApp({db,integrations:{executiveUserIds:['m1']},hr:{userIds:['m4'],...hr},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0,clock,closeDatabase:false});
+ const app=await buildApp({db,integrations:{executiveUserIds:['m6']},hr:{userIds:['m4'],...hr},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0,clock,closeDatabase:false});
  const tokens:Record<string,string>={};
  const call=async(who:string,method:'GET'|'POST'|'PUT'|'DELETE',url:string,payload?:any,lang='zh')=>{tokens[who]??=(await issueSession(db!,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who],'accept-language':lang}});};
  return {db,app,call};
@@ -23,8 +23,8 @@ test('HR records: who sees whom, versioned profile edits and history',async()=>{
  const {db,app,call}=await setup();
  try{
   assert.equal((await call('m3','GET','/capabilities')).json().hr,true);
-  assert.deepEqual((await call('m4','GET','/hr/access')).json(),{isHr:true,hasReports:false,sensitive:'configured'});
-  assert.equal((await call('m1','GET','/hr/access')).json().isHr,false,'company admins are not HR by default');
+  assert.deepEqual((await call('m4','GET','/hr/access')).json(),{isHr:true,global:true,regions:{us:'manage',cn:'manage',intl:'manage'},hasReports:false,sensitive:'configured'});
+  assert.equal((await call('m1','GET','/hr/access')).json().isHr,false,'company admins are not HR by default (m1 is a manager, not the owner)');
   assert.deepEqual((await call('m3','GET','/hr/people')).json().items.map((p:any)=>p.id),['m3'],'employees see only themselves');
   assert.deepEqual((await call('m1','GET','/hr/people')).json().items.map((p:any)=>p.id).sort(),['m1','m2'],'managers see their reports');
   assert.equal((await call('m4','GET','/hr/people')).json().items.length,6,'HR sees everyone');
@@ -59,11 +59,11 @@ test('HR records: who sees whom, versioned profile edits and history',async()=>{
 test('HR sensitive data: encrypted at rest, masked in reads, revealed only with an audited request',async()=>{
  const {db,app,call}=await setup();
  try{
-  const put=await call('m4','PUT','/hr/people/m2/secrets',{idNumber:'110101199001011234',bankAccount:'6222 0200 1234 5678',emergencyPhone:'13800138000'});
+  const put=await call('m4','PUT','/hr/people/m2/secrets',{idNumber:'TEST-0000-0000-1234',bankAccount:'0000 0000 1234 5678',emergencyPhone:'000-000-0000'});
   assert.equal(put.statusCode,200,put.body);
   const rows=(await db.query("SELECT * FROM hr_secrets WHERE user_id='m2'")).rows;
   assert.equal(rows.length,3);
-  for(const r of rows)for(const plain of ['110101199001011234','6222','13800138000'])assert.ok(!r.ciphertext.includes(plain),'no plaintext in the database');
+  for(const r of rows)for(const plain of ['TEST-0000','0000 0000','000-000-0000'])assert.ok(!r.ciphertext.includes(plain),'no plaintext in the database');
   assert.equal((await call('m4','POST','/hr/people/m2/salary',{effectiveDate:'2026-01-01',base:12000,allowance:800,reason:'年度调薪'})).statusCode,201);
   assert.ok(!JSON.stringify((await db.query("SELECT ciphertext FROM hr_salary")).rows).includes('12000'));
 
@@ -75,15 +75,15 @@ test('HR sensitive data: encrypted at rest, masked in reads, revealed only with 
   assert.equal((await call('m1','PUT','/hr/people/m2/secrets',{idNumber:'X1234'})).statusCode,403);
   assert.equal((await call('m4','POST','/hr/people/m2/reveal',{field:'idNumber'})).statusCode,400,'HR must give a reason');
   const r=await call('m4','POST','/hr/people/m2/reveal',{field:'idNumber',reason:'办理社保'});
-  assert.equal(r.json().value,'110101199001011234');
+  assert.equal(r.json().value,'TEST-0000-0000-1234');
   const sal=(await call('m4','POST','/hr/people/m2/reveal',{field:'salary',reason:'核对工资单'})).json().value;
   assert.equal(sal[0].base,12000);assert.equal(sal[0].allowance,800);assert.equal(sal[0].currency,'CNY');assert.equal(sal[0].reason,'年度调薪');
-  assert.equal((await call('m2','POST','/hr/people/m2/reveal',{field:'bankAccount'})).json().value,'6222 0200 1234 5678','people can see their own');
+  assert.equal((await call('m2','POST','/hr/people/m2/reveal',{field:'bankAccount'})).json().value,'0000 0000 1234 5678','people can see their own');
   assert.equal((await call('m3','POST','/hr/people/m2/reveal',{field:'bankAccount'})).statusCode,404);
 
   const reveals=(await db.query("SELECT actor_id,owner_id,details FROM audit_events WHERE action='hr.sensitive.reveal' ORDER BY created_at")).rows;
   assert.equal(reveals.length,3);assert.equal(reveals[0].actor_id,'m4');assert.equal(reveals[0].owner_id,'m2');
-  assert.ok(!JSON.stringify(reveals).includes('110101'),'the audit never holds the value');
+  assert.ok(!JSON.stringify(reveals).includes('TEST-0000'),'the audit never holds the value');
   assert.match(JSON.stringify(reveals),/办理社保/);
 
   // clearing a field removes it; a ciphertext moved onto another person does not decrypt
@@ -99,7 +99,7 @@ test('HR data key: missing or invalid key disables only sensitive features; rota
  assert.equal(keyringFrom({}).status,'not_configured');
  assert.equal(keyringFrom({dataKey:'short'}).status,'invalid_key');
  const first=await setup();
- await first.call('m4','PUT','/hr/people/m2/secrets',{idNumber:'110101199001011234'});
+ await first.call('m4','PUT','/hr/people/m2/secrets',{idNumber:'TEST-0000-0000-1234'});
  await first.app.close();
  const db=first.db;
  try{
@@ -113,7 +113,7 @@ test('HR data key: missing or invalid key disables only sensitive features; rota
 
   const NEW=randomBytes(32).toString('base64');
   const rotated=await setup({dataKey:NEW,previousKeys:[KEY]},db);
-  assert.equal((await rotated.call('m4','POST','/hr/people/m2/reveal',{field:'idNumber',reason:'轮换后核对'})).json().value,'110101199001011234');
+  assert.equal((await rotated.call('m4','POST','/hr/people/m2/reveal',{field:'idNumber',reason:'轮换后核对'})).json().value,'TEST-0000-0000-1234');
   await rotated.app.close();
   const lost=await setup({dataKey:NEW},db);
   const gone=await lost.call('m4','POST','/hr/people/m2/reveal',{field:'idNumber',reason:'旧密钥已删'});

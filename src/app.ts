@@ -307,7 +307,7 @@ export async function buildApp(options:AppOptions) {
   await registerProjectRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
   await registerWmsRoutes(app,db,{isAdmin:isExecutive /* sensitive ERP data: only deployment-configured executives bypass grants; in-app admins need grants */});
   await registerRmaRoutes(app,db,{isAdmin:isExecutive /* sensitive ERP data: only deployment-configured executives bypass grants; in-app admins need grants */,now:options.clock});
-  await registerHrRoutes(app,db,{...options.hr,now:options.clock,intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0)});
+  await registerHrRoutes(app,db,{...options.hr,executiveUserIds:integrations.executiveUserIds||[],quality:options.quality,now:options.clock,intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0)});
   await registerQualityRoutes(app,db,{...options.quality,notify,intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0),isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),now:options.clock});
   await registerItRoutes(app,db,{...options.it,quality:options.quality,executiveIds:integrations.executiveUserIds||[],now:options.clock,intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0)});
   await registerInboxRoutes(app,db);
