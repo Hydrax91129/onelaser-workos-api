@@ -70,7 +70,7 @@ const health = await (await fetch(origin + '/api/health')).json();
 assert.equal(health.database, 'postgres');
 const capabilities = await (await fetch(origin + '/api/capabilities')).json();
 const caldockPage=await fetch(origin+'/caldock/?view=login&lang=zh');
-assert.equal(caldockPage.status,200);assert.match(await caldockPage.text(),/wodeMac|CalDock/);
+assert.equal(caldockPage.status,200);assert.match(await caldockPage.text(),/wodeMac/);
 assert.equal(caldockPage.headers.get('cache-control'),'no-store');
 assert.match(caldockPage.headers.get('content-security-policy'),/connect-src 'self'/);
 const caldockBuild=await (await fetch(origin+'/caldock/build-info.json')).json();
