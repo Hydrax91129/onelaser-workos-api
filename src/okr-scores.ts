@@ -41,14 +41,14 @@ export async function scoresFor(db: Queryable, ids: string[], table: 'objective_
   return out;
 }
 
-/** Who may give the leader score: the owner's manager, a manager of the objective's department, or an admin. */
+/** Who may give the leader score: the owner's first or second leader, a manager of the objective's department, or an admin. */
 export async function canLeadScore(db: Queryable, user: User, objective: any, isAdmin: (u: User) => boolean) {
   if (!objective || objective.org_id !== user.org_id) return false;
   if (isAdmin(user)) return objective.owner_id !== user.id || !objective.owner_id;
   if (objective.owner_id === user.id) return false;
   if (objective.owner_id) {
-    const owner = (await db.query('SELECT manager_id FROM users WHERE id=$1', [objective.owner_id])).rows[0];
-    if (owner?.manager_id === user.id) return true;
+    const owner = (await db.query('SELECT manager_id,second_manager_id FROM users WHERE id=$1', [objective.owner_id])).rows[0];
+    if (owner?.manager_id === user.id || owner?.second_manager_id === user.id) return true;
   }
   return user.role === 'manager' && objective.department_id === user.department_id;
 }

@@ -31,6 +31,13 @@ const TEMPLATES: Record<string, [string, string][]> = {
   campaign: [['策划', '#579bfc'], ['素材', '#a25ddc'], ['执行', '#00c875']],
   event: [['筹备', '#579bfc'], ['物料与运输', '#fdab3d'], ['现场与跟进', '#00c875']],
 };
+/** Completion standard of a project task, taken from the project: what to finish, in which project and
+ * stage, and what the task (or else the project) says it should achieve. */
+export function projectTaskCriteria(p: any, groupId: string | null | undefined, title: string, description?: string | null) {
+  const stage = (p.groups || []).find((g: any) => g.id === groupId)?.name;
+  const own = String(description || '').trim(), goal = (own && own !== `项目「${p.name}」的任务` ? own : '') || String(p.description || '').trim();
+  return [`完成项目「${p.name}」${stage ? `「${stage}」阶段` : ''}的任务：${title}`.slice(0, 500), ...(goal ? [`达到要求：${goal}`.slice(0, 500)] : [])];
+}
 const STATUS_TO_BOARD: Record<string, string> = { todo: 'not_started', working: 'working', stuck: 'hold', review: 'review', done: 'done', overdue: 'overdue', abandoned: 'abandoned' };
 const id = z.string().min(1).max(100).regex(/^[A-Za-z0-9_-]+$/);
 const color = z.string().regex(/^#[0-9a-fA-F]{6}$/);
@@ -40,13 +47,15 @@ const health = z.enum(['on_track', 'at_risk', 'off_track']);
 export async function registerProjectRoutes(app: FastifyInstance, db: Database, o: { isAdmin: (u: User) => boolean }) {
   const actorOf = (req: FastifyRequest): User => req.actor || deny(401, 'UNAUTHENTICATED', 'Authentication is required');
   // Only the project admin, project members and company admins can see a project. To everyone else it does not exist.
-  const canView = (user: User, p: any) => p.owner_id === user.id || (p.members || []).includes(user.id) || o.isAdmin(user);
+  const canEdit = (user: User, p: any) => p.owner_id === user.id || (p.members || []).includes(user.id) || o.isAdmin(user);
+  // A leader (first or second line) may read, not change, the projects their reports own or belong to.
+  const leads = (user: User, p: any) => (user.visibleOwnerIds || []).some(r => r !== user.id && (r === p.owner_id || (p.members || []).includes(r)));
+  const canView = (user: User, p: any) => canEdit(user, p) || leads(user, p);
   const load = async (tx: Queryable, user: User, pid: string, lock = false, viewCheck = true) => {
     const p = (await tx.query('SELECT * FROM projects WHERE id=$1 AND org_id=$2 AND archived_at IS NULL' + (lock ? ' FOR UPDATE' : ''), [pid, user.org_id])).rows[0];
     if (!p || (viewCheck && !canView(user, p))) deny(404, 'NOT_FOUND', 'Project not found');
     return p;
   };
-  const canEdit = canView;
   const requireEdit = (user: User, p: any) => { if (!canEdit(user, p)) deny(403, 'FORBIDDEN', 'Only project members can change this project'); };
   const projectTasks = async (pids: string[]) => pids.length ? (await db.query(`SELECT tasks.id,tasks.title,tasks.description,tasks.owner_id,tasks.reviewer_id,tasks.due_at,tasks.created_at,tasks.board_status,tasks.board_priority,tasks.status,tasks.version,tasks.project_id,tasks.project_group_id,
       (SELECT count(*)::int FROM task_updates u WHERE u.task_id=tasks.id) AS update_count,(SELECT max(u.created_at) FROM task_updates u WHERE u.task_id=tasks.id) AS last_update_at,tasks.updated_at,(SELECT json_build_object('ai_status',c.ai_status,'ai_score',c.ai_score,'human_score',c.human_score,'final_score',COALESCE(c.human_score,CASE WHEN c.ai_status='scored' THEN c.ai_score END),'score_source',CASE WHEN c.human_score IS NOT NULL THEN 'human' WHEN c.ai_status='scored' THEN 'ai' END,'score_due_at',c.created_at+interval '24 hours') FROM task_completions c WHERE c.task_id=tasks.id AND c.superseded_at IS NULL ORDER BY c.created_at DESC LIMIT 1) AS completion,${TASK_SOURCE_COLUMNS}
@@ -54,7 +63,7 @@ export async function registerProjectRoutes(app: FastifyInstance, db: Database, 
   const updatesOf = async (pids: string[]) => pids.length ? (await db.query('SELECT * FROM project_updates WHERE project_id=ANY($1::text[]) ORDER BY created_at DESC LIMIT 500', [pids])).rows : [];
   // Project admin (owner_id, the creator by default) and company admins manage members and the admin role.
   const canManage = (user: User, p: any) => p.owner_id === user.id || o.isAdmin(user);
-  const shape = (p: any, tasks: any[], updates: any[], user: User) => ({ ...p, canEdit: canEdit(user, p), canManage: canManage(user, p), tasks: tasks.filter(t => t.project_id === p.id), updates: updates.filter(u => u.project_id === p.id).slice(0, 30) });
+  const shape = (p: any, tasks: any[], updates: any[], user: User) => ({ ...p, canEdit: canEdit(user, p), readOnly: !canEdit(user, p), canManage: canManage(user, p), tasks: tasks.filter(t => t.project_id === p.id), updates: updates.filter(u => u.project_id === p.id).slice(0, 30) });
 
   app.get('/projects', async req => {
     const user = actorOf(req); await applyAutoStatus(db, user.org_id);
@@ -126,7 +135,7 @@ export async function registerProjectRoutes(app: FastifyInstance, db: Database, 
       // Reviewer: the project owner, else whoever created the task, else the assignee's manager.
       const reviewerId = [p.owner_id, user.id, owner.manager_id].find(x => x && x !== owner.id) || owner.id;
       const reviewer = reviewerId === user.id ? user : (await tx.query('SELECT * FROM users WHERE id=$1', [reviewerId])).rows[0];
-      const row = await createAssignedTask(tx, reviewer, owner, { title: v.title, description: v.description || `项目「${p.name}」的任务`, criteria: ['按项目要求完成'], dueAt: v.dueAt, priority: v.priority, source: 'project' });
+      const row = await createAssignedTask(tx, reviewer, owner, { title: v.title, description: v.description || `项目「${p.name}」的任务`, criteria: projectTaskCriteria(p, v.groupId, v.title, v.description), dueAt: v.dueAt, priority: v.priority, source: 'project' });
       await tx.query('UPDATE tasks SET project_id=$2,project_group_id=$3,created_by=$4,updated_by=$4 WHERE id=$1', [row.id, p.id, v.groupId, user.id]);
       if (!(p.members || []).includes(owner.id)) await tx.query('UPDATE projects SET members=$2,updated_at=now() WHERE id=$1', [p.id, JSON.stringify([...(p.members || []), owner.id])]);
       return row;
@@ -157,8 +166,11 @@ export async function registerProjectRoutes(app: FastifyInstance, db: Database, 
         if (!u) deny(400, 'INVALID_OWNER', 'Choose an active colleague');
         owner = u.id; department = u.department_id;
       }
-      await tx.query(`UPDATE tasks SET board_status=$2,board_priority=$3,owner_id=$4,department_id=$5,project_group_id=$6,due_at=$7,title=$8,reviewer_id=CASE WHEN reviewer_id=$4 THEN $9 ELSE reviewer_id END,version=version+1,updated_at=now(),updated_by=$9 WHERE id=$1`,
-        [t.id, v.status ? STATUS_TO_BOARD[v.status] : t.board_status, v.priority ?? t.board_priority, owner, department, v.groupId ?? t.project_group_id, v.dueAt ?? t.due_at, v.title ?? t.title, user.id]);
+      // A renamed or moved task gets a new standard from the project, unless someone already wrote their own.
+      const before = projectTaskCriteria(p, t.project_group_id, t.title, t.description), auto = JSON.stringify(t.criteria) === JSON.stringify(before) || JSON.stringify(t.criteria) === JSON.stringify(['按项目要求完成']);
+      const criteria = auto ? projectTaskCriteria(p, v.groupId ?? t.project_group_id, v.title ?? t.title, t.description) : t.criteria;
+      await tx.query(`UPDATE tasks SET board_status=$2,board_priority=$3,owner_id=$4,department_id=$5,project_group_id=$6,due_at=$7,title=$8,reviewer_id=CASE WHEN reviewer_id=$4 THEN $9 ELSE reviewer_id END,criteria=$10,version=version+1,updated_at=now(),updated_by=$9 WHERE id=$1`,
+        [t.id, v.status ? STATUS_TO_BOARD[v.status] : t.board_status, v.priority ?? t.board_priority, owner, department, v.groupId ?? t.project_group_id, v.dueAt ?? t.due_at, v.title ?? t.title, user.id, JSON.stringify(criteria)]);
     });
     return (await projectTasks([pid])).find((t: any) => t.id === tid);
   });

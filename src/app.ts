@@ -34,7 +34,7 @@ import { randomUUID } from 'node:crypto';
 import { z, ZodError } from 'zod';
 import type { Database, Queryable } from './db.js';
 import { cookie, hash, issueSession, readCookie, resolveSession, sameSecret, sessionCookieName, type User } from './auth.js';
-import { visibleObjective, visibleTask, attachReportingScope, krProgress, hasKrMetric, reviewerAllowed } from './domain.js';
+import { visibleObjective, visibleTask, attachReportingScope, leaderChildren, krProgress, hasKrMetric, reviewerAllowed } from './domain.js';
 import { attachOkrImportMetadata } from './okr-import.js';
 import { languageFrom, message, type Language } from './i18n.js';
 import { ApiError, deny } from './errors.js';
@@ -60,9 +60,9 @@ const measurementInput = z.object({ expectedVersion, actual:z.number().finite(),
 /** Besides the department rules, a person may read the OKRs of everyone in their reporting line,
  * of peers who share their manager, and administrators read everyone's. Writing keeps the stricter rules. */
 async function okrListOwners(db:Database,user:User,executiveUserIds:string[]){
-  const rows=(await db.query('SELECT id,manager_id FROM users WHERE org_id=$1 AND active=true',[user.org_id])).rows as {id:string;manager_id:string|null}[];
+  const rows=(await db.query('SELECT id,manager_id,second_manager_id FROM users WHERE org_id=$1 AND active=true',[user.org_id])).rows as {id:string;manager_id:string|null;second_manager_id:string|null}[];
   if(isOrgAdmin(user as any,{executiveUserIds}))return new Set(rows.map(r=>r.id));
-  const out=new Set<string>(),children=new Map<string,string[]>();for(const r of rows)if(r.manager_id){if(!children.has(r.manager_id))children.set(r.manager_id,[]);children.get(r.manager_id)!.push(r.id);}
+  const out=new Set<string>(),children=leaderChildren(rows);
   const queue=[...(children.get(user.id)||[])];while(queue.length){const c=queue.shift()!;if(out.has(c))continue;out.add(c);queue.push(...(children.get(c)||[]));}
   const mine=rows.find(r=>r.id===user.id)?.manager_id;if(mine)for(const r of rows)if(r.manager_id===mine&&r.id!==user.id)out.add(r.id);
   return out;
@@ -315,7 +315,8 @@ export async function buildApp(options:AppOptions) {
   await registerProductLibraryRoutes(app,db,{isAdmin:isExecutive,requestPrice:productHelpers.requestPrice,audit:productHelpers.audit});
   await registerProductImportRoutes(app,db,{isAdmin:isExecutive,requestPrice:productHelpers.requestPrice,audit:productHelpers.audit});
   await registerFeedbackRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),mailer,to:process.env.FEEDBACK_EMAIL,appUrl:integrations.appPublicUrl});
-  await registerOkrScoreRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),visible:visibleObjective});
+  // Leaders (first or second line) score their reports' OKRs even across departments.
+  await registerOkrScoreRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),visible:(u:User,obj:any)=>visibleObjective(u,obj)||(!!obj?.owner_id&&obj.org_id===u.org_id&&obj.owner_id!==u.id&&(u.visibleOwnerIds||[]).includes(obj.owner_id))});
   await registerCompletionRoutes(app,db,{model:completionModel,fxFetcher:options.fxFetcher,fxFallback:Number(process.env.FX_FALLBACK_CNY)||7.1,intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0),isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
   await registerIntegrationRoutes(app,db,integrations);
   if(options.closeDatabase!==false) app.addHook('onClose',async()=>db.close());
