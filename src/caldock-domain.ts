@@ -2,11 +2,11 @@ import { randomUUID } from 'node:crypto';
 import type { Database, Queryable } from './db.js';
 import { deny } from './errors.js';
 
-export const CALDOCK_PRICES = Object.freeze({ week:6900, month:19900, quarter:47700, year:154800 });
+export const CALDOCK_PRICES = Object.freeze({ week:6900, month:19900, quarter:53700, half:95400, year:166800 });
 export async function caldockAudit(tx:Queryable,actorId:string|null,action:string,objectId:string,details:unknown={}) {
   await tx.query('INSERT INTO caldock_audit(id,actor_id,action,object_id,details) VALUES($1,$2,$3,$4,$5)',[randomUUID(),actorId,action,objectId,JSON.stringify(details)]);
 }
-export async function createCaldockOrder(db:Database,customerId:string,interval:'week'|'month'|'quarter'|'year',requestKey:string) {
+export async function createCaldockOrder(db:Database,customerId:string,interval:'week'|'month'|'quarter'|'half'|'year',requestKey:string) {
   return db.transaction(async tx=>{
     // Customer lock serializes retries and the one-active-rental rule.
     await tx.query('SELECT id FROM caldock_users WHERE id=$1 FOR UPDATE',[customerId]);
