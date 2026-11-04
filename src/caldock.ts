@@ -47,8 +47,8 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
   const viaStripe=async<T>(call:()=>Promise<T>):Promise<T>=>{try{return await call();}catch(error){if(error instanceof StripeRequestError)deny(502,'CALDOCK_PAYMENT_PROVIDER_ERROR','The payment provider could not complete the request; try again');throw error;}};
   const stopStripeRenewal=async(subscriptionId:string|null)=>{if(stripe&&subscriptionId)await viaStripe(()=>stripe.request('POST','/v1/subscriptions/'+encodeURIComponent(subscriptionId),{cancel_at_period_end:'true'},'caldock-stop-'+subscriptionId));};
   const sessions=new WeakMap<FastifyRequest,Session>();
-  const actor=(req:FastifyRequest)=>sessions.get(req)||deny(401,'CALDOCK_UNAUTHENTICATED','Sign in to CalDock to continue');
-  const admin=(req:FastifyRequest)=>{const current=actor(req);if(!admins.has(current.user.id))deny(403,'CALDOCK_ADMIN_REQUIRED','CalDock administrator access is required');return current;};
+  const actor=(req:FastifyRequest)=>sessions.get(req)||deny(401,'CALDOCK_UNAUTHENTICATED','Sign in to MacUSA to continue');
+  const admin=(req:FastifyRequest)=>{const current=actor(req);if(!admins.has(current.user.id))deny(403,'CALDOCK_ADMIN_REQUIRED','MacUSA administrator access is required');return current;};
   const checkOrigin=(req:FastifyRequest)=>{if(req.headers.origin!==origin)deny(403,'CALDOCK_CSRF_INVALID','Request origin or security token is invalid');};
   const attempts=new Map<string,{count:number;expires:number}>();
   const limit=(req:FastifyRequest)=>{
@@ -75,9 +75,9 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
       const path=req.url.split('?')[0];
       if(path==='/caldock/capabilities'||path==='/caldock/referral-visits'||/^\/caldock\/auth\/(google|apple)\/(start|callback)$/.test(path))return;
       const value=readCookie(req.headers.cookie,caldockCookieName(secure));
-      if(!value)deny(401,'CALDOCK_UNAUTHENTICATED','Sign in to CalDock to continue');
+      if(!value)deny(401,'CALDOCK_UNAUTHENTICATED','Sign in to MacUSA to continue');
       const row=(await db.query('SELECT u.*,s.csrf_token FROM caldock_sessions s JOIN caldock_users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now() AND u.active=true',[hash(value)])).rows[0];
-      if(!row)deny(401,'CALDOCK_UNAUTHENTICATED','Sign in to CalDock to continue');
+      if(!row)deny(401,'CALDOCK_UNAUTHENTICATED','Sign in to MacUSA to continue');
       const {csrf_token,...user}=row;sessions.set(req,{user,csrf:csrf_token,token:value});
       if(!['GET','HEAD','OPTIONS'].includes(req.method)){
         checkOrigin(req);const supplied=req.headers['x-csrf-token'];
@@ -114,10 +114,10 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
           // One insert wins concurrent first logins; provider subject, never email, is the key.
           const newId=randomUUID();
           const prior=(await tx.query('SELECT u.* FROM caldock_identities i JOIN caldock_users u ON u.id=i.user_id WHERE i.provider=$1 AND i.subject=$2',[provider,identity.subject])).rows[0];
-          if(prior){if(!prior.active)deny(403,'CALDOCK_ACCOUNT_DISABLED','This CalDock account is disabled');return prior;}
-          await tx.query('INSERT INTO caldock_users(id,display_name,email) VALUES($1,$2,$3)',[newId,identity.name.slice(0,100)||'CalDock user',identity.email]);
+          if(prior){if(!prior.active)deny(403,'CALDOCK_ACCOUNT_DISABLED','This MacUSA account is disabled');return prior;}
+          await tx.query('INSERT INTO caldock_users(id,display_name,email) VALUES($1,$2,$3)',[newId,identity.name.slice(0,100)||'MacUSA user',identity.email]);
           const linked=await tx.query('INSERT INTO caldock_identities(provider,subject,user_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING RETURNING user_id',[provider,identity.subject,newId]);
-          if(!linked.rows.length){await tx.query('DELETE FROM caldock_users WHERE id=$1',[newId]);const current=(await tx.query('SELECT u.* FROM caldock_identities i JOIN caldock_users u ON u.id=i.user_id WHERE i.provider=$1 AND i.subject=$2',[provider,identity.subject])).rows[0];if(!current?.active)deny(403,'CALDOCK_ACCOUNT_DISABLED','This CalDock account is disabled');return current;}
+          if(!linked.rows.length){await tx.query('DELETE FROM caldock_users WHERE id=$1',[newId]);const current=(await tx.query('SELECT u.* FROM caldock_identities i JOIN caldock_users u ON u.id=i.user_id WHERE i.provider=$1 AND i.subject=$2',[provider,identity.subject])).rows[0];if(!current?.active)deny(403,'CALDOCK_ACCOUNT_DISABLED','This MacUSA account is disabled');return current;}
           if(state.referral_hash){const visit=(await tx.query('SELECT v.affiliate_id FROM caldock_referral_visits v JOIN caldock_affiliates a ON a.user_id=v.affiliate_id WHERE v.token_hash=$1 AND v.expires_at>now() AND a.active=true AND v.affiliate_id<>$2',[state.referral_hash,newId])).rows[0];if(visit)await tx.query('INSERT INTO caldock_referrals(customer_id,affiliate_id) VALUES($1,$2) ON CONFLICT DO NOTHING',[newId,visit.affiliate_id]);}
           await caldockAudit(tx,newId,'account.created',newId,{provider});return (await tx.query('SELECT * FROM caldock_users WHERE id=$1',[newId])).rows[0];
         });
@@ -155,7 +155,7 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
           'line_items[0][price_data][unit_amount]':String(order.amount_cents),
           'line_items[0][price_data][recurring][interval]':recurring.interval,
           'line_items[0][price_data][recurring][interval_count]':recurring.interval_count,
-          'line_items[0][price_data][product_data][name]':`CalDock Dedicated Mac mini · ${names[0]} / 独享 Mac mini · ${names[1]}`,
+          'line_items[0][price_data][product_data][name]':`MacUSA Dedicated Mac mini · ${names[0]} / 独享 Mac mini · ${names[1]}`,
           'metadata[caldock_order_id]':order.id,'subscription_data[metadata][caldock_order_id]':order.id,
         };
         if(current.user.email)params.customer_email=current.user.email;
