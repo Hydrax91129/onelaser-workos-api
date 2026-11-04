@@ -18,6 +18,7 @@ import type { User } from './auth.js';
 import { assertKrWeight, assertObjectivePoints, rebalanceKrs, rebalanceObjectives } from './okr-weights.js';
 import { deny } from './errors.js';
 import { visibleObjective, krProgress, hasKrMetric } from './domain.js';
+import { retireKrTasks, syncKrTasks } from './okr-publish.js';
 
 export const okrCollabSchema = `
 ALTER TABLE objectives ADD COLUMN IF NOT EXISTS version integer NOT NULL DEFAULT 1;
@@ -137,6 +138,9 @@ export async function registerOkrCollabRoutes(app: FastifyInstance, db: Database
       const next = (await tx.query('UPDATE objectives SET title=$2,planning=$3,parent_objective_id=$4,version=version+1,updated_at=now() WHERE id=$1 RETURNING *',
         [o.id, input.title ?? o.title, JSON.stringify(planning), parent])).rows[0];
       await audit(tx, user, 'objective.updated', o.id, { fields: Object.keys(input).filter(k => k !== 'expectedVersion') }, o.owner_id, o.department_id);
+      // The objective's name appears in its KR tasks' descriptions.
+      if (input.title !== undefined && input.title !== o.title)
+        await syncKrTasks(tx, user, (await tx.query('SELECT id FROM key_results WHERE objective_id=$1 AND archived_at IS NULL', [o.id])).rows.map((k: any) => k.id));
       return next;
     });
   });
@@ -149,7 +153,9 @@ export async function registerOkrCollabRoutes(app: FastifyInstance, db: Database
       if (o.version !== input.expectedVersion) deny(409,'VERSION_CONFLICT','Objective changed; reload before saving');
       // History, appraisals and linked tasks are retained; children lose their alignment instead of disappearing.
       await tx.query('UPDATE objectives SET archived_at=now(),version=version+1,updated_at=now() WHERE id=$1', [o.id]);
+      const krIds = (await tx.query('SELECT id FROM key_results WHERE objective_id=$1 AND archived_at IS NULL', [o.id])).rows.map((k: any) => k.id);
       await tx.query('UPDATE key_results SET archived_at=now() WHERE objective_id=$1 AND archived_at IS NULL', [o.id]);
+      await retireKrTasks(tx, user, krIds); // the KR tasks go with the objective
       await tx.query('UPDATE objectives SET parent_objective_id=NULL WHERE parent_objective_id=$1', [o.id]);
       await audit(tx, user, 'objective.archived', o.id, {}, o.owner_id, o.department_id);
       return { id: o.id, archived: true };
@@ -204,6 +210,8 @@ export async function registerOkrCollabRoutes(app: FastifyInstance, db: Database
         [kr.id, input.title ?? kr.title, JSON.stringify(planning), input.confidence === undefined ? kr.confidence : input.confidence,
          metric.baseline, metric.target, metric.direction, metric.unit, metric.version])).rows[0];
       await audit(tx, user, 'kr.updated', kr.id, { fields: Object.keys(input).filter(k => k !== 'expectedMetaVersion'), metricChanged: !!input.metric }, kr.owner_id, kr.department_id);
+      // The KR's task shows its name, target and description: keep them in step.
+      if (input.title !== undefined || input.targetText !== undefined || input.description !== undefined || input.metric) await syncKrTasks(tx, user, [kr.id]);
       return { ...next, progress: krProgress(next) };
     });
   });
@@ -216,6 +224,7 @@ export async function registerOkrCollabRoutes(app: FastifyInstance, db: Database
       if (!canEditObjective(user, kr)) deny(403,'FORBIDDEN','Only the owner or a department manager can edit this key result');
       if (kr.meta_version !== input.expectedMetaVersion) deny(409,'VERSION_CONFLICT','Key result changed; reload before saving');
       await tx.query('UPDATE key_results SET archived_at=now(),meta_version=meta_version+1,updated_at=now() WHERE id=$1', [kr.id]);
+      await retireKrTasks(tx, user, [kr.id]); // a deleted KR no longer has a task
       await audit(tx, user, 'kr.archived', kr.id, {}, kr.owner_id, kr.department_id);
       return { id: kr.id, archived: true };
     });
