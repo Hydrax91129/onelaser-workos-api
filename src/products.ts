@@ -12,6 +12,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
 import { deny } from './errors.js';
+import { FIELD, SLOT, SLOT_VIS, levelsOf } from './product-fields.js';
 
 export const productSchema = `
 CREATE TABLE IF NOT EXISTS product_catalog(org_id text NOT NULL, sku text NOT NULL, name_zh text NOT NULL DEFAULT '', name_en text NOT NULL DEFAULT '',
@@ -82,8 +83,10 @@ const STATUS_NEEDS_NOTE = new Set(['clearance', 'eolPlanned', 'eol']);
  * price deeper than the largest wholesale discount) waits for a company admin to approve before it takes effect.
  * Without a landed cost the margin is unknown, so the change applies and is recorded as unchecked. */
 export const CHANNELS = ['shopify', 'amazon', 'ebay', 'dealer'] as const;
-export const PRICE_TARGETS = ['msrp', 'actual', ...CHANNELS] as const;
-type PriceTarget = typeof PRICE_TARGETS[number];
+/* Selling prices of the 产品资料 page that live next to the channel prices (product_channel_prices). */
+export const SHEET_PRICE_CHANNELS = ['map', 'promo_floor'] as const;
+export const PRICE_TARGETS = ['msrp', 'actual', ...CHANNELS, ...SHEET_PRICE_CHANNELS] as const;
+export type PriceTarget = typeof PRICE_TARGETS[number];
 export function priceCheck(rules: typeof DEFAULT_PRICING_RULES, cat: any, pr: any, target: PriceTarget, price: number | null) {
   const landed = pr?.landed_usd == null ? null : Number(pr.landed_usd);
   if (price == null || price <= 0) return { cmPct: null as number | null, needs: null as string | null };
@@ -104,51 +107,16 @@ const num = z.number().min(0).max(10_000_000).nullable().optional();
 const text = (max: number) => z.string().trim().max(max).optional();
 const num_ = (v: any) => v == null ? null : Number(v);
 
-export async function registerProductRoutes(app: FastifyInstance, db: Database, o: { isAdmin: (u: User) => boolean }) {
-  const actorOf = (req: FastifyRequest): User => req.actor || deny(401, 'UNAUTHENTICATED', 'Authentication is required');
-  const grants = (u: User): string[] => Array.isArray((u as any).grants) ? (u as any).grants : [];
-  const canView = (u: User) => o.isAdmin(u) || grants(u).includes('products');
-  const canEditCatalog = (u: User) => o.isAdmin(u) || grants(u).includes('products_manage');
-  const canPricing = (u: User) => o.isAdmin(u) || grants(u).includes('product_cost_detail');
+/** Price history and approval, shared by the catalog routes and the 产品资料 editor (product-pim.ts). */
+export function priceOps(db: Database, o: { isAdmin: (u: User) => boolean; canPricing: (u: User) => boolean }) {
+  const canPricing = o.canPricing;
   const audit = (tx: Queryable, u: User, action: string, objectId: string, details: unknown) =>
     tx.query('INSERT INTO audit_events(id,org_id,department_id,owner_id,actor_id,action,object_id,details) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',
       [randomUUID(), u.org_id, u.department_id, u.id, u.id, action, objectId, JSON.stringify(details)]);
-  const lastImport = async (org: string, kind: string) => {
-    const r = (await db.query('SELECT created_at,rows FROM product_imports WHERE org_id=$1 AND kind=$2 ORDER BY created_at DESC LIMIT 1', [org, kind])).rows[0];
-    return r ? { at: r.created_at, rows: r.rows } : null;
-  };
-
-  // MSRP, low price and checkout shipping: catalog managers and anyone with a pricing grant. Channel prices: seen with any pricing grant, set with the full build-up.
-  const canEditMsrp = (u: User) => canEditCatalog(u) || grants(u).includes('pricing_msrp') || canPricing(u);
-  const canSeeChannels = (u: User) => canPricing(u) || grants(u).includes('pricing_msrp');
-  const canSeeTarget = (u: User, target: string) => target === 'msrp' || canSeeChannels(u);
   const rulesFor = async (org: string, q: Queryable = db) => {
     const r = (await q.query('SELECT rules,updated_at,updated_by FROM pricing_rules WHERE org_id=$1', [org])).rows[0];
     return r ? { ...r.rules, updatedAt: r.updated_at, updatedBy: r.updated_by } : { ...DEFAULT_PRICING_RULES, updatedAt: null, updatedBy: null };
   };
-  const catalogOf = async (q: Queryable, org: string, raw: string, lock = false) => {
-    const r = (await q.query('SELECT * FROM product_catalog WHERE org_id=$1 AND lower(sku)=lower($2)' + (lock ? ' FOR UPDATE' : ''), [org, raw])).rows[0];
-    return r || deny(404, 'PRODUCT_NOT_FOUND', 'This SKU is not in the product catalog');
-  };
-  const skuParam = (req: FastifyRequest) => String((req.params as any).sku || '');
-
-  /* Field-level change log. Values are normalised so a numeric string from the database equals the number sent. */
-  const NUM_COLS = new Set(['gross', 'msrp', 'low', 'ship_fee', 'moq']);
-  const norm = (col: string, v: any) => col === 'dims' ? (Array.isArray(v) ? v.map(Number) : null) : NUM_COLS.has(col) ? (v == null ? null : Number(v)) : String(v ?? '');
-  const same = (a: any, b: any) => JSON.stringify(a) === JSON.stringify(b);
-  const logChanges = async (tx: Queryable, u: User, s: string, before: any, after: Record<string, any>, source: string, note = '') => {
-    const changed: string[] = [];
-    for (const [col, val] of Object.entries(after)) {
-      const from = before ? norm(col, before[col]) : null, to = norm(col, val);
-      if (before && same(from, to)) continue;
-      if (!before && (to == null || to === '')) continue;
-      await tx.query('INSERT INTO product_changes(id,org_id,sku,field,old_value,new_value,note,source,actor_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)',
-        [randomUUID(), u.org_id, s, col, JSON.stringify(from), JSON.stringify(to), note, source, u.id]);
-      changed.push(col);
-    }
-    return changed;
-  };
-
   const currentPrice = async (tx: Queryable, org: string, s: string, target: PriceTarget) => {
     const q = target === 'msrp' ? ['SELECT msrp AS p FROM product_catalog WHERE org_id=$1 AND sku=$2', [org, s]]
       : target === 'actual' ? ['SELECT actual_price AS p FROM product_pricing WHERE org_id=$1 AND sku=$2', [org, s]]
@@ -180,6 +148,52 @@ export async function registerProductRoutes(app: FastifyInstance, db: Database, 
     return { status: hold ? 'pending' as const : 'applied' as const, id, needs: chk.needs, ...(canPricing(u) ? { cmPct: chk.cmPct } : {}) };
   };
 
+  return { rulesFor, currentPrice, applyPrice, requestPrice };
+}
+
+export async function registerProductRoutes(app: FastifyInstance, db: Database, o: { isAdmin: (u: User) => boolean }) {
+  const actorOf = (req: FastifyRequest): User => req.actor || deny(401, 'UNAUTHENTICATED', 'Authentication is required');
+  const grants = (u: User): string[] => Array.isArray((u as any).grants) ? (u as any).grants : [];
+  const canView = (u: User) => o.isAdmin(u) || grants(u).includes('products');
+  const canEditCatalog = (u: User) => o.isAdmin(u) || grants(u).includes('products_manage');
+  const canPricing = (u: User) => o.isAdmin(u) || grants(u).includes('product_cost_detail');
+  const audit = (tx: Queryable, u: User, action: string, objectId: string, details: unknown) =>
+    tx.query('INSERT INTO audit_events(id,org_id,department_id,owner_id,actor_id,action,object_id,details) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',
+      [randomUUID(), u.org_id, u.department_id, u.id, u.id, action, objectId, JSON.stringify(details)]);
+  const lastImport = async (org: string, kind: string) => {
+    const r = (await db.query('SELECT created_at,rows FROM product_imports WHERE org_id=$1 AND kind=$2 ORDER BY created_at DESC LIMIT 1', [org, kind])).rows[0];
+    return r ? { at: r.created_at, rows: r.rows } : null;
+  };
+
+  // MSRP, low price and checkout shipping: catalog managers and anyone with a pricing grant. Channel prices: seen with any pricing grant, set with the full build-up.
+  const canEditMsrp = (u: User) => canEditCatalog(u) || grants(u).includes('pricing_msrp') || canPricing(u);
+  const canSeeChannels = (u: User) => canPricing(u) || grants(u).includes('pricing_msrp');
+  const canSeeTarget = (u: User, target: string) => target === 'msrp' || canSeeChannels(u);
+  const catalogOf = async (q: Queryable, org: string, raw: string, lock = false) => {
+    const r = (await q.query('SELECT * FROM product_catalog WHERE org_id=$1 AND lower(sku)=lower($2)' + (lock ? ' FOR UPDATE' : ''), [org, raw])).rows[0];
+    return r || deny(404, 'PRODUCT_NOT_FOUND', 'This SKU is not in the product catalog');
+  };
+  const skuParam = (req: FastifyRequest) => String((req.params as any).sku || '');
+
+  /* Field-level change log. Values are normalised so a numeric string from the database equals the number sent. */
+  const NUM_COLS = new Set(['gross', 'msrp', 'low', 'ship_fee', 'moq']);
+  const norm = (col: string, v: any) => col === 'dims' ? (Array.isArray(v) ? v.map(Number) : null) : NUM_COLS.has(col) ? (v == null ? null : Number(v)) : String(v ?? '');
+  const same = (a: any, b: any) => JSON.stringify(a) === JSON.stringify(b);
+  const logChanges = async (tx: Queryable, u: User, s: string, before: any, after: Record<string, any>, source: string, note = '') => {
+    const changed: string[] = [];
+    for (const [col, val] of Object.entries(after)) {
+      const from = before ? norm(col, before[col]) : null, to = norm(col, val);
+      if (before && same(from, to)) continue;
+      if (!before && (to == null || to === '')) continue;
+      await tx.query('INSERT INTO product_changes(id,org_id,sku,field,old_value,new_value,note,source,actor_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)',
+        [randomUUID(), u.org_id, s, col, JSON.stringify(from), JSON.stringify(to), note, source, u.id]);
+      changed.push(col);
+    }
+    return changed;
+  };
+
+  const { rulesFor, currentPrice, applyPrice, requestPrice } = priceOps(db, { isAdmin: o.isAdmin, canPricing });
+
   app.get('/products', async req => {
     const u = actorOf(req);
     if (!canView(u)) deny(403, 'PRODUCTS_FORBIDDEN', 'You do not have access to the product area');
@@ -195,7 +209,7 @@ export async function registerProductRoutes(app: FastifyInstance, db: Database, 
         const p: any = pricing.get(r.sku);
         return {
           sku: r.sku, name: { zh: r.name_zh || r.name_en || r.sku, en: r.name_en || r.name_zh || r.sku }, nameZh: r.name_zh, nameEn: r.name_en, type: r.type, status: r.status,
-          gross: num_(r.gross), dims: Array.isArray(r.dims) ? r.dims.map(Number) : null, lead: r.lead, moq: num_(r.moq), msrp: num_(r.msrp), low: num_(r.low), shipFee: num_(r.ship_fee),
+          gross: num_(r.gross), dims: Array.isArray(r.dims) ? r.dims.map((x: any) => x == null ? null : Number(x)) : null, lead: r.lead, moq: num_(r.moq), msrp: num_(r.msrp), low: num_(r.low), shipFee: num_(r.ship_fee),
           best: r.best, note: r.note, updatedAt: r.updated_at,
           ...(p ? { factoryRmb: num_(p.factory_rmb), factoryUsd: num_(p.factory_usd), extraRmb: num_(p.extra_rmb), ddpRate: num_(p.ddp_rate), lastMileRmb: num_(p.last_mile_rmb),
             priceClass: p.price_class || null, landedUsd: num_(p.landed_usd), lastMileUsd: num_(p.last_mile_usd), actualPrice: num_(p.actual_price) } : {}),
@@ -296,7 +310,8 @@ export async function registerProductRoutes(app: FastifyInstance, db: Database, 
       FROM product_price_changes p WHERE p.org_id=$1 AND p.sku=$2 ORDER BY p.created_at DESC LIMIT 200`, [u.org_id, cur.sku])).rows;
     return {
       sku: cur.sku,
-      changes: changes.map((c: any) => ({ id: c.id, field: c.field, from: c.old_value, to: c.new_value, note: c.note, source: c.source, actor: { id: c.actor_id, name: c.actor_name }, at: c.created_at })),
+      // Fields of the 产品资料 page are logged by key; hide the ones this viewer may not see (costs, suppliers, files).
+      changes: changes.filter((c: any) => { const vis = FIELD.get(c.field)?.vis || (SLOT.has(c.field) ? SLOT_VIS : null); return !vis || levelsOf({ executive: o.isAdmin(u), grants: grants(u) }).has(vis); }).map((c: any) => ({ id: c.id, field: c.field, from: c.old_value, to: c.new_value, note: c.note, source: c.source, actor: { id: c.actor_id, name: c.actor_name }, at: c.created_at })),
       prices: prices.filter((p: any) => canSeeTarget(u, p.target)).map((p: any) => priceOut(u, p)),
     };
   });

@@ -20,6 +20,7 @@ import { registerHrRoutes, type HrOptions } from './hr.js';
 import { registerItRoutes, type ItOptions } from './it-accounts.js';
 import { registerQualityRoutes, qualityFactoryOf, factoryPathAllowed, type QualityOptions } from './quality.js';
 import { registerProductRoutes } from './products.js';
+import { registerPimRoutes } from './product-pim.js';
 import { registerInboxRoutes, pushInbox, taskFollowers } from './inbox.js';
 import { registerFeedbackRoutes } from './feedback.js';
 import { registerOkrCycle } from './okr-cycle.js';
@@ -152,7 +153,7 @@ export async function buildApp(options:AppOptions) {
   });
   app.setErrorHandler((error,req,reply)=>{
     if(error instanceof ZodError) return reply.code(400).send({error:{code:'VALIDATION_ERROR',message:message('Invalid request data',req.language),fields:error.issues.map(i=>({path:i.path.join('.'),code:i.code,message:message('Invalid value',req.language)}))}});
-    if(error instanceof ApiError) return reply.code(error.status).send({error:{code:error.code,message:error.zh&&req.language!=='en'?error.zh:message(error.message,req.language)}});
+    if(error instanceof ApiError) return reply.code(error.status).send({error:{code:error.code,message:error.zh&&req.language!=='en'?error.zh:message(error.message,req.language),...(error.details!==undefined?{details:error.details}:{})}});
     if((error as any).statusCode===413) return reply.code(413).send({error:{code:'BODY_TOO_LARGE',message:message('Request body exceeds limit',req.language)}});
     if((error as any).statusCode===400) return reply.code(400).send({error:{code:'INVALID_JSON',message:message('Invalid JSON request',req.language)}});
     return reply.code(500).send({error:{code:'INTERNAL_ERROR',message:message('The request could not be completed',req.language)}});
@@ -310,6 +311,7 @@ export async function buildApp(options:AppOptions) {
   await registerItRoutes(app,db,{...options.it,quality:options.quality,executiveIds:integrations.executiveUserIds||[],now:options.clock,intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0)});
   await registerInboxRoutes(app,db);
   await registerProductRoutes(app,db,{isAdmin:isExecutive /* sensitive ERP data: only deployment-configured executives bypass grants; in-app admins need grants */});
+  await registerPimRoutes(app,db,{isAdmin:isExecutive /* same rule as products: only deployment-configured executives bypass grants */});
   await registerFeedbackRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),mailer,to:process.env.FEEDBACK_EMAIL,appUrl:integrations.appPublicUrl});
   await registerOkrScoreRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),visible:visibleObjective});
   await registerCompletionRoutes(app,db,{model:completionModel,fxFetcher:options.fxFetcher,fxFallback:Number(process.env.FX_FALLBACK_CNY)||7.1});
