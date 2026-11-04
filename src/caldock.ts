@@ -41,7 +41,8 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
   if(!['http:','https:'].includes(publicUrl.protocol)||publicUrl.username||publicUrl.password)throw new Error('Invalid CalDock public URL');
   const origin=publicUrl.origin,secure=options.secureCookies===true,providers=options.providers||{};
   const admins=new Set(options.adminUserIds||[]);
-  const market=new URL(options.marketingUrl||'https://yonge6.github.io/mac-mini-rental/');
+  // Referral links open the storefront domain when there is one.
+  const market=new URL(options.siteUrl||options.marketingUrl||'https://yonge6.github.io/mac-mini-rental/');
   if(!['http:','https:'].includes(market.protocol)||market.username||market.password)throw new Error('Invalid CalDock marketing URL');
   const stripe=options.stripe;
   const viaStripe=async<T>(call:()=>Promise<T>):Promise<T>=>{try{return await call();}catch(error){if(error instanceof StripeRequestError)deny(502,'CALDOCK_PAYMENT_PROVIDER_ERROR','The payment provider could not complete the request; try again');throw error;}};

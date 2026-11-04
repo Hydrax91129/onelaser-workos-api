@@ -181,6 +181,27 @@ test('three first-period seats a day: 20% off once, weekly excluded, a cancelled
   }finally{await db.query("UPDATE caldock_orders SET offer_day=NULL");await offerApp.close();}
 });
 
+test('the launch commission default applies once and never overrides a later admin choice',async()=>{
+  assert.equal((await db.query('SELECT commission_bps FROM caldock_settings WHERE id=1')).rows[0].commission_bps,2000);
+  await db.query('UPDATE caldock_settings SET commission_bps=0 WHERE id=1');
+  await db.exec(schema);
+  assert.equal((await db.query('SELECT commission_bps FROM caldock_settings WHERE id=1')).rows[0].commission_bps,0);
+});
+
+test('referral links open the storefront domain',async()=>{
+  const site=await buildApp({db,environment:'production',closeDatabase:false,caldock:{publicUrl:origin,siteUrl:'https://wodemac.example',marketingUrl:'https://old.example/',providers:gateways,stripe}});
+  try{
+    const start=await site.inject('/caldock/auth/google/start?next=account&lang=zh&interval=year');
+    const state=new URL(start.headers.location!).searchParams.get('state')!,flow=cookieList(start).map(c=>c.split(';')[0]).join('; ');
+    const back=await site.inject({url:`/caldock/auth/google/callback?state=${state}&code=stripe-link`,headers:{cookie:flow}});
+    const cookie=cookieList(back).find(c=>c.startsWith('__Host-caldock_session='))!.split(';')[0];
+    const csrf=(await site.inject({url:'/caldock/me',headers:{cookie}})).json().csrfToken;
+    await site.inject({method:'POST',url:'/caldock/affiliate',payload:{},headers:{cookie,origin,'x-csrf-token':csrf}});
+    const data=(await site.inject({url:'/caldock/affiliate',headers:{cookie}})).json();
+    assert.match(JSON.stringify(data),/https:\/\/wodemac\.example\/\?ref=/);
+  }finally{await site.close();}
+});
+
 test('renewals of a referred order earn commission once per invoice; unreferred orders earn none',async()=>{
   const partner=await login('stripe-partner'),plain=await login('stripe-renew-plain');
   await send(partner,'POST','/affiliate',{});

@@ -39,6 +39,10 @@ CREATE TABLE IF NOT EXISTS caldock_settings (
  version integer NOT NULL DEFAULT 1, updated_at timestamptz NOT NULL DEFAULT now()
 );
 INSERT INTO caldock_settings(id) VALUES(1) ON CONFLICT DO NOTHING;
+-- One-time data change: the launch commission is 20%. The marker keeps a later admin choice, including 0, from being overwritten.
+CREATE TABLE IF NOT EXISTS caldock_data_migrations (id text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());
+WITH applied AS (INSERT INTO caldock_data_migrations(id) VALUES('commission-default-20') ON CONFLICT DO NOTHING RETURNING id)
+UPDATE caldock_settings SET commission_bps=2000 WHERE id=1 AND commission_bps=0 AND EXISTS (SELECT 1 FROM applied);
 CREATE TABLE IF NOT EXISTS caldock_orders (
  id text PRIMARY KEY, customer_id text NOT NULL REFERENCES caldock_users(id), request_key text NOT NULL,
  interval text NOT NULL CHECK(interval IN ('week','month','quarter','half','year')), amount_cents integer NOT NULL CHECK(amount_cents>0),
