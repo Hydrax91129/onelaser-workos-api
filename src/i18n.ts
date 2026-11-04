@@ -253,6 +253,17 @@ const zh:Record<string,string>={
   'Each file must be 20 MB or smaller':'每个文件不能超过 20 MB。',
   'A product can have at most 100 files':'每个产品最多保存 100 个文件。',
   'File not found':'找不到这个文件。',
-  'The file content does not match its type; export it again as a real PDF, image, CSV or TXT':'文件内容和格式对不上（可能只是改了扩展名），请重新导出真正的 PDF、图片、CSV 或 TXT 再上传。'
+  'The file content does not match its type; export it again as a real PDF, image, CSV or TXT':'文件内容和格式对不上（可能只是改了扩展名），请重新导出真正的 PDF、图片、CSV 或 TXT 再上传。',
+  'Upload the template as .xlsx or .csv (UTF-8)':'请上传 .xlsx 或 .csv（UTF-8）格式的标准模板。',
+  'This file cannot be read; download the standard template and fill it in':'无法读取这个文件，请先下载标准模板再填写上传。',
+  'The SKU column was not found; keep the first two rows of the standard template':'没有找到 SKU 列，请保留标准模板的前两行（中文表头和字段键）。',
+  'The file has no product rows':'文件里没有产品数据行。',
+  'Only the main administrators can bulk-update products':'只有主管理员可以批量更新产品资料。',
+  'This preview does not exist; upload the file again':'找不到这次预览，请重新上传文件。',
+  'This preview has already been applied':'这次预览已经确认更新过了。',
+  'The products changed after this preview; upload the file again to see the current differences':'预览之后产品资料又有改动，请重新上传文件，查看最新的更新前后对比。',
+  'Some rows have errors; fix them or choose to skip the rows with errors':'有些行有错误：请改正后重新上传，或选择“跳过错误行，更新其余”。',
+  'This import does not exist':'找不到这次导入记录。',
+  'This import has already been undone':'这次导入已经撤销过了。'
 };
 export function message(text:string,lang:Language) {return lang==='en'?text:(zh[text]||'请求未能处理，请核对输入或联系管理员。');}
