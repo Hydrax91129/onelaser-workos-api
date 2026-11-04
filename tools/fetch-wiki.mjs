@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hardenWikiApp, hardenWikiLocale } from './wiki-safety.mjs';
 
-const repository = 'Yonge6/onelaser-support-center';
+const repository = 'Hydrax91129/onelaser-support-center';
 const fixedFiles = new Set([
   '.nojekyll', 'README.md', 'index.html', 'export-manifest.json', 'docs/sla-draft.md',
   'assets/app.js', 'assets/locale.js', 'assets/styles.css', 'assets/brand.css', 'assets/fonts.css',

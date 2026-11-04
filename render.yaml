@@ -5,7 +5,7 @@ services:
     runtime: docker
     plan: 0.5c-512mb
     region: singapore
-    repo: https://github.com/Yonge6/onelaser-workos-api
+    repo: https://github.com/Hydrax91129/onelaser-workos-api
     branch: main
     dockerfilePath: ./Dockerfile
     autoDeployTrigger: checksPass
