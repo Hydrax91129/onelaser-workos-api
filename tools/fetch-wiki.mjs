@@ -3,7 +3,7 @@ import { readFile, readdir, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hardenWikiApp, hardenWikiLocale } from './wiki-safety.mjs';
-import { githubToken, githubFileRequest, githubTreeHeaders, describeTokenUse } from './github-fetch-auth.mjs';
+import { githubToken, githubFileRequests, githubTreeHeaders, describeTokenUse, describeStatus } from './github-fetch-auth.mjs';
 
 const repository = 'Hydrax91129/onelaser-support-center';
 const fixedFiles = new Set([
@@ -82,7 +82,7 @@ async function boundedFetch(url, maximum, headers) {
         headers,
         signal: AbortSignal.timeout(30000), redirect: 'error',
       });
-      if (!response.ok) throw new Error(`Wiki download unavailable (${response.status}).`);
+      if (!response.ok) throw Object.assign(new Error(`Wiki download unavailable (${describeStatus(response)}).`), { status: response.status });
       const chunks = []; let length = 0;
       for await (const chunk of response.body) {
         length += chunk.length;
@@ -91,7 +91,7 @@ async function boundedFetch(url, maximum, headers) {
       }
       return Buffer.concat(chunks);
     } catch (error) {
-      if (attempt === 2) throw error;
+      if (attempt === 2 || error.status === 404) throw error;
       await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
     }
   }
@@ -110,8 +110,12 @@ export async function packageWiki(destination, revision) {
   await Promise.all(Array.from({ length: 8 }, async () => {
     while (cursor < files.length) {
       const file = files[cursor++];
-      const request = githubFileRequest(repository, revision, file, token, userAgent);
-      const buffer = await boundedFetch(request.url, file.size, request.headers);
+      const requests = githubFileRequests(repository, revision, file, token, userAgent);
+      let buffer;
+      for (const [index, request] of requests.entries()) {
+        try { buffer = await boundedFetch(request.url, file.size, request.headers); break; }
+        catch (error) { if (error.status !== 404 || index === requests.length - 1) throw error; }
+      }
       verifyWikiBlob(file, buffer); buffers.set(file.path, buffer);
     }
   }));
