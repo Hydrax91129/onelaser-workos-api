@@ -49,7 +49,7 @@ test('HR records: who sees whom, versioned profile edits and history',async()=>{
   assert.equal(mgr.profile.notes,undefined);assert.equal(mgr.secrets,undefined);assert.equal(mgr.salary,undefined);assert.equal(mgr.documents,undefined);
   assert.ok(!mgr.events.some((e:any)=>e.kind==='warning'),'managers do not see warnings');
   const self=(await call('m2','GET','/hr/people/m2')).json();
-  assert.equal(self.access,'self');assert.equal(self.profile.notes,undefined,'internal HR notes stay with HR');assert.ok(self.secrets);
+  assert.equal(self.access,'basic');assert.equal(self.profile.notes,undefined,'internal HR notes stay with HR');assert.equal(self.secrets,undefined,'people see only basics of their own record');
 
   const audit=(await db.query("SELECT details FROM audit_events WHERE action='hr.profile.update'")).rows;
   assert.ok(audit.length>=2);assert.ok(!JSON.stringify(audit).includes('HR only note'),'audit holds field names, not values');
@@ -80,7 +80,10 @@ test('HR sensitive data: encrypted at rest, shown in full to whoever may read th
   assert.equal(mgr.secrets,undefined);assert.equal(mgr.salary,undefined);assert.ok(!JSON.stringify(mgr).includes('TEST-0000'),'managers never see sensitive values');
   assert.equal((await call('m1','POST','/hr/people/m2/reveal',{field:'idNumber'})).statusCode,403);
   assert.equal((await call('m1','PUT','/hr/people/m2/secrets',{idNumber:'X1234'})).statusCode,403);
-  assert.equal((await call('m2','GET','/hr/people/m2')).json().secrets.bankAccount.value,'0000 0000 1234 5678','people can see their own');
+  const own=(await call('m2','GET','/hr/people/m2')).json();
+  assert.equal(own.access,'basic');assert.equal(own.secrets,undefined,'people see only the basic facts of their own record');
+  for(const url of ['/hr/people/m2/payroll'])assert.equal((await call('m2','GET',url)).statusCode,403);
+  assert.equal((await call('m2','POST','/hr/people/m2/reveal',{field:'bankAccount'})).statusCode,403);
   assert.equal((await call('m3','GET','/hr/people/m2')).statusCode,404);
   assert.equal((await db.query("SELECT count(*)::int n FROM audit_events WHERE action LIKE 'hr.%view%' OR action='hr.sensitive.reveal'")).rows[0].n,0,'reading is not logged');
 
@@ -132,9 +135,10 @@ test('HR documents: encrypted files, HR and the person only, type and size limit
   assert.equal((await call('m2','POST','/hr/people/m2/documents',{kind:'other',name:'a.pdf',mime:'application/pdf',dataBase64:pdf.toString('base64')})).statusCode,403,'only HR uploads');
   const doc=(await call('m4','GET','/hr/people/m2')).json().documents[0];
   assert.equal(doc.name,'劳动合同.pdf');assert.equal(doc.daysToExpiry,18);
-  const own=await call('m2','GET',`/hr/people/m2/documents/${docId}`);
-  assert.equal(own.statusCode,200);assert.equal(own.headers['content-type'],'application/pdf');assert.equal(own.headers['cache-control'],'no-store');
-  assert.deepEqual(own.rawPayload,pdf);
+  assert.equal((await call('m2','GET',`/hr/people/m2/documents/${docId}`)).statusCode,403,'people do not download their own HR files (self-service is phase 2)');
+  const hrDl=await call('m4','GET',`/hr/people/m2/documents/${docId}`);
+  assert.equal(hrDl.statusCode,200);assert.equal(hrDl.headers['content-type'],'application/pdf');assert.equal(hrDl.headers['cache-control'],'no-store');
+  assert.deepEqual(hrDl.rawPayload,pdf);
   assert.equal((await call('m1','GET',`/hr/people/m2/documents/${docId}`)).statusCode,403,'managers cannot open documents');
   assert.equal((await call('m4','DELETE',`/hr/people/m2/documents/${docId}`)).statusCode,200);
   assert.equal((await call('m4','GET','/hr/people/m2')).json().documents.length,0);

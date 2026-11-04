@@ -11,13 +11,12 @@
  *   hr_events     append-only employment history
  *
  * Access, per region:
- *   US                  company owners (WORKOS_EXECUTIVE_USER_IDS) only. No grant opens it; the person sees only their basic
- *                       employment facts until employee self-service (phase 2).
+ *   US                  company owners (WORKOS_EXECUTIVE_USER_IDS) only. No grant opens it.
  *   China / other       grants hr_cn_view|manage, hr_intl_view|manage, set only by the company owner like every feature grant.
  *                       view = read everything in that region; manage = also edit, upload, delete.
  * WORKOS_HR_USER_IDS no longer opens anything. Only company owners assign a person's region. Whoever may read a record sees
- * every value in full (no masking, no view log); values are encrypted only at rest. Everyone outside the US sees their own
- * record; no one except a company owner edits their own record. Managers see the basic employment facts of their reports.
+ * every value in full (no masking, no view log); values are encrypted only at rest. People see only the basic employment
+ * facts of their own record, in every region, until employee self-service (phase 2). Managers see the basic employment facts of their reports.
  * Factory contacts (factoryUserIds) never get HR access and never appear in HR lists. Edits and the CPA export are audited
  * (field names, never values). Marital status and dependants live only in the encrypted payroll block, and voluntary EEO
  * answers in their own encrypted field: for payroll, benefits and reporting only, never for hiring decisions.
@@ -295,16 +294,15 @@ export async function registerHrRoutes(app: FastifyInstance, db: Database, o: Hr
    * What the actor may do with someone's record. Whoever may read a record sees every value in full (stored encrypted).
    *  'hr'      company owner, or manage grant for the person's region: read and edit everything
    *  'view'    read-only grant for the region: read everything, no edits
-   *  'self'    own record (China, other countries, not assigned): read everything, no edits
-   *  'basic'   own US record: basic employment facts only, until employee self-service exists
+   *  'basic'   own record (any region): basic employment facts only, until employee self-service exists
    *  'manager' the person reports to the actor: basic employment facts only
    */
-  type Access = 'hr' | 'view' | 'self' | 'basic' | 'manager';
+  type Access = 'hr' | 'view' | 'basic' | 'manager';
   const limited = (a: Access) => a === 'manager' || a === 'basic';
   const accessTo = (u: User, subjectId: string, region: string): Access | null => {
     if (isFactory(u)) return null;
     if (isExec(u)) return 'hr';
-    if (subjectId === u.id) return region === 'us' ? 'basic' : 'self';
+    if (subjectId === u.id) return 'basic'; // own record: basic employment facts only, in every region (self-service is phase 2)
     const level = regionLevel(u, region);
     if (level) return level === 'manage' ? 'hr' : 'view';
     return (u.visibleOwnerIds || []).includes(subjectId) ? 'manager' : null;
@@ -377,7 +375,6 @@ export async function registerHrRoutes(app: FastifyInstance, db: Database, o: Hr
     const p = (await db.query('SELECT * FROM hr_profiles WHERE user_id=$1', [s.id])).rows[0];
     const profile: any = shapeProfile(p);
     if (limited(access)) for (const k of ['bankName', 'emergencyName', 'emergencyRelation', 'consentDate', 'consentVersion', 'notes']) delete profile[k];
-    if (access === 'self') delete profile.notes;
     const people = new Map((await db.query('SELECT id,display_name,name_zh,name_en FROM users WHERE org_id=$1', [u.org_id])).rows.map((r: any) => [r.id, r]));
     const events = (await db.query('SELECT * FROM hr_events WHERE user_id=$1 ORDER BY happened_on DESC, created_at DESC', [s.id])).rows
       .filter((e: any) => !limited(access) || e.kind !== 'warning')

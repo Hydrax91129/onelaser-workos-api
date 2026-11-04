@@ -127,7 +127,7 @@ test('HR regions: US records are for the company owner only, with Rippling-style
  }finally{await app.close();await db.close();}
 });
 
-test('HR regions: China read-only sees everything in full but changes nothing; manage edits; self reads own',async()=>{
+test('HR regions: China read-only sees everything in full but changes nothing; manage edits; self sees only basics',async()=>{
  const {db,app,call}=await setup();
  try{
   ok(await call('m6','PATCH','/org/members/m4',{grants:['hr_cn_manage']}));
@@ -156,10 +156,15 @@ test('HR regions: China read-only sees everything in full but changes nothing; m
   ] as const){const r=await call('m5',method,url,body);assert.equal(r.statusCode,403,`${method} ${url}: ${r.body}`);}
   assert.match((await call('m5','PUT','/hr/people/m1/secrets',{idNumber:'000000000000000001'})).json().error.message,/只读/);
 
+  // The person themself: basic employment facts only, like in the US (self-service is phase 2).
   const self=ok(await call('m1','GET','/hr/people/m1'));
-  assert.equal(self.access,'self');assert.equal(self.secrets.idNumber.value,'000000000000000000');assert.equal(self.details.cn.hukouType,'urban');
+  assert.equal(self.access,'basic');
+  for(const k of ['details','secrets','payroll','salary','documents'])assert.equal(self[k],undefined,`self gets no ${k}`);
+  assert.ok(!JSON.stringify(self).includes('000000000000000000'));
+  for(const [method,url,body] of [['GET','/hr/people/m1/payroll'],['POST','/hr/people/m1/reveal',{field:'idNumber'}],['GET','/hr/people/m1/documents/x']] as const)
+   assert.equal((await call('m1',method,url,body)).statusCode,403,`self ${method} ${url}`);
   assert.equal((await call('m1','PUT','/hr/people/m1/details',{expectedVersion:self.profile.version,details:{}})).statusCode,403,'no one edits their own record');
-  assert.equal(ok(await call('m4','GET','/hr/people/m4')).access,'self','China HR cannot edit their own record either');
+  assert.equal(ok(await call('m4','GET','/hr/people/m4')).access,'basic','China HR sees only basics of their own record too');
   assert.equal((await call('m4','POST','/hr/people/m4/salary',{effectiveDate:'2026-02-01',base:1,currency:'CNY',period:'month'})).statusCode,403);
   assert.equal((await call('m3','GET','/hr/people/m1')).statusCode,404,'no grant, no access');
 
