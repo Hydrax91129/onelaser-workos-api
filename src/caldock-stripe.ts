@@ -44,6 +44,10 @@ export function createCaldockStripe(config:{secretKey:string;webhookSecret:strin
   };
 }
 
+// A test-mode Checkout Session does not exist for a live key and can never take real money,
+// so an order that still points at one simply has no payment page.
+export const isStaleTestSession=(stripe:Pick<CaldockStripe,'mode'>,sessionId:string)=>stripe.mode==='live'&&sessionId.startsWith('cs_test_');
+
 export function stripeFromEnv(env:NodeJS.ProcessEnv):CaldockStripe|undefined {
   if(!env.CALDOCK_STRIPE_SECRET_KEY||!env.CALDOCK_STRIPE_WEBHOOK_SECRET)return undefined;
   return createCaldockStripe({secretKey:env.CALDOCK_STRIPE_SECRET_KEY.trim(),webhookSecret:env.CALDOCK_STRIPE_WEBHOOK_SECRET.trim(),allowLive:env.CALDOCK_STRIPE_ALLOW_LIVE==='true'});
