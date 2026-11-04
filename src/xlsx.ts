@@ -28,12 +28,15 @@ function zip(entries: Entry[]) {
   end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(offset, 16);
   return Buffer.concat([...chunks, cd, end]);
 }
+const MAX_ENTRY = 50 * 1024 * 1024, MAX_TOTAL = 100 * 1024 * 1024;
 export function unzip(buf: Buffer): Map<string, Buffer> {
   const out = new Map<string, Buffer>();
   let eocd = -1;
   for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65557); i--) if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
   if (eocd < 0) throw new Error('NOT_ZIP');
   const count = buf.readUInt16LE(eocd + 10);
+  // A workbook is a few dozen parts; limits on parts and on unpacked size (counted from the real output) stop zip bombs.
+  if (count > 2000) throw new Error('ZIP_TOO_MANY_ENTRIES');
   let p = buf.readUInt32LE(eocd + 16), total = 0;
   for (let n = 0; n < count; n++) {
     if (buf.readUInt32LE(p) !== 0x02014b50) throw new Error('NOT_ZIP');
@@ -41,9 +44,13 @@ export function unzip(buf: Buffer): Map<string, Buffer> {
     const nlen = buf.readUInt16LE(p + 28), xlen = buf.readUInt16LE(p + 30), clen = buf.readUInt16LE(p + 32), loc = buf.readUInt32LE(p + 42);
     const name = buf.subarray(p + 46, p + 46 + nlen).toString('utf8');
     p += 46 + nlen + xlen + clen;
-    if (!/^(xl\/|\[Content_Types\])/.test(name) || usize > 50 * 1024 * 1024 || (total += usize) > 200 * 1024 * 1024) continue;
+    if (!/^(xl\/|\[Content_Types\])/.test(name)) continue;
+    const left = MAX_TOTAL - total;
+    if (left <= 0 || usize > left) throw new Error('ZIP_TOO_LARGE');
     const start = loc + 30 + buf.readUInt16LE(loc + 26) + buf.readUInt16LE(loc + 28), raw = buf.subarray(start, start + csize);
-    out.set(name, method === 0 ? Buffer.from(raw) : method === 8 ? inflateRawSync(raw, { maxOutputLength: 50 * 1024 * 1024 }) : Buffer.alloc(0));
+    const body = method === 0 ? Buffer.from(raw) : method === 8 ? inflateRawSync(raw, { maxOutputLength: Math.min(MAX_ENTRY, left) }) : Buffer.alloc(0);
+    total += body.length;
+    out.set(name, body);
   }
   return out;
 }

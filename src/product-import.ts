@@ -17,7 +17,7 @@ import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
 import { deny } from './errors.js';
 import {
-  FAMILIES, FIELD, GROUPS, CLEAR, CORE_REQUIRED, VIS_NAMES, allFields, canSee, canWrite, completeness, enumLabel, famCode, parseValue, viewerOf,
+  FAMILIES, FIELD, GROUPS, CLEAR, CORE_REQUIRED, VIS_NAMES, allFields, canSee, canWrite, completeness, enumLabel, famCode, parseValue, viewerOf, relationIssues,
   type Field, type Viewer,
 } from './product-spec.js';
 import { worksheet, type Worksheet } from './product-worksheet.js';
@@ -147,6 +147,16 @@ export function diffUpload(v: Viewer, ws: Worksheet, recs: Map<string, Rec>, par
   for (const r of recs.values()) sysCount.set(r.sku.toLowerCase(), (sysCount.get(r.sku.toLowerCase()) || 0) + 1);
   const fileSeen = new Map<string, number>();
   const results: RowResult[] = [];
+  // SKUs and REFB SKUs as they will be after this file: products in the system plus the rows of the file.
+  const index = { skus: new Set<string>([...recs.values()].map(r => r.sku.toLowerCase())), refb: new Map<string, string[]>() };
+  const refbOf = new Map<string, string>();
+  for (const r of recs.values()) if (r.values.refbSku) refbOf.set(r.sku.toLowerCase(), String(r.values.refbSku));
+  for (const { cells } of parsed.rows) {
+    const k = cells.sku == null ? '' : String(cells.sku).trim(); if (!k) continue;
+    index.skus.add(k.toLowerCase());
+    if (cells.refbSku !== undefined) { const v = String(cells.refbSku).trim(); if (v && v !== CLEAR) refbOf.set(k.toLowerCase(), v); else refbOf.delete(k.toLowerCase()); }
+  }
+  for (const [k, v] of refbOf) { const key = v.toLowerCase(), sku = findRec(recs, k)?.sku || k; index.refb.set(key, [...(index.refb.get(key) || []), sku]); }
   for (const { row, cells } of parsed.rows) {
     const errs: RowError[] = [], err = (key: string, zh: string, en: string) => { const c = colOf.get(key); errs.push({ col: c?.col || '', header: c?.header || FIELD.get(key)?.zh || key, key, zh, en }); };
     const rawSku = cells.sku == null ? '' : String(cells.sku).trim();
@@ -169,6 +179,7 @@ export function diffUpload(v: Viewer, ws: Worksheet, recs: Map<string, Rec>, par
     if (rec && values.goodsType && values.goodsType !== 'refb' && rec.values.refbSku && values.refbSku === undefined) values.refbSku = null;
     const after = { ...before, ...values };
     for (const i of recordIssues(after)) if (!errs.some(e => e.key === i.key)) err(i.key, i.zh, i.en);
+    for (const i of relationIssues(rec ? rec.sku : rawSku, after, Object.keys(values), index)) if (!errs.some(e => e.key === i.key)) err(i.key, i.zh, i.en);
     res.family = after.family || null;
     if (errs.length) continue;
     for (const f of fields) {
