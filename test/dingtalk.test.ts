@@ -22,6 +22,7 @@ function fixture(options:{corpId?:string;external?:boolean;inactive?:boolean;dep
 test('DingTalk OAuth authorization URL contains state but no secret',()=>{
  const {client}=fixture();const url=new URL(client.authorizationUrl('a'.repeat(43)));
  assert.equal(url.origin,'https://login.dingtalk.com');assert.equal(url.searchParams.get('state'),'a'.repeat(43));assert.equal(url.searchParams.get('redirect_uri'),config.redirectUri);assert(!url.toString().includes(config.clientSecret));
+ assert.equal(url.searchParams.get('corpId'),config.corpId);assert.equal(url.searchParams.get('scope'),'openid corpid');
  assert.throws(()=>client.authorizationUrl('short'),DingTalkError);
 });
 test('OAuth identity must map to an active enterprise member in an allowed department',async()=>{

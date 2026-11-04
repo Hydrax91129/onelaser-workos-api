@@ -35,7 +35,9 @@ export class DingTalkClient {
   authorizationUrl(state: string) {
     if (!/^[A-Za-z0-9_-]{32,256}$/.test(state)) throw new DingTalkError('OAUTH_STATE_INVALID',400);
     const url = new URL('https://login.dingtalk.com/oauth2/auth');
-    url.search = new URLSearchParams({ redirect_uri:this.config.redirectUri,response_type:'code',client_id:this.config.clientId,scope:'openid corpid',state,prompt:'consent' }).toString();
+    // corpId preselects the company organization. Without it, a person who belongs to several
+    // organizations can pick another one and DingTalk rejects the internal app (cross-organization).
+    url.search = new URLSearchParams({ redirect_uri:this.config.redirectUri,response_type:'code',client_id:this.config.clientId,scope:'openid corpid',corpId:this.config.corpId,state,prompt:'consent' }).toString();
     return url.toString();
   }
   private async request(url: string, init: RequestInit = {}): Promise<Json> {
