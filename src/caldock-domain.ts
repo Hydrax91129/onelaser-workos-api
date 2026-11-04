@@ -3,6 +3,31 @@ import type { Database, Queryable } from './db.js';
 import { deny } from './errors.js';
 
 export const CALDOCK_PRICES = Object.freeze({ week:6900, month:19900, quarter:53700, half:95400, year:166800 });
+// Daily first-period offer. Seats are counted here on the server; the page only displays them.
+export const CALDOCK_OFFER = Object.freeze({ percentOff:20, dailySeats:3, utcOffsetHours:8, holdMinutes:32, sessionMinutes:31, couponId:'caldock-first-period-20', excluded:['week'] });
+const offerDay=(now:number)=>new Date(now+CALDOCK_OFFER.utcOffsetHours*3600000).toISOString().slice(0,10);
+const offerResetsAt=(now:number)=>new Date(Date.parse(offerDay(now)+'T00:00:00Z')+(24-CALDOCK_OFFER.utcOffsetHours)*3600000).toISOString();
+async function offerSeatsUsed(db:Queryable,day:string,excludeOrderId:string|null) {
+  // A paid order keeps its seat; an unpaid one holds it only until its payment page expires.
+  const row=(await db.query("SELECT count(*)::int AS used FROM caldock_orders WHERE offer_day=$1 AND id IS DISTINCT FROM $2 AND (status IN ('paid','provisioning','active','refunded') OR (status='pending_payment' AND offer_hold_until>now()))",[day,excludeOrderId])).rows[0];
+  return Number(row.used);
+}
+export async function caldockOfferStatus(db:Queryable,now=Date.now()) {
+  const used=await offerSeatsUsed(db,offerDay(now),null);
+  return {percentOff:CALDOCK_OFFER.percentOff,seatsTotal:CALDOCK_OFFER.dailySeats,seatsLeft:Math.max(0,CALDOCK_OFFER.dailySeats-used),resetsAt:offerResetsAt(now),excludedIntervals:CALDOCK_OFFER.excluded};
+}
+// Runs inside the checkout transaction, just before a new payment page is created.
+export async function applyCaldockOffer(tx:Queryable,order:any,now=Date.now()) {
+  const list=order.list_amount_cents??order.amount_cents,day=offerDay(now);
+  let claimed=false;
+  if(!CALDOCK_OFFER.excluded.includes(order.interval)){
+    await tx.query('INSERT INTO caldock_offer_days(day) VALUES($1) ON CONFLICT DO NOTHING',[day]);
+    await tx.query('SELECT day FROM caldock_offer_days WHERE day=$1 FOR UPDATE',[day]);
+    claimed=await offerSeatsUsed(tx,day,order.id)<CALDOCK_OFFER.dailySeats;
+  }
+  const amount=claimed?Math.round(list*(100-CALDOCK_OFFER.percentOff)/100):list;
+  return (await tx.query("UPDATE caldock_orders SET list_amount_cents=$2,amount_cents=$3,offer_day=$4,offer_hold_until=CASE WHEN $4::text IS NULL THEN NULL ELSE now()+make_interval(mins=>$5::int) END WHERE id=$1 RETURNING *",[order.id,list,amount,claimed?day:null,CALDOCK_OFFER.holdMinutes])).rows[0];
+}
 export async function caldockAudit(tx:Queryable,actorId:string|null,action:string,objectId:string,details:unknown={}) {
   await tx.query('INSERT INTO caldock_audit(id,actor_id,action,object_id,details) VALUES($1,$2,$3,$4,$5)',[randomUUID(),actorId,action,objectId,JSON.stringify(details)]);
 }

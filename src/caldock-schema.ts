@@ -78,6 +78,10 @@ CREATE TABLE IF NOT EXISTS caldock_payment_events (
 );
 -- Stripe adapter (additive and repeatable). Provider IDs only; no card data is stored.
 ALTER TABLE caldock_orders ADD COLUMN IF NOT EXISTS stripe_checkout_session_id text;
+ALTER TABLE caldock_orders ADD COLUMN IF NOT EXISTS list_amount_cents integer;
+ALTER TABLE caldock_orders ADD COLUMN IF NOT EXISTS offer_day text;
+ALTER TABLE caldock_orders ADD COLUMN IF NOT EXISTS offer_hold_until timestamptz;
+CREATE TABLE IF NOT EXISTS caldock_offer_days (day text PRIMARY KEY);
 ALTER TABLE caldock_orders ADD COLUMN IF NOT EXISTS stripe_customer_id text;
 ALTER TABLE caldock_orders ADD COLUMN IF NOT EXISTS stripe_subscription_id text;
 CREATE INDEX IF NOT EXISTS caldock_order_stripe_subscription ON caldock_orders(stripe_subscription_id);

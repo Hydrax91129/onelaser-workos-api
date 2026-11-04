@@ -20,6 +20,7 @@ const fakeFetch:StripeFetch=async(url,init)=>{
   assert.equal(init.headers.authorization,'Bearer sk_test_fakeKey1234567890');
   const ok=(body:any)=>({ok:true,status:200,json:async()=>body});
   if(init.method==='POST'&&u.pathname==='/v1/checkout/sessions'){const id='cs_test_'+(++sessionCount);sessions.set(id,{status:'open',url:'https://checkout.stripe.test/'+id});return ok({id,...sessions.get(id)});}
+  if(init.method==='POST'&&u.pathname==='/v1/coupons')return ok({id:params.get('id')});
   const cs=/^\/v1\/checkout\/sessions\/([^/]+)(\/expire)?$/.exec(u.pathname);
   if(cs){const s=sessions.get(cs[1]);if(!s)return {ok:false,status:404,json:async()=>({error:{code:'resource_missing',message:'secret detail'}})};if(cs[2])s.status='expired';return ok({id:cs[1],...s});}
   if(u.pathname.startsWith('/v1/subscriptions/'))return ok({id:u.pathname.split('/').pop()});
@@ -137,6 +138,47 @@ test('the half-yearly plan charges 95400 every 6 months',async()=>{
   const created=calls.filter(c=>c.method==='POST'&&c.path==='/v1/checkout/sessions').pop()!;
   assert.equal(created.params.get('line_items[0][price_data][recurring][interval]'),'month');
   assert.equal(created.params.get('line_items[0][price_data][recurring][interval_count]'),'6');
+});
+
+test('three first-period seats a day: 20% off once, weekly excluded, a cancelled hold frees its seat',async()=>{
+  const offerApp=await buildApp({db,environment:'production',closeDatabase:false,caldock:{publicUrl:origin,providers:gateways,stripe,firstPeriodOffer:true}});
+  const signIn=async(code:string)=>{
+    const start=await offerApp.inject('/caldock/auth/google/start?next=account&lang=zh&interval=month');
+    const state=new URL(start.headers.location!).searchParams.get('state')!,flow=cookieList(start).map(c=>c.split(';')[0]).join('; ');
+    const back=await offerApp.inject({url:`/caldock/auth/google/callback?state=${state}&code=${code}`,headers:{cookie:flow}});
+    const cookie=cookieList(back).find(c=>c.startsWith('__Host-caldock_session='))!.split(';')[0];
+    return {cookie,csrf:(await offerApp.inject({url:'/caldock/me',headers:{cookie}})).json().csrfToken};
+  };
+  const call=(who:{cookie:string;csrf:string},method:'POST'|'PATCH',url:string,payload:Record<string,unknown>)=>offerApp.inject({method,url:'/caldock'+url,payload,headers:{cookie:who.cookie,origin,'x-csrf-token':who.csrf}});
+  const buy=async(code:string,interval:string)=>{
+    const who=await signIn(code),order=(await call(who,'POST','/orders',{interval,requestKey:randomUUID()})).json();
+    assert.equal((await call(who,'POST',`/orders/${order.id}/checkout`,{})).statusCode,200);
+    const params=calls.filter(c=>c.method==='POST'&&c.path==='/v1/checkout/sessions').pop()!.params;
+    const row=(await db.query('SELECT * FROM caldock_orders WHERE id=$1',[order.id])).rows[0];
+    return {who,order,row,params};
+  };
+  const left=async()=>(await offerApp.inject('/caldock/capabilities')).json().offer;
+  try{
+    await db.query("UPDATE caldock_orders SET offer_day=NULL");
+    const fresh=await left();assert.equal(fresh.seatsLeft,3);assert.equal(fresh.percentOff,20);
+    assert.ok(Date.parse(fresh.resetsAt)>Date.now());assert.ok(Date.parse(fresh.resetsAt)-Date.now()<=86400000);
+    assert.equal(new Date(fresh.resetsAt).getUTCHours(),16);
+    const weekly=await buy('offer-weekly','week');
+    assert.equal(weekly.row.amount_cents,6900);assert.equal(weekly.params.get('discounts[0][coupon]'),null);assert.equal((await left()).seatsLeft,3);
+    const first=await buy('offer-1','month');
+    assert.equal(first.row.amount_cents,15920);assert.equal(first.row.list_amount_cents,19900);
+    assert.equal(first.params.get('line_items[0][price_data][unit_amount]'),'19900');assert.equal(first.params.get('discounts[0][coupon]'),'caldock-first-period-20');assert.ok(first.params.get('expires_at'));
+    const coupon=calls.filter(c=>c.path==='/v1/coupons').pop()!.params;assert.equal(coupon.get('duration'),'once');assert.equal(coupon.get('percent_off'),'20');
+    const second=await buy('offer-2','year');assert.equal(second.row.amount_cents,133440);
+    const third=await buy('offer-3','half');assert.equal(third.row.amount_cents,76320);
+    assert.equal((await left()).seatsLeft,0);
+    const fourth=await buy('offer-4','quarter');
+    assert.equal(fourth.row.amount_cents,53700);assert.equal(fourth.row.offer_day,null);assert.equal(fourth.params.get('discounts[0][coupon]'),null);
+    assert.equal((await call(first.who,'PATCH',`/orders/${first.order.id}`,{action:'cancel_pending',expectedVersion:first.order.version})).statusCode,200);
+    assert.equal((await left()).seatsLeft,1);
+    await db.query("UPDATE caldock_orders SET offer_hold_until=now()-interval '1 minute' WHERE id=$1",[second.order.id]);
+    assert.equal((await left()).seatsLeft,2);
+  }finally{await db.query("UPDATE caldock_orders SET offer_day=NULL");await offerApp.close();}
 });
 
 test('amount mismatch is recorded for review and never marks the order paid',async()=>{
