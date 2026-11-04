@@ -19,7 +19,8 @@ export function githubToken({ env = process.env, readSecret = () => readFileSync
 // The requests to try, in order, for one pinned file. Files come from raw.githubusercontent.com,
 // which does not count against the GitHub REST API rate limit (5000 requests an hour per token,
 // shared by every CI run and Render build). With a token the raw request carries it, so private
-// repositories work; only if raw answers 404 does the file come from the API by its Git object id.
+// repositories work; only if raw still fails (404, or a server error after retries) does the file
+// come from the API by its Git object id.
 // The tree listing is then the only API request per repository and build.
 export function githubFileRequests(repository, revision, file, token, userAgent) {
   const raw = { url: `https://raw.githubusercontent.com/${repository}/${revision}/${file.path}`, headers: { 'User-Agent': userAgent } };
@@ -29,6 +30,21 @@ export function githubFileRequests(repository, revision, file, token, userAgent)
     url: `https://api.github.com/repos/${repository}/git/blobs/${file.sha}`,
     headers: { 'User-Agent': userAgent, Accept: 'application/vnd.github.raw', Authorization: `Bearer ${token}`, 'X-GitHub-Api-Version': '2022-11-28' },
   }];
+}
+
+// Fetches with up to three attempts: a network error, a 429 or a 5xx from GitHub is usually
+// momentary (a raw cache miss on a just-pushed commit can answer 503), so wait briefly and retry.
+// Any other answer, including 404, comes back at once for the caller to act on.
+export async function fetchWithRetry(url, options, { attempts = 3, fetchImpl = fetch, wait = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const response = await fetchImpl(url, { ...options, signal: AbortSignal.timeout(30000) });
+      if (attempt >= attempts || !(response.status === 429 || response.status >= 500)) return response;
+    } catch (error) {
+      if (attempt >= attempts) throw error;
+    }
+    await wait(1000 * attempt);
+  }
 }
 
 // Status for an error message, naming a GitHub rate limit when that is the cause (never the token).
