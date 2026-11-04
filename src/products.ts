@@ -12,6 +12,8 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
 import { deny } from './errors.js';
+import { FIELD, canSee, viewerOf } from './product-spec.js';
+import { normalizeWorksheet, dtcRate, whRate, type Worksheet } from './product-worksheet.js';
 
 export const productSchema = `
 CREATE TABLE IF NOT EXISTS product_catalog(org_id text NOT NULL, sku text NOT NULL, name_zh text NOT NULL DEFAULT '', name_en text NOT NULL DEFAULT '',
@@ -83,12 +85,15 @@ const STATUS_NEEDS_NOTE = new Set(['clearance', 'eolPlanned', 'eol']);
  * Without a landed cost the margin is unknown, so the change applies and is recorded as unchecked. */
 export const CHANNELS = ['shopify', 'amazon', 'ebay', 'dealer'] as const;
 export const PRICE_TARGETS = ['msrp', 'actual', ...CHANNELS] as const;
-type PriceTarget = typeof PRICE_TARGETS[number];
+/** Besides PRICE_TARGETS the product library records MAP ('map'), the promotion floor ('promo_floor') and per-tier
+ *  wholesale overrides ('wh0', 'wh1', …) as channel prices of the same SKU. */
+export type PriceTarget = typeof PRICE_TARGETS[number] | 'map' | 'promo_floor' | `wh${number}`;
+const isWholesale = (t: string) => t === 'dealer' || /^wh\d+$/.test(t);
 export function priceCheck(rules: typeof DEFAULT_PRICING_RULES, cat: any, pr: any, target: PriceTarget, price: number | null) {
   const landed = pr?.landed_usd == null ? null : Number(pr.landed_usd);
   if (price == null || price <= 0) return { cmPct: null as number | null, needs: null as string | null };
   const round = (n: number) => Math.round(n * 10) / 10;
-  if (target === 'dealer') {
+  if (isWholesale(target)) {
     const cm = landed == null ? null : round((price * (1 - rules.wholesalePct / 100) - landed) / price * 100);
     const msrp = cat?.msrp == null ? null : Number(cat.msrp), deepest = rules.wholesale.large + rules.wholesale.over100k;
     return { cmPct: cm, needs: cm != null && cm < 0 ? 'loss' : msrp && price < msrp * (1 - deepest / 100) - 0.005 ? 'dealer_discount' : null };
@@ -99,6 +104,23 @@ export function priceCheck(rules: typeof DEFAULT_PRICING_RULES, cat: any, pr: an
   const cm = round((price * (1 - rate) + ship - delivered) / price * 100);
   return { cmPct: cm, needs: cm < 0 ? 'loss' : cm < rules.floorPct ? 'floor' : null };
 }
+/** Once the 价格参数 worksheet is configured, price approval follows its rates and floors instead of the older rules:
+ *  retail-type targets use the DTC rate (+ marketplace extra for Amazon/eBay) against delivered cost and the DTC floor;
+ *  wholesale targets use the wholesale rate against landed cost (delivered when we pay freight) and the wholesale floor. */
+export function worksheetPriceCheck(ws: Worksheet, cat: any, pr: any, target: PriceTarget, price: number | null) {
+  if (price == null || price <= 0) return { cmPct: null as number | null, needs: null as string | null };
+  const landed = pr?.landed_usd == null ? null : Number(pr.landed_usd);
+  if (landed == null) return { cmPct: null, needs: null };
+  const delivered = landed + (pr?.last_mile_usd == null ? 0 : Number(pr.last_mile_usd)), round = (n: number) => Math.round(n * 10) / 10;
+  if (isWholesale(target)) {
+    const rate = whRate(ws); if (rate == null) return { cmPct: null, needs: null };
+    const cost = cat?.attrs?.whFreight === 'us' ? delivered : landed, cm = round((price * (1 - rate) - cost) / price * 100);
+    return { cmPct: cm, needs: cm < 0 ? 'loss' : ws.whFloor != null && cm < ws.whFloor ? 'floor' : null };
+  }
+  const base = dtcRate(ws); if (base == null) return { cmPct: null, needs: null };
+  const rate = base + (target === 'amazon' || target === 'ebay' ? (ws.mktExtra ?? 0) / 100 : 0), cm = round((price * (1 - rate) - delivered) / price * 100);
+  return { cmPct: cm, needs: cm < 0 ? 'loss' : ws.dtcFloor != null && cm < ws.dtcFloor ? 'floor' : null };
+}
 const sku = z.string().trim().min(1).max(80).regex(/^[A-Za-z0-9][A-Za-z0-9._\-/ ]*$/, 'Use letters, digits, dot, dash, slash or underscore in the SKU');
 const num = z.number().min(0).max(10_000_000).nullable().optional();
 const text = (max: number) => z.string().trim().max(max).optional();
@@ -108,6 +130,7 @@ export async function registerProductRoutes(app: FastifyInstance, db: Database, 
   const actorOf = (req: FastifyRequest): User => req.actor || deny(401, 'UNAUTHENTICATED', 'Authentication is required');
   const grants = (u: User): string[] => Array.isArray((u as any).grants) ? (u as any).grants : [];
   const canView = (u: User) => o.isAdmin(u) || grants(u).includes('products');
+  const viewer = (u: User) => viewerOf(grants(u), o.isAdmin(u));
   const canEditCatalog = (u: User) => o.isAdmin(u) || grants(u).includes('products_manage');
   const canPricing = (u: User) => o.isAdmin(u) || grants(u).includes('product_cost_detail');
   const audit = (tx: Queryable, u: User, action: string, objectId: string, details: unknown) =>
@@ -124,7 +147,7 @@ export async function registerProductRoutes(app: FastifyInstance, db: Database, 
   const canSeeTarget = (u: User, target: string) => target === 'msrp' || canSeeChannels(u);
   const rulesFor = async (org: string, q: Queryable = db) => {
     const r = (await q.query('SELECT rules,updated_at,updated_by FROM pricing_rules WHERE org_id=$1', [org])).rows[0];
-    return r ? { ...r.rules, updatedAt: r.updated_at, updatedBy: r.updated_by } : { ...DEFAULT_PRICING_RULES, updatedAt: null, updatedBy: null };
+    return r?.rules ? { ...r.rules, updatedAt: r.updated_at, updatedBy: r.updated_by } : { ...DEFAULT_PRICING_RULES, updatedAt: null, updatedBy: null };
   };
   const catalogOf = async (q: Queryable, org: string, raw: string, lock = false) => {
     const r = (await q.query('SELECT * FROM product_catalog WHERE org_id=$1 AND lower(sku)=lower($2)' + (lock ? ' FOR UPDATE' : ''), [org, raw])).rows[0];
@@ -168,7 +191,8 @@ export async function registerProductRoutes(app: FastifyInstance, db: Database, 
     if (old === price) return { status: 'unchanged' as const };
     const cat = (await tx.query('SELECT * FROM product_catalog WHERE org_id=$1 AND sku=$2', [u.org_id, s])).rows[0];
     const pr = (await tx.query('SELECT * FROM product_pricing WHERE org_id=$1 AND sku=$2', [u.org_id, s])).rows[0];
-    const chk = priceCheck(await rulesFor(u.org_id, tx), cat, pr, target, price);
+    const wsRow = (await tx.query('SELECT worksheet FROM pricing_rules WHERE org_id=$1', [u.org_id])).rows[0];
+    const chk = wsRow?.worksheet ? worksheetPriceCheck(normalizeWorksheet(wsRow.worksheet), cat, pr, target, price) : priceCheck(await rulesFor(u.org_id, tx), cat, pr, target, price);
     const hold = !!chk.needs && !o.isAdmin(u), id = randomUUID();
     // A newer request replaces an older one still waiting for the same price.
     await tx.query(`UPDATE product_price_changes SET status='superseded',decided_at=now() WHERE org_id=$1 AND sku=$2 AND target=$3 AND status='pending'`, [u.org_id, s, target]);
@@ -195,7 +219,7 @@ export async function registerProductRoutes(app: FastifyInstance, db: Database, 
         const p: any = pricing.get(r.sku);
         return {
           sku: r.sku, name: { zh: r.name_zh || r.name_en || r.sku, en: r.name_en || r.name_zh || r.sku }, nameZh: r.name_zh, nameEn: r.name_en, type: r.type, status: r.status,
-          gross: num_(r.gross), dims: Array.isArray(r.dims) ? r.dims.map(Number) : null, lead: r.lead, moq: num_(r.moq), msrp: num_(r.msrp), low: num_(r.low), shipFee: num_(r.ship_fee),
+          gross: num_(r.gross), dims: Array.isArray(r.dims) ? r.dims.map(num_) : null, lead: r.lead, moq: num_(r.moq), msrp: num_(r.msrp), low: num_(r.low), shipFee: num_(r.ship_fee),
           best: r.best, note: r.note, updatedAt: r.updated_at,
           ...(p ? { factoryRmb: num_(p.factory_rmb), factoryUsd: num_(p.factory_usd), extraRmb: num_(p.extra_rmb), ddpRate: num_(p.ddp_rate), lastMileRmb: num_(p.last_mile_rmb),
             priceClass: p.price_class || null, landedUsd: num_(p.landed_usd), lastMileUsd: num_(p.last_mile_usd), actualPrice: num_(p.actual_price) } : {}),
@@ -296,7 +320,9 @@ export async function registerProductRoutes(app: FastifyInstance, db: Database, 
       FROM product_price_changes p WHERE p.org_id=$1 AND p.sku=$2 ORDER BY p.created_at DESC LIMIT 200`, [u.org_id, cur.sku])).rows;
     return {
       sku: cur.sku,
-      changes: changes.map((c: any) => ({ id: c.id, field: c.field, from: c.old_value, to: c.new_value, note: c.note, source: c.source, actor: { id: c.actor_id, name: c.actor_name }, at: c.created_at })),
+      // The product library logs its own fields here too; each is shown only to people who may see that field.
+      changes: changes.filter((c: any) => { const f = FIELD.get(c.field); return f ? canSee(viewer(u), f.vis) : c.field.startsWith('file:') ? canSee(viewer(u), 'sens') : true; })
+        .map((c: any) => ({ id: c.id, field: c.field, from: c.old_value, to: c.new_value, note: c.note, source: c.source, actor: { id: c.actor_id, name: c.actor_name }, at: c.created_at })),
       prices: prices.filter((p: any) => canSeeTarget(u, p.target)).map((p: any) => priceOut(u, p)),
     };
   });
@@ -461,4 +487,6 @@ export async function registerProductRoutes(app: FastifyInstance, db: Database, 
         actualPrice: await currentPrice(tx, u.org_id, cat.sku, 'actual'), ...(actualChange ? { actualChange } : {}) };
     });
   });
+
+  return { requestPrice, currentPrice, audit, rulesFor, canEditMsrp, canPricing };
 }

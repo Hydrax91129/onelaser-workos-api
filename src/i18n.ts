@@ -253,6 +253,27 @@ const zh:Record<string,string>={
   'Documents must be PDF, PNG, JPEG or WebP':'文件只能是 PDF、PNG、JPEG 或 WebP 格式。',
   'Documents must be 10 MB or smaller':'文件不能超过 10 MB。',
   'A person can have at most 50 documents':'每位员工最多保存 50 份文件。',
-  'Document not found':'找不到这份文件。'
+  'Document not found':'找不到这份文件。',
+  'This file slot does not exist':'没有这个文件栏位。',
+  'You cannot change files in this slot':'你没有权限修改这个栏位的文件。',
+  'Upload a PDF, PNG, JPG, WebP, CSV or TXT file; save Excel or Word files as PDF or CSV first':'只能上传 PDF、PNG、JPG、WebP、CSV 或 TXT 文件；Excel 和 Word 请先另存为 PDF 或 CSV。',
+  'The main image must be PNG, JPG or WebP':'产品主图只能是 PNG、JPG 或 WebP 格式。',
+  'This slot only takes PDF files':'这个栏位只能上传 PDF 文件。',
+  'The file is empty':'文件是空的。',
+  'Each file must be 20 MB or smaller':'每个文件不能超过 20 MB。',
+  'A product can have at most 100 files':'每个产品最多保存 100 个文件。',
+  'File not found':'找不到这个文件。',
+  'The file content does not match its type; export it again as a real PDF, image, CSV or TXT':'文件内容和格式对不上（可能只是改了扩展名），请重新导出真正的 PDF、图片、CSV 或 TXT 再上传。',
+  'Upload the template as .xlsx or .csv (UTF-8)':'请上传 .xlsx 或 .csv（UTF-8）格式的标准模板。',
+  'This file cannot be read; download the standard template and fill it in':'无法读取这个文件，请先下载标准模板再填写上传。',
+  'The SKU column was not found; keep the first two rows of the standard template':'没有找到 SKU 列，请保留标准模板的前两行（中文表头和字段键）。',
+  'The file has no product rows':'文件里没有产品数据行。',
+  'Only the main administrators can bulk-update products':'只有主管理员可以批量更新产品资料。',
+  'This preview does not exist; upload the file again':'找不到这次预览，请重新上传文件。',
+  'This preview has already been applied':'这次预览已经确认更新过了。',
+  'The products changed after this preview; upload the file again to see the current differences':'预览之后产品资料又有改动，请重新上传文件，查看最新的更新前后对比。',
+  'Some rows have errors; fix them or choose to skip the rows with errors':'有些行有错误：请改正后重新上传，或选择“跳过错误行，更新其余”。',
+  'This import does not exist':'找不到这次导入记录。',
+  'This import has already been undone':'这次导入已经撤销过了。'
 };
 export function message(text:string,lang:Language) {return lang==='en'?text:(zh[text]||'请求未能处理，请核对输入或联系管理员。');}
