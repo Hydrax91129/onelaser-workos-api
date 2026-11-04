@@ -46,19 +46,25 @@
 7. **工厂对接人**：`users.quality_factory` 非空（邀请时选“工厂对接人”，或管理员在成员列表里改）的账号只能用质量追踪，后端会拦截其他接口。
    面向全公司的流程（季度确认、全员提醒、统计人数等）要用 quality.ts 的 `factoryUserIds()` 把他们排除。
 
-## 4. 开发规则
+## 4. 开发规则（所有改动都走 PR）
 
-- 开工前、推送前都要 `git pull --rebase`：其他会话随时在推送代码。
+- **开工前**：先看 GitHub Issues，在要做的 Issue 下留言认领，避免两个会话做同一件事；再 `git pull --rebase` 拿到最新 `main`。
+- **不直接推 main**（分支保护会拒绝）：在 `claude/<简短描述>` 分支上开发，推送后开 PR 到 `main`。
+  PR 必须基于最新 `main`、CI 通过才能合并；合并前如果 `main` 有新提交，先 `git pull --rebase origin main` 再推。
 - 改公共文件（live-app.js、changelog.js、index.html、app.ts、db.ts、i18n.ts）要小步修改，不要整段重写。
-- 前端改完运行 `node tools/stamp-assets.mjs`（更新资源版本号），再 `npm test`；后端 `npm test`（约 8 分钟）。
+- 前端改完运行 `node tools/stamp-assets.mjs`（更新资源版本号，CI 会检查），再 `npm test`；后端 `npm test`（约 8 分钟）。
 - 后端所有报错文案都要在 i18n.ts 里有中文（有测试检查）。
-- 版本号：在 dist/changelog.js 的 RELEASES 最前面加一条，号码 = 当前最新版本 + 0.1（先 pull 再看最新号，避免撞号）。
+- 版本号：在 dist/changelog.js 的 RELEASES 最前面加一条，号码 = 当前最新版本 + 0.1。合并前再 pull 一次确认没撞号；撞号就改成下一个号。
 - 只用虚构的示例数据写测试和种子数据。
 
-## 5. 部署规则（同一时间只能一个会话部署）
+## 5. 上线规则（全自动，任何会话都不手动部署）
 
-1. 前端推送 main，记下 commit。
-2. 后端：先 pull，把这个 commit 写进 `deploy/frontend-revision.txt`。新的前端 commit 必须包含之前已上线的前端提交（先 pull 再取 HEAD），否则会把别人的功能回滚掉。
-3. 后端推送 main，再推到部署分支 `codex/company-migration-live-20261102`（推之前确认部署分支是 main 的祖先）。
-4. 在 Render 点 Manual Deploy → Deploy latest commit，等约 3 分钟。
-5. 打开 https://craftos.app/build-info.json，确认 frontendCommit 等于第 1 步的 commit 才算上线。没核对之前不能说"已上线"。
+上线只有一条路：**代码合进 `main` → CI 通过 → 自动部署**。
+
+1. 前端 PR 合进前端 `main` 后，GitHub Action（`.github/workflows/pin-frontend.yml`）会自动在后端仓库开一个 PR（分支 `auto/pin-frontend`），
+   把 `deploy/frontend-revision.txt` 改成这个提交；后端 CI 通过后自动合并。不要手动改 `frontend-revision.txt`。
+2. 后端 `main` 有新提交且 CI 通过后，Render 自动部署 `main`（Auto-Deploy：After CI checks pass）。
+3. **禁止**：在 Render 点手动部署、通过 API 触发部署、修改 Render 服务的分支或其他设置、部署不在 `main` 上的提交、强推任何不属于自己的分支。
+   需要改环境变量或 Render 设置时，请用户本人在 Render 后台操作。
+4. 核对上线：打开 https://craftos.app/build-info.json，`frontendCommit` 等于（或包含）你的前端提交才算上线。没核对之前不能说"已上线"。
+5. 线上出问题需要回滚：在 `main` 上用 `git revert` 撤销有问题的提交并走 PR，不要部署旧分支（旧分支会把别人已上线的功能一起回滚掉）。
