@@ -252,6 +252,7 @@ const zh:Record<string,string>={
   'The file is empty':'文件是空的。',
   'Each file must be 20 MB or smaller':'每个文件不能超过 20 MB。',
   'A product can have at most 100 files':'每个产品最多保存 100 个文件。',
-  'File not found':'找不到这个文件。'
+  'File not found':'找不到这个文件。',
+  'The file content does not match its type; export it again as a real PDF, image, CSV or TXT':'文件内容和格式对不上（可能只是改了扩展名），请重新导出真正的 PDF、图片、CSV 或 TXT 再上传。'
 };
 export function message(text:string,lang:Language) {return lang==='en'?text:(zh[text]||'请求未能处理，请核对输入或联系管理员。');}

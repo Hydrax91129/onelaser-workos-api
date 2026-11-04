@@ -14,7 +14,7 @@ import type { User } from './auth.js';
 import { deny } from './errors.js';
 import { STATUS_NEXT, type PriceTarget } from './products.js';
 import {
-  FIELD, SLOT, FILE_TYPES, IMAGE_TYPES, MAX_FILE, CORE_REQUIRED, allFields, fieldOf, canSee, canWrite, completeness, parseValue, specFor, viewerOf,
+  FIELD, SLOT, FILE_TYPES, IMAGE_TYPES, MAX_FILE, CORE_REQUIRED, allFields, fieldOf, canSee, canWrite, completeness, parseValue, specFor, viewerOf, relationIssues,
   type Field, type Viewer,
 } from './product-spec.js';
 import { EMPTY_WORKSHEET, normalizeWorksheet, worksheet, publicPrices, worksheetSchema, type Worksheet } from './product-worksheet.js';
@@ -184,6 +184,23 @@ export function recordIssues(after: Record<string, any>): Issue[] {
   return out;
 }
 
+/** SKUs and REFB SKUs of the org, for relationIssues. */
+export async function relationIndex(q: Queryable, org: string) {
+  const rows = (await q.query('SELECT sku,refb_sku FROM product_catalog WHERE org_id=$1', [org])).rows;
+  const refb = new Map<string, string[]>();
+  for (const r of rows) if (r.refb_sku) { const k = String(r.refb_sku).toLowerCase(); refb.set(k, [...(refb.get(k) || []), r.sku]); }
+  return { skus: new Set<string>(rows.map((r: any) => String(r.sku).toLowerCase())), refb };
+}
+/** The file's first bytes must match its type, so a renamed file cannot pass as a PDF or image. */
+export function signatureOk(mime: string, data: Buffer) {
+  const at = (s: string, o = 0) => data.subarray(o, o + s.length).toString('latin1') === s;
+  if (mime === 'application/pdf') return at('%PDF-');
+  if (mime === 'image/png') return data.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  if (mime === 'image/jpeg') return data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff;
+  if (mime === 'image/webp') return at('RIFF') && at('WEBP', 8);
+  return !data.subarray(0, 8192).includes(0); // CSV / TXT: text, no NUL bytes
+}
+
 export async function registerProductLibraryRoutes(app: FastifyInstance, db: Database, o: {
   isAdmin: (u: User) => boolean; requestPrice: WriteOpts['requestPrice'];
   audit: (tx: Queryable, u: User, action: string, objectId: string, details: unknown) => Promise<unknown>;
@@ -233,6 +250,8 @@ export async function registerProductLibraryRoutes(app: FastifyInstance, db: Dat
     if (values.status && values.status !== 'dev' && !v.admin) statusRule(v, '', values.status, b.note);
     const out = await db.transaction(async tx => {
       if ((await tx.query('SELECT 1 FROM product_catalog WHERE org_id=$1 AND lower(sku)=lower($2)', [u.org_id, sku])).rows.length) deny(409, 'PRODUCT_EXISTS', 'A product with this SKU already exists');
+      const rel = relationIssues(sku, values, Object.keys(values), await relationIndex(tx, u.org_id));
+      if (rel.length) fail(rel);
       const w = await writeRecord(tx, u, sku, null, values, { source: 'create', note: b.note, ws, prices: 'request', requestPrice: o.requestPrice });
       await o.audit(tx, u, 'products.created', sku, { fields: w.changes.map(c => c.key) });
       return { sku, changed: w.changes.map(c => c.key), prices: w.prices };
@@ -252,6 +271,8 @@ export async function registerProductLibraryRoutes(app: FastifyInstance, db: Dat
       if (values.goodsType && values.goodsType !== 'refb' && rec.values.refbSku && !('refbSku' in values)) values.refbSku = null;
       const issues = recordIssues({ ...rec.values, ...values }).filter(i => i.zh.startsWith('只有'));
       if (issues.length) fail(issues, req.language);
+      const rel = relationIssues(rec.sku, { ...rec.values, ...values }, Object.keys(values), await relationIndex(tx, u.org_id));
+      if (rel.length) fail(rel);
       if (values.status !== undefined) statusRule(v, rec.values.status || '', values.status, b.note);
       const w = await writeRecord(tx, u, rec.sku, rec, values, { source: 'edit', note: b.note, ws, prices: 'request', requestPrice: o.requestPrice });
       if (w.changes.length) await o.audit(tx, u, 'products.edited', rec.sku, { fields: w.changes.map(c => c.key) });
@@ -294,6 +315,7 @@ export async function registerProductLibraryRoutes(app: FastifyInstance, db: Dat
     const data = Buffer.from(b.dataBase64, 'base64');
     if (!data.length) deny(400, 'FILE_EMPTY', 'The file is empty');
     if (data.length > MAX_FILE) deny(400, 'FILE_TOO_LARGE', 'Each file must be 20 MB or smaller');
+    if (!signatureOk(mime, data)) deny(400, 'FILE_CONTENT', 'The file content does not match its type; export it again as a real PDF, image, CSV or TXT');
     const out = await db.transaction(async tx => {
       const rec = findRec(await loadRecords(tx, u.org_id, [skuParam(req)]), skuParam(req)) || deny(404, 'PRODUCT_NOT_FOUND', 'This SKU is not in the product catalog');
       if ((await tx.query('SELECT count(*)::int n FROM product_files WHERE org_id=$1 AND sku=$2', [u.org_id, rec.sku])).rows[0].n >= 100) deny(400, 'FILE_LIMIT', 'A product can have at most 100 files');

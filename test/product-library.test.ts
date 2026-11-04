@@ -138,3 +138,33 @@ test('product library: visibility on every response, editing rights, SKU and REF
   assert.equal((await db.query(`SELECT count(*)::int n FROM product_catalog WHERE lower(sku)='odl-demo-1'`)).rows[0].n,1);
  }finally{await app.close();}
 });
+
+test('review fixes: history filtered on the old endpoint too, worksheet floors drive price approval, cross-product rules, file signatures, GS1',async()=>{
+ const {app,call}=await setup();
+ try{
+  const p=(k:string,v:unknown)=>parseValue(FIELD.get(k)!,v);
+  assert.equal(p('gtin','012345678905').ok,true);assert.equal(p('gtin','012345678906').ok,false,'GS1 check digit');assert.equal(p('gtin','4006381333931').ok,true,'EAN-13');
+  assert.equal((await call('m1','PUT','/products/worksheet-settings',SETTINGS)).statusCode,200);
+  assert.equal((await call('m1','POST','/products/library',{sku:'ODL-R-1',values:{family:'main',nameZh:'示例',nameEn:'Sample',landed:1000,lastMile:100,msrp:2000,supplier:'示例工厂',hsCode:'0000.00.0000'}})).statusCode,201);
+  // 1. the older history endpoint no longer shows cost or supplier changes to product-area people without cost access
+  const old=(await call('m2','GET','/products/ODL-R-1/history')).json().changes.map((c:any)=>c.field);
+  for(const k of ['supplier','landed','lastMile','hsCode'])assert.equal(old.includes(k),false,`old history leaks ${k}`);
+  assert.ok(old.includes('nameZh'));
+  assert.ok((await call('m5','GET','/products/ODL-R-1/history')).json().changes.some((c:any)=>c.field==='supplier'),'cost access still sees it');
+  // 2. with 价格参数 set, approval uses its rate and floor: 1500 leaves 11.7% (DTC floor 10%) → applies without approval
+  const r=await call('m3','PATCH','/products/library/ODL-R-1',{values:{msrp:1500}});assert.equal(r.statusCode,200,r.body);assert.equal(r.json().prices.msrp.status,'applied');
+  const low=await call('m3','PATCH','/products/library/ODL-R-1',{values:{msrp:1400}});assert.equal(low.json().prices.msrp.status,'pending','8.9% is below the 10% floor');
+  // 5. a REFB SKU belongs to one product; 6. replacement must exist; end of sale not before launch
+  assert.equal((await call('m3','POST','/products/library',{sku:'ODL-R-2',values:{family:'main',nameZh:'示例退货',nameEn:'Sample',goodsType:'退货',refbSku:'REFB-ODL-R-1'}})).statusCode,201);
+  const dup=await call('m3','POST','/products/library',{sku:'ODL-R-3',values:{family:'main',nameZh:'示例',nameEn:'Sample',goodsType:'退货',refbSku:'REFB-odl-r-1'}});
+  assert.equal(dup.statusCode,400);assert.match(dup.json().error.message,/ODL-R-2/);
+  assert.equal((await call('m3','PATCH','/products/library/ODL-R-1',{values:{replacementSku:'ODL-NOPE'}})).statusCode,400);
+  assert.equal((await call('m3','PATCH','/products/library/ODL-R-1',{values:{replacementSku:'odl-r-2'}})).statusCode,200);
+  assert.equal((await call('m3','PATCH','/products/library/ODL-R-1',{values:{launchDate:'2026-05-01',eolDate:'2026-04-01'}})).statusCode,400);
+  assert.equal((await call('m3','PATCH','/products/library/ODL-R-1',{values:{launchDate:'2026-05-01',eolDate:'2027-04-01'}})).statusCode,200);
+  // 3. the file's first bytes must match its type
+  const fake=Buffer.from('MZ not really a pdf').toString('base64');
+  const bad=await call('m5','POST','/products/library/ODL-R-1/files/manual',{name:'manual.pdf',dataBase64:fake});assert.equal(bad.statusCode,400);assert.equal(bad.json().error.code,'FILE_CONTENT');
+  assert.equal((await call('m3','POST','/products/library/ODL-R-1/files/mainImage',{name:'x.png',dataBase64:Buffer.from([0xff,0xd8,0xff,0xe0]).toString('base64')})).statusCode,400,'a JPEG named .png');
+ }finally{await app.close();}
+});

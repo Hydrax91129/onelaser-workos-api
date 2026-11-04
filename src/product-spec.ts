@@ -212,10 +212,36 @@ export function parseValue(f: Field, raw: unknown): Parsed {
     case 'list': case 'text': {
       if (s.length > (f.max || 500)) return bad(`不能超过 ${f.max || 500} 个字`, `Use at most ${f.max || 500} characters`);
       if (f.key === 'gtin' && !/^(\d{8}|\d{12,14})$/.test(s.replace(/\s/g, ''))) return bad('UPC / EAN / GTIN 应为 8、12、13 或 14 位数字', 'A UPC / EAN / GTIN has 8, 12, 13 or 14 digits');
+      if (f.key === 'gtin' && !gs1Ok(s.replace(/\s/g, ''))) return bad('UPC / EAN / GTIN 的校验位不对，请核对条码', 'The UPC / EAN / GTIN check digit is wrong');
       return { ok: true, value: f.key === 'gtin' ? s.replace(/\s/g, '') : s };
     }
   }
   return bad('格式不对', 'Invalid value');
+}
+
+/** GS1 check digit (UPC-A, EAN-8/13, GTIN-14): weights 3,1,3,… from the right, excluding the check digit. */
+export function gs1Ok(code: string) {
+  const d = code.split('').map(Number), check = d.pop()!;
+  const sum = d.reverse().reduce((t, x, i) => t + x * (i % 2 === 0 ? 3 : 1), 0);
+  return (10 - sum % 10) % 10 === check;
+}
+
+/** Rules between products: a REFB SKU belongs to one product, a replacement SKU must exist, end of sale is not before launch.
+ *  index: every SKU (lower case) and every REFB SKU (lower case → its product's SKU), after the change. */
+export function relationIssues(sku: string, after: Record<string, any>, keys: string[], index: { skus: Set<string>; refb: Map<string, string[]> }) {
+  const out: { key: string; zh: string; en: string }[] = [], has = (k: string) => keys.includes(k);
+  if (after.refbSku && (has('refbSku') || has('goodsType'))) {
+    const owners = (index.refb.get(String(after.refbSku).toLowerCase()) || []).filter(s => s.toLowerCase() !== sku.toLowerCase());
+    if (owners.length) out.push({ key: 'refbSku', zh: `退货 SKU 已经用在 ${owners[0]}`, en: `This returned-goods SKU is already used by ${owners[0]}` });
+  }
+  if (after.replacementSku && has('replacementSku')) {
+    const r = String(after.replacementSku).trim().toLowerCase();
+    if (r === sku.toLowerCase()) out.push({ key: 'replacementSku', zh: '替代 SKU 不能是它自己', en: 'A product cannot replace itself' });
+    else if (!index.skus.has(r)) out.push({ key: 'replacementSku', zh: '替代 SKU 不在系统里', en: 'The replacement SKU is not in the catalog' });
+  }
+  if (after.launchDate && after.eolDate && (has('launchDate') || has('eolDate')) && after.eolDate < after.launchDate)
+    out.push({ key: 'eolDate', zh: '停售日期不能早于上市日期', en: 'The end-of-sale date cannot be before the launch date' });
+  return out;
 }
 
 /* ---------- required-field completeness ---------- */
