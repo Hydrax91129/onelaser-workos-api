@@ -181,6 +181,99 @@ test('three first-period seats a day: 20% off once, weekly excluded, a cancelled
   }finally{await db.query("UPDATE caldock_orders SET offer_day=NULL");await offerApp.close();}
 });
 
+test('paid orders update the live stock, mail the owners once, and sold-out stops new orders',async()=>{
+  const sent:{to:string;subject:string;text:string}[]=[];let failing=false;
+  const stockApp=await buildApp({db,environment:'production',closeDatabase:false,mailer:async m=>{if(failing)throw new Error('down');sent.push(m);},caldock:{publicUrl:origin,providers:gateways,stripe,liveStock:true,orderNotifyEmails:['a@example.test','b@example.test']}});
+  const signIn=async(code:string)=>{
+    const start=await stockApp.inject('/caldock/auth/google/start?next=account&lang=zh&interval=month');
+    const state=new URL(start.headers.location!).searchParams.get('state')!,flow=cookieList(start).map(c=>c.split(';')[0]).join('; ');
+    const back=await stockApp.inject({url:`/caldock/auth/google/callback?state=${state}&code=${code}`,headers:{cookie:flow}});
+    const cookie=cookieList(back).find(c=>c.startsWith('__Host-caldock_session='))!.split(';')[0];
+    return {cookie,csrf:(await stockApp.inject({url:'/caldock/me',headers:{cookie}})).json().csrfToken};
+  };
+  const order=(who:{cookie:string;csrf:string})=>stockApp.inject({method:'POST',url:'/caldock/orders',payload:{interval:'month',requestKey:randomUUID()},headers:{cookie:who.cookie,origin,'x-csrf-token':who.csrf}});
+  const pay=(event:Record<string,unknown>)=>{const payload=JSON.stringify({livemode:false,...event});return stockApp.inject({method:'POST',url:'/caldock/stripe/webhook',payload,headers:{'content-type':'application/json','stripe-signature':signStripePayload(payload,webhookSecret)}});};
+  const stock=async()=>(await stockApp.inject('/caldock/capabilities')).json().stock;
+  try{
+    await db.query("UPDATE caldock_orders SET paid_at='2026-01-01' WHERE paid_at IS NOT NULL");
+    assert.deepEqual(await stock(),{total:10,rented:7,left:3});
+    const buyer=await order(await signIn('stock-1')),id=buyer.json().id,event=completed(id,'cs_stock_1',19900);
+    assert.deepEqual(await stock(),{total:10,rented:7,left:3}); // an unpaid order holds no Mac
+    assert.equal((await pay(event)).statusCode,200);
+    assert.deepEqual(await stock(),{total:10,rented:8,left:2});
+    assert.deepEqual(sent.map(m=>m.to),['a@example.test','b@example.test']);
+    assert.match(sent[0].subject,/新订单.*月付 \$199\.00/);assert.match(sent[0].text,/stock-1@example\.test/);assert.match(sent[0].text,/剩余 2 台/);
+    assert.equal((await pay({...event,id:'evt_'+randomUUID()})).statusCode,200);assert.equal(sent.length,2); // a redelivered payment mails nobody
+    failing=true;
+    const second=(await order(await signIn('stock-2'))).json().id;
+    assert.equal((await pay(completed(second,'cs_stock_2',19900))).statusCode,200); // mail down, payment still recorded
+    assert.equal((await db.query('SELECT status FROM caldock_orders WHERE id=$1',[second])).rows[0].status,'paid');
+    assert.equal((await db.query("SELECT count(*)::int AS n FROM caldock_audit WHERE action='notify.order_mail_failed' AND object_id=$1",[second])).rows[0].n,1);
+    failing=false;
+    const third=(await order(await signIn('stock-3'))).json().id;
+    await pay(completed(third,'cs_stock_3',19900));
+    assert.deepEqual(await stock(),{total:10,rented:10,left:0});
+    const late=await order(await signIn('stock-4'));
+    assert.equal(late.statusCode,409);assert.equal(late.json().error.code,'CALDOCK_SOLD_OUT');
+    await db.query("UPDATE caldock_orders SET billing_ends_at=now()-interval '4 days' WHERE id=$1",[third]); // lapsed past the grace
+    assert.equal((await stock()).left,1);
+    await db.query("UPDATE caldock_orders SET status='refunded' WHERE id=$1",[second]);
+    assert.equal((await stock()).left,2);
+  }finally{await db.query("UPDATE caldock_orders SET paid_at='2026-01-01' WHERE paid_at IS NOT NULL");await stockApp.close();}
+});
+
+test('a partner signed up through another partner earns that partner a second tier, on renewals too, and never a third',async()=>{
+  const base=await db.query('SELECT commission_bps,commission_mode FROM caldock_settings WHERE id=1');
+  await db.query("UPDATE caldock_settings SET commission_bps=2000,commission_mode='first_order',second_tier_bps=500 WHERE id=1");
+  const refer=(customer:Login,partner:Login)=>db.query('INSERT INTO caldock_referrals(customer_id,affiliate_id) VALUES($1,$2)',[customer.user.id,partner.user.id]);
+  const pay=async(who:Login,sub:string)=>{
+    const order=(await send(who,'POST','/orders',{interval:'month',requestKey:randomUUID()})).json();
+    await send(who,'POST',`/orders/${order.id}/checkout`,{});
+    assert.equal((await webhook(completed(order.id,[...sessions.keys()].pop()!,19900,{subscription:sub,customer:'cus_'+sub}))).statusCode,200);
+    return order;
+  };
+  const rows=async(id:string)=>(await db.query('SELECT affiliate_id,amount_cents,rate_bps,tier,status FROM caldock_commissions WHERE order_id=$1 ORDER BY tier,created_at',[id])).rows;
+  try{
+    const top=await login('tier-top'),mid=await login('tier-mid'),low=await login('tier-low');
+    await send(top,'POST','/affiliate',{});
+    await refer(mid,top);await send(mid,'POST','/affiliate',{});
+    await refer(low,mid);await send(low,'POST','/affiliate',{});
+    const parent=async(who:Login)=>(await db.query('SELECT parent_id FROM caldock_affiliates WHERE user_id=$1',[who.user.id])).rows[0].parent_id;
+    assert.equal(await parent(top),null);assert.equal(await parent(mid),top.user.id);assert.equal(await parent(low),mid.user.id);
+    await send(mid,'POST','/affiliate',{});assert.equal(await parent(mid),top.user.id); // joining again never rebinds
+
+    // A customer of mid: mid 20%, top 5%.
+    const buyer=await login('tier-buyer');await refer(buyer,mid);
+    const order=await pay(buyer,'sub_tier_1');
+    assert.deepEqual((await rows(order.id)).map(r=>[r.affiliate_id,r.amount_cents,r.rate_bps,r.tier]),[[mid.user.id,3980,2000,1],[top.user.id,995,500,2]]);
+    const event=completed(order.id,'cs_tier_again',19900,{subscription:'sub_tier_1',customer:'cus_sub_tier_1'});
+    assert.equal((await webhook(event)).statusCode,200);assert.equal((await rows(order.id)).length,2); // a redelivered payment earns nothing more
+
+    // A customer of low: low 20%, mid 5%, and nothing reaches top.
+    const far=await login('tier-far');await refer(far,low);
+    const farOrder=await pay(far,'sub_tier_2');
+    assert.deepEqual((await rows(farOrder.id)).map(r=>[r.affiliate_id,r.tier]),[[low.user.id,1],[mid.user.id,2]]);
+
+    // Renewals pay both tiers once per invoice.
+    const renew=(invoice:string)=>webhook({id:'evt_'+randomUUID(),type:'invoice.paid',data:{object:{id:invoice,billing_reason:'subscription_cycle',subscription:'sub_tier_1',amount_paid:19900}}});
+    assert.equal((await renew('in_tier_1')).statusCode,200);assert.equal((await renew('in_tier_1')).statusCode,200);
+    assert.equal((await rows(order.id)).length,4);
+
+    // The parent's own view: masked name, no email, tier totals.
+    const view=(await send(top,'GET','/affiliate')).json();
+    assert.equal(view.settings.second_tier_bps,500);assert.equal(view.stats.secondTierCents,1990);
+    assert.deepEqual(view.team.map((m:any)=>[m.name,m.orders,m.earnedCents]),[['t***',1,1990]]);
+    assert.equal(JSON.stringify(view.team).includes('@'),false);
+
+    // A second-tier rate of zero stops new orders only; a refund voids both tiers.
+    await db.query('UPDATE caldock_settings SET second_tier_bps=0 WHERE id=1');
+    const third=await login('tier-third');await refer(third,mid);
+    assert.deepEqual((await rows((await pay(third,'sub_tier_3')).id)).map(r=>r.tier),[1]);
+    assert.equal((await webhook({id:'evt_'+randomUUID(),type:'charge.refunded',data:{object:{id:'ch_tier_1',refunded:true,customer:'cus_sub_tier_2',amount:19900,currency:'usd'}}})).statusCode,200);
+    assert.deepEqual((await rows(farOrder.id)).map(r=>r.status),['void','void']);
+  }finally{await db.query('UPDATE caldock_settings SET commission_bps=$1,commission_mode=$2,second_tier_bps=500 WHERE id=1',[base.rows[0].commission_bps,base.rows[0].commission_mode]);}
+});
+
 test('the launch commission default applies once and never overrides a later admin choice',async()=>{
   assert.equal((await db.query('SELECT commission_bps FROM caldock_settings WHERE id=1')).rows[0].commission_bps,2000);
   await db.query('UPDATE caldock_settings SET commission_bps=0 WHERE id=1');
