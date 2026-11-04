@@ -227,3 +227,21 @@ test('IT accounts: CSV template, all-or-nothing import with row errors, export',
   assert.deepEqual(parseCsv('a,"b ""q"", c"\r\n\r\nd,e'),[['a','b "q", c'],['d','e']]);
  }finally{await app.close();await db.close();}
 });
+
+test('IT accounts: factory accounts are left out of the quarterly check',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ // fictional factory department (DingTalk external id ext-dg) with m6 in it; m5 is a quality lead placed there too
+ await db.query("INSERT INTO departments(org_id,id,external_id,name) VALUES('demo','factory-dg','ext-dg','示例工厂') ON CONFLICT DO NOTHING");
+ await db.query("UPDATE users SET department_id='factory-dg' WHERE id IN ('m5','m6')");
+ const app=await buildApp({db,it:{userIds:['m4']},quality:{leadIds:['m5'],factoryDepartments:{dg:['ext-dg']}},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0,clock:()=>new Date('2026-11-02T10:00:00Z').getTime(),closeDatabase:false});
+ try{
+  const token=(await issueSession(db,'m4')).accessToken;
+  const round=(await app.inject({method:'POST',url:'/it/checks/start',headers:{authorization:'Bearer '+token}})).json();
+  const ids=round.people.map((p:any)=>p.userId).sort();
+  assert.ok(!ids.includes('m6'),'factory staff are not asked to confirm');
+  assert.ok(ids.includes('m5'),'a quality lead in the factory department still takes part');
+  assert.equal(round.total,5);
+  const asked=(await db.query("SELECT user_id FROM inbox_items WHERE kind='it_reminder'")).rows.map((r:any)=>r.user_id);
+  assert.ok(!asked.includes('m6'),'factory staff get no reminder');
+ }finally{await app.close();await db.close();}
+});

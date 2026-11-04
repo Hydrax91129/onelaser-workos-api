@@ -12,6 +12,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
 import { deny } from './errors.js';
+import { QUALITY_FACTORY_IDS } from './quality.js';
 
 export const orgSchema = `
 ALTER TABLE users ADD COLUMN IF NOT EXISTS title text NOT NULL DEFAULT '';
@@ -35,7 +36,7 @@ CREATE TABLE IF NOT EXISTS user_avatars(user_id text PRIMARY KEY REFERENCES user
 `;
 
 /** Columns safe to show colleagues (contact directory). */
-export const PUBLIC_USER_COLUMNS = 'id,display_name,name_zh,name_en,department_id,role,title,phone,email,wechat,location,timezone,manager_id,avatar_version';
+export const PUBLIC_USER_COLUMNS = 'id,display_name,name_zh,name_en,department_id,role,title,phone,email,wechat,location,timezone,manager_id,avatar_version,quality_factory';
 
 /** Feature grants an admin can give in the app. `products` opens the product test area; `product_cost_detail` shows how prices are calculated. */
 export const GRANTS = ['products', 'product_cost_detail', 'products_manage', 'pricing_msrp', 'supply', 'supply_manage', 'warehouse', 'warehouse_manage', 'dealers', 'dealers_manage'] as const;
@@ -53,6 +54,7 @@ const profileInput = z.object({
 }).strict().refine(v => Object.keys(v).length > 0, 'Nothing to change');
 const avatarInput = z.object({ dataUrl: z.string().max(400_000) }).strict();
 const memberPatch = z.object({
+  factory: z.enum(['', ...QUALITY_FACTORY_IDS]).optional(),
   managerId: id.nullable().optional(),
   title: text(80).optional(),
   location: text(80).optional(),
@@ -166,8 +168,8 @@ export async function registerOrgRoutes(app: FastifyInstance, db: Database, o: O
       const role = input.role ?? member.role, override = input.role ?? member.role_override;
       const grants = input.grants ? [...new Set(input.grants)] : member.grants;
       if (input.grants?.includes('product_cost_detail') && !input.grants.includes('products')) deny(400, 'GRANT_DEPENDENCY', 'Cost details require product area access');
-      const row = (await tx.query(`UPDATE users SET manager_id=$2,title=$3,role=$4,role_override=$5,is_admin=$6,grants=$7,location=$8,name_zh=$9,name_en=$10,email=$11,email_locked=$12 WHERE id=$1 RETURNING ${PUBLIC_USER_COLUMNS},active,is_admin,role_override,grants,email_locked`,
-        [member.id, manager, input.title ?? member.title, role, override, input.isAdmin ?? member.is_admin, JSON.stringify(grants), input.location ?? member.location, input.nameZh ?? member.name_zh, input.nameEn ?? member.name_en, input.email ?? member.email, input.email !== undefined ? true : member.email_locked === true])).rows[0];
+      const row = (await tx.query(`UPDATE users SET manager_id=$2,title=$3,role=$4,role_override=$5,is_admin=$6,grants=$7,location=$8,name_zh=$9,name_en=$10,email=$11,email_locked=$12,quality_factory=$13 WHERE id=$1 RETURNING ${PUBLIC_USER_COLUMNS},active,is_admin,role_override,grants,email_locked`,
+        [member.id, manager, input.title ?? member.title, role, override, input.isAdmin ?? member.is_admin, JSON.stringify(grants), input.location ?? member.location, input.nameZh ?? member.name_zh, input.nameEn ?? member.name_en, input.email ?? member.email, input.email !== undefined ? true : member.email_locked === true, input.factory ?? member.quality_factory ?? ''])).rows[0];
       await audit(tx, user, 'org.member_updated', member.id, input, member.id);
       return { ...row, executive: o.executiveUserIds.includes(row.id), admin: o.executiveUserIds.includes(row.id) || row.is_admin === true };
     });
