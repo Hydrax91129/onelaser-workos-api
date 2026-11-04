@@ -57,6 +57,7 @@ export async function createCaldockOrder(db:Database,customerId:string,interval:
 }
 
 // A renewal earns only when the order's first payment earned, at the rate snapshotted on the order.
+export const CALDOCK_COMMISSION_MONTHS=12;
 // Second-tier commission for one collected payment; sourceId keeps each payment to one record.
 async function recordSecondTierCommission(db:Queryable,order:any,paidCents:number,sourceId:string) {
   const cents=Math.floor(paidCents*order.second_tier_bps/10000);
@@ -64,6 +65,9 @@ async function recordSecondTierCommission(db:Queryable,order:any,paidCents:numbe
 }
 export async function recordCaldockRenewalCommission(db:Queryable,order:any,invoiceId:string,amountPaidCents:number) {
   if(!Number.isInteger(amountPaidCents)||amountPaidCents<=0)return;
+  // Renewals earn for the first year after the first payment; from the second year on neither tier does.
+  const window=new Date(order.paid_at);window.setUTCMonth(window.getUTCMonth()+CALDOCK_COMMISSION_MONTHS);
+  if(!order.paid_at||Date.now()>=window.getTime())return;
   const earned=(await db.query("SELECT 1 FROM caldock_commissions WHERE order_id=$1 AND status<>'void' LIMIT 1",[order.id])).rows.length>0;
   if(!earned)return;
   const cents=Math.floor(amountPaidCents*order.commission_bps/10000);

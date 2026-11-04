@@ -284,6 +284,14 @@ test('a partner signed up through another partner earns that partner a second ti
     assert.equal((await renew('in_tier_1')).statusCode,200);assert.equal((await renew('in_tier_1')).statusCode,200);
     assert.equal((await rows(order.id)).length,4);
 
+    // Renewals stop earning a year after the first payment, on both tiers.
+    await db.query("UPDATE caldock_orders SET paid_at=now()-interval '11 months' WHERE id=$1",[order.id]);
+    await renew('in_tier_y1');assert.equal((await rows(order.id)).length,6);
+    await db.query("UPDATE caldock_orders SET paid_at=now()-interval '12 months' WHERE id=$1",[order.id]);
+    assert.equal((await renew('in_tier_y2')).statusCode,200);assert.equal((await rows(order.id)).length,6);
+    await db.query("UPDATE caldock_orders SET paid_at=now() WHERE id=$1",[order.id]);
+    await db.query("UPDATE caldock_commissions SET status='void' WHERE source_id IN ('stripe_in:in_tier_y1','stripe_in:in_tier_y1:t2')");
+
     // The parent's own view: masked name, no email, tier totals.
     const view=(await send(top,'GET','/affiliate')).json();
     assert.equal(view.settings.second_tier_bps,500);assert.equal(view.stats.secondTierCents,1990);
