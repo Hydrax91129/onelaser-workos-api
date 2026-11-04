@@ -80,7 +80,7 @@ assert.equal(caldockBuild.caldockCommit,(await readFile(new URL('../deploy/caldo
 assert.equal((await onSite('/api/caldock/capabilities')).status,200);
 for(const closed of ['/api/health','/api/tasks','/wiki/','/caldock/.env'])assert.equal((await onSite(closed)).status,404,closed);
 const legacyRedirect=await fetch(origin+'/caldock/?view=login&lang=zh',{redirect:'manual'});assert.equal(legacyRedirect.status,308);assert.equal(legacyRedirect.headers.get('location'),'https://wodemac.com/?view=login&lang=zh');
-const caldockCapabilities=const caldockCapabilities=await (await fetch(origin+'/api/caldock/capabilities')).json();
+const caldockCapabilities=await (await fetch(origin+'/api/caldock/capabilities')).json();
 assert.equal(caldockCapabilities.service,'caldock');assert.equal(caldockCapabilities.providers.google,false);assert.equal(caldockCapabilities.providers.apple,false);assert.equal(caldockCapabilities.payments,false);
 for(const route of ['/api/caldock/me','/api/caldock/orders','/api/caldock/admin/orders'])assert.equal((await fetch(origin+route)).status,401);
 assert.equal((await fetch(origin+'/api/caldock/auth/google/start',{redirect:'manual'})).status,503);
