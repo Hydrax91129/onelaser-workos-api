@@ -99,9 +99,9 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     return it;
   };
   // A count adjustment is confirmed by the submitter's manager; company admins can confirm any.
-  const canDecide = (u: User, m: any, submitter: any) => m.status === 'pending' && (o.isAdmin(u) || (!!submitter && submitter.manager_id === u.id && submitter.id !== u.id));
+  const canDecide = (u: User, m: any, submitter: any) => m.status === 'pending' && (o.isAdmin(u) || (!!submitter && (submitter.manager_id === u.id || submitter.second_manager_id === u.id) && submitter.id !== u.id));
 
-  const peopleOf = async (org: string) => new Map((await db.query('SELECT id,display_name,name_zh,name_en,manager_id FROM users WHERE org_id=$1', [org])).rows.map((p: any) => [p.id, p]));
+  const peopleOf = async (org: string) => new Map((await db.query('SELECT id,display_name,name_zh,name_en,manager_id,second_manager_id FROM users WHERE org_id=$1', [org])).rows.map((p: any) => [p.id, p]));
   const movementOut = (u: User, people: Map<any, any>) => (m: any) => ({
     id: m.id, type: m.type, sku: m.sku, location: m.location, toLocation: m.to_location || undefined, qty: Number(m.qty), counted: m.counted, systemQty: m.system_qty,
     reason: m.reason, reference: m.reference || '', status: m.status, createdAt: m.created_at, byName: nameOf(people.get(m.created_by)),
@@ -223,7 +223,7 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
         const m = (await tx.query('SELECT * FROM wms_movements WHERE id=$1 AND org_id=$2 FOR UPDATE', [mid, u.org_id])).rows[0];
         if (!m) deny(404, 'NOT_FOUND', 'Movement not found');
         if (m.status !== 'pending') deny(409, 'WMS_ALREADY_DECIDED', 'This adjustment has already been decided');
-        const submitter = (await tx.query('SELECT id,manager_id FROM users WHERE id=$1', [m.created_by])).rows[0];
+        const submitter = (await tx.query('SELECT id,manager_id,second_manager_id FROM users WHERE id=$1', [m.created_by])).rows[0];
         if (!canDecide(u, m, submitter)) deny(403, 'WMS_APPROVER_ONLY', 'Only the submitter’s manager or an administrator can confirm this adjustment');
         if (decision === 'approve') await addStock(tx, u.org_id, m.sku, m.location, Number(m.qty));
         await tx.query('UPDATE wms_movements SET status=$2,decided_by=$3,decided_at=now() WHERE id=$1', [m.id, decision === 'approve' ? 'done' : 'rejected', u.id]);

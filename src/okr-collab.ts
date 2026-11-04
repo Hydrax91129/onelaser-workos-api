@@ -222,7 +222,10 @@ export async function registerOkrCollabRoutes(app: FastifyInstance, db: Database
   });
 
   app.get<{ Params: { id: string } }>('/objectives/:id/updates', async req => {
-    const user = actor(req), o = await loadObjective(db, user, id.parse(req.params.id));
+    const user = actor(req), objectiveId = id.parse(req.params.id);
+    // A leader (first or second line) reads progress updates on their reports' OKRs, even across departments.
+    const lead = (await db.query('SELECT * FROM objectives WHERE id=$1 AND org_id=$2 AND archived_at IS NULL AND owner_id=ANY($3::text[]) AND owner_id<>$4', [objectiveId, user.org_id, user.visibleOwnerIds || [], user.id])).rows[0];
+    const o = lead || await loadObjective(db, user, objectiveId);
     const rows = (await db.query('SELECT u.*,usr.display_name AS author_name FROM okr_updates u JOIN users usr ON usr.id=u.author_id WHERE u.objective_id=$1 AND u.org_id=$2 ORDER BY u.created_at DESC,u.id DESC LIMIT 200', [o.id, user.org_id])).rows;
     return { items: rows, limit: 200 };
   });

@@ -13,13 +13,21 @@ export function visibleTask(user: User, task: any) {
  * or the owner's own manager (so a department with a single manager still works). */
 export function reviewerAllowed(owner: any, reviewer: any, orgId: string, departmentId: string) {
   if (!owner || !reviewer || reviewer.id === owner.id || reviewer.org_id !== orgId || reviewer.active === false) return false;
-  return (reviewer.role === 'manager' && reviewer.department_id === departmentId) || (!!owner.manager_id && reviewer.id === owner.manager_id);
+  return (reviewer.role === 'manager' && reviewer.department_id === departmentId) || (!!owner.manager_id && reviewer.id === owner.manager_id) || (!!owner.second_manager_id && reviewer.id === owner.second_manager_id);
+}
+/** Reporting edges along both lines: a first leader (manager_id) and a second leader (second_manager_id)
+ * have the same rights over the person and, as for any leader, over that person's own team. */
+export function leaderChildren(rows: { id: string; manager_id: string | null; second_manager_id?: string | null }[]) {
+  const children = new Map<string, string[]>();
+  const add = (m: string | null | undefined, c: string) => { if (!m || m === c) return; if (!children.has(m)) children.set(m, []); children.get(m)!.push(c); };
+  for (const r of rows) { add(r.manager_id, r.id); add(r.second_manager_id, r.id); }
+  return children;
 }
 export async function attachReportingScope(db: { query: (sql: string, params?: unknown[]) => Promise<{ rows: any[] }> }, user: User) {
-  const rows = (await db.query('SELECT id,manager_id FROM users WHERE org_id=$1 AND active=true', [user.org_id])).rows as { id: string; manager_id: string | null }[];
-  if (!rows.some(r => r.manager_id)) { user.visibleOwnerIds = null; return user; }
-  const children = new Map<string, string[]>();
-  for (const r of rows) if (r.manager_id) { if (!children.has(r.manager_id)) children.set(r.manager_id, []); children.get(r.manager_id)!.push(r.id); }
+  const rows = (await db.query('SELECT id,manager_id,second_manager_id FROM users WHERE org_id=$1 AND active=true', [user.org_id])).rows as { id: string; manager_id: string | null; second_manager_id: string | null }[];
+  user.dottedOwnerIds = rows.filter(r => r.second_manager_id === user.id && r.id !== user.id).map(r => r.id);
+  if (!rows.some(r => r.manager_id || r.second_manager_id)) { user.visibleOwnerIds = null; return user; }
+  const children = leaderChildren(rows);
   const seen = new Set<string>([user.id]), queue = [...(children.get(user.id) || [])];
   while (queue.length) { const cur = queue.shift()!; if (seen.has(cur)) continue; seen.add(cur); queue.push(...(children.get(cur) || [])); }
   user.visibleOwnerIds = [...seen];

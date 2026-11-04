@@ -18,7 +18,7 @@
 
 | 子功能 | 后端 | 前端 | 拥有的数据（只有这个模块能写） |
 | --- | --- | --- | --- |
-| 账号、组织、权限 | auth.ts, org.ts, members.ts | people.js, erp-access.js | users、departments、grants（功能权限） |
+| 账号、组织、权限 | auth.ts, org.ts, members.ts | people.js, erp-access.js | users（含第一领导 manager_id、第二领导 second_manager_id，两者权限相同）、departments、grants（功能权限） |
 | 任务、OKR、项目 | app.ts, task-board.ts, completions.ts, assign.ts, okr*.ts, projects.ts | task-board.js, okr-board.js, projects.js, reports.js | tasks、submissions、reviews、objectives、key_results、projects |
 | 消息红点 | inbox.ts | inbox.js | inbox_items（其他模块只调用 `pushInbox()`，不要自建通知表） |
 | PIM 与定价 | products.ts | products.js | product_catalog（SKU 主数据、MSRP）、product_pricing（成本输入）、pricing_rules（公司计价规则）、product_channel_prices（各渠道价格及审批） |
@@ -41,6 +41,10 @@
    **待对齐**：经销商渠道价目前是人工填写，应改为按 pricing_rules 的批发规则自动建议、再走价格审批。
 3. **库存只有一份**：数量变化一律写 WMS 出入库流水（经销商发货、RMA 翻新入库都是这样），其他模块只读。
 4. **人和权限只有一份**：用 users 和 grants 判断权限，不要另建账号体系（CalDock 和经销商是外部客户，例外）。
+   汇报线：每个人有一个第一领导 `users.manager_id`，可选一个第二领导 `users.second_manager_id`（虚线汇报）。**两位领导对这个人的权限完全相同**
+   （查看、验收、OKR 领导评分、审批、调整截止时间、HR 下属范围，也包括 TA 下面的团队）：判断"谁是领导/谁能看"时两条线都要算，
+   用 domain.ts 的 `leaderChildren`、`attachReportingScope`（`visibleOwnerIds` 已含两条线）或 org.ts 的 `reportsOf`，不要只读 `manager_id`。
+   只有"默认指派给谁"（新任务的默认验收人、需要谁去做的提醒）仍按第一领导，避免重复。`user.dottedOwnerIds` 只是界面上区分"虚线汇报给我"用。
 5. **通知统一走一处**：站内红点用 `pushInbox()`；钉钉和邮件用 app.ts 里的 `notify`。
 6. 成本和利润只给有 `product_cost_detail` 权限的人和主管理员（部署配置 `WORKOS_EXECUTIVE_USER_IDS`）；在系统里勾选的管理员**不会**自动看到产品、成本、价格、库存、经销商数据，也要单独授权。功能权限（grants）只有主管理员能改，任何人都不能改自己的。薪资只给 HR 权限对应分区的人。后端新模块判断敏感数据时用 `isExecutive`，不要用 `isAdmin`。
 7. **工厂对接人**：`users.quality_factory` 非空（邀请时选“工厂对接人”，或管理员在成员列表里改）的账号只能用质量追踪，后端会拦截其他接口。

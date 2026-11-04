@@ -40,13 +40,15 @@ const health = z.enum(['on_track', 'at_risk', 'off_track']);
 export async function registerProjectRoutes(app: FastifyInstance, db: Database, o: { isAdmin: (u: User) => boolean }) {
   const actorOf = (req: FastifyRequest): User => req.actor || deny(401, 'UNAUTHENTICATED', 'Authentication is required');
   // Only the project admin, project members and company admins can see a project. To everyone else it does not exist.
-  const canView = (user: User, p: any) => p.owner_id === user.id || (p.members || []).includes(user.id) || o.isAdmin(user);
+  const canEdit = (user: User, p: any) => p.owner_id === user.id || (p.members || []).includes(user.id) || o.isAdmin(user);
+  // A leader (first or second line) may read, not change, the projects their reports own or belong to.
+  const leads = (user: User, p: any) => (user.visibleOwnerIds || []).some(r => r !== user.id && (r === p.owner_id || (p.members || []).includes(r)));
+  const canView = (user: User, p: any) => canEdit(user, p) || leads(user, p);
   const load = async (tx: Queryable, user: User, pid: string, lock = false, viewCheck = true) => {
     const p = (await tx.query('SELECT * FROM projects WHERE id=$1 AND org_id=$2 AND archived_at IS NULL' + (lock ? ' FOR UPDATE' : ''), [pid, user.org_id])).rows[0];
     if (!p || (viewCheck && !canView(user, p))) deny(404, 'NOT_FOUND', 'Project not found');
     return p;
   };
-  const canEdit = canView;
   const requireEdit = (user: User, p: any) => { if (!canEdit(user, p)) deny(403, 'FORBIDDEN', 'Only project members can change this project'); };
   const projectTasks = async (pids: string[]) => pids.length ? (await db.query(`SELECT tasks.id,tasks.title,tasks.description,tasks.owner_id,tasks.reviewer_id,tasks.due_at,tasks.created_at,tasks.board_status,tasks.board_priority,tasks.status,tasks.version,tasks.project_id,tasks.project_group_id,
       (SELECT count(*)::int FROM task_updates u WHERE u.task_id=tasks.id) AS update_count,(SELECT max(u.created_at) FROM task_updates u WHERE u.task_id=tasks.id) AS last_update_at,tasks.updated_at,(SELECT json_build_object('ai_status',c.ai_status,'ai_score',c.ai_score,'human_score',c.human_score,'final_score',COALESCE(c.human_score,CASE WHEN c.ai_status='scored' THEN c.ai_score END),'score_source',CASE WHEN c.human_score IS NOT NULL THEN 'human' WHEN c.ai_status='scored' THEN 'ai' END,'score_due_at',c.created_at+interval '24 hours') FROM task_completions c WHERE c.task_id=tasks.id AND c.superseded_at IS NULL ORDER BY c.created_at DESC LIMIT 1) AS completion,${TASK_SOURCE_COLUMNS}
@@ -54,7 +56,7 @@ export async function registerProjectRoutes(app: FastifyInstance, db: Database, 
   const updatesOf = async (pids: string[]) => pids.length ? (await db.query('SELECT * FROM project_updates WHERE project_id=ANY($1::text[]) ORDER BY created_at DESC LIMIT 500', [pids])).rows : [];
   // Project admin (owner_id, the creator by default) and company admins manage members and the admin role.
   const canManage = (user: User, p: any) => p.owner_id === user.id || o.isAdmin(user);
-  const shape = (p: any, tasks: any[], updates: any[], user: User) => ({ ...p, canEdit: canEdit(user, p), canManage: canManage(user, p), tasks: tasks.filter(t => t.project_id === p.id), updates: updates.filter(u => u.project_id === p.id).slice(0, 30) });
+  const shape = (p: any, tasks: any[], updates: any[], user: User) => ({ ...p, canEdit: canEdit(user, p), readOnly: !canEdit(user, p), canManage: canManage(user, p), tasks: tasks.filter(t => t.project_id === p.id), updates: updates.filter(u => u.project_id === p.id).slice(0, 30) });
 
   app.get('/projects', async req => {
     const user = actorOf(req); await applyAutoStatus(db, user.org_id);
