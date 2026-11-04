@@ -5,7 +5,7 @@ import type { Database, Queryable } from './db.js';
 import { hash, sameSecret, readCookie } from './auth.js';
 import { deny } from './errors.js';
 import { createCaldockGateway, type CaldockGateway, type CaldockProvider } from './caldock-oidc.js';
-import { applyCaldockOffer, caldockAudit, caldockOfferStatus, CALDOCK_OFFER, CALDOCK_PRICES, createCaldockOrder, recordVerifiedCaldockPayment } from './caldock-domain.js';
+import { applyCaldockOffer, recordCaldockRenewalCommission, caldockAudit, caldockOfferStatus, CALDOCK_OFFER, CALDOCK_PRICES, createCaldockOrder, recordVerifiedCaldockPayment } from './caldock-domain.js';
 import { ApiError } from './errors.js';
 import { isStaleTestSession, stripeFromEnv, verifyStripeEvent, StripeRequestError, STRIPE_RECURRING, type CaldockStripe } from './caldock-stripe.js';
 
@@ -276,8 +276,9 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
     const order=(await db.query('SELECT * FROM caldock_orders WHERE stripe_subscription_id=$1',[subscriptionId])).rows[0];
     if(!order)return;
     if(event.type==='invoice.paid'&&object.billing_reason==='subscription_cycle'){
-      // Renewal collected: extend the paid service period. Renewal commissions remain a separate decision.
+      // Renewal collected: extend the paid service period and accrue its commission.
       await db.query("UPDATE caldock_orders SET billing_ends_at=GREATEST(COALESCE(billing_ends_at,now()),now())+CASE WHEN interval='year' THEN interval '1 year' WHEN interval='quarter' THEN interval '3 months' WHEN interval='half' THEN interval '6 months' WHEN interval='week' THEN interval '7 days' ELSE interval '1 month' END,version=version+1 WHERE id=$1 AND status='active'",[order.id]);
+      await recordCaldockRenewalCommission(db,order,String(object.id),Number(object.amount_paid));
       await caldockAudit(db,null,'payment.renewal',order.id,{invoice:object.id,amountCents:Number(object.amount_paid)});
     } else if(event.type==='invoice.payment_failed'){
       await caldockAudit(db,null,'payment.renewal_failed',order.id,{invoice:object.id});

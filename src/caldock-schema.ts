@@ -71,6 +71,11 @@ CREATE TABLE IF NOT EXISTS caldock_commissions (
  settlement_reference text, settled_at timestamptz, created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS caldock_commission_owner ON caldock_commissions(affiliate_id,status);
+-- An order can now earn once per collected payment; source_id keeps each payment to one commission.
+ALTER TABLE caldock_commissions DROP CONSTRAINT IF EXISTS caldock_commissions_order_id_key;
+ALTER TABLE caldock_commissions ADD COLUMN IF NOT EXISTS source_id text;
+CREATE UNIQUE INDEX IF NOT EXISTS caldock_commission_source ON caldock_commissions(source_id) WHERE source_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS caldock_commission_order ON caldock_commissions(order_id);
 CREATE TABLE IF NOT EXISTS caldock_payment_events (
  event_id text PRIMARY KEY, order_id text NOT NULL REFERENCES caldock_orders(id),
  event_type text NOT NULL CHECK(event_type IN ('paid','refunded')), amount_cents integer NOT NULL,
