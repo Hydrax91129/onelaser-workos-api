@@ -34,7 +34,7 @@ async function login(code:string,provider:CaldockProvider='google',ref?:string,b
  const state=new URL(start.headers.location!).searchParams.get('state')!;
  const cookie=cookies(start).map(c=>c.split(';')[0]).join('; ');
  const callback=await app.inject({method:provider==='apple'?'POST':'GET',url:`/caldock/auth/${provider}/callback${provider==='google'?'?state='+state+'&code='+code:''}`,payload:provider==='apple'?new URLSearchParams({state,code}).toString():undefined,headers:{cookie,...(provider==='apple'?{'content-type':'application/x-www-form-urlencoded'}:{})}});
- assert.equal(callback.statusCode,302,callback.body);assert.equal(new URL(String(callback.headers.location)).searchParams.get('interval'),billing);assert.match(String(callback.headers.location),/^https:\/\/craftos\.example\.test\/caldock\/\?/);assert.doesNotMatch(String(callback.headers.location),/access_token|csrf|secret/);
+ assert.equal(callback.statusCode,302,callback.body);assert.equal(new URL(String(callback.headers.location)).searchParams.get('interval'),billing);assert.match(String(callback.headers.location),/^https:\/\/craftos\.example\.test\/macusa\/\?/);assert.doesNotMatch(String(callback.headers.location),/access_token|csrf|secret/);
  const session=cookies(callback).find(c=>c.startsWith('__Host-caldock_session='));assert.ok(session);assert.match(session,/HttpOnly; SameSite=Lax/);assert.match(session,/; Secure/);
  const me=await app.inject({url:'/caldock/me',headers:{cookie:session.split(';')[0]}});assert.equal(me.statusCode,200,me.body);
  return {cookie:session.split(';')[0],csrf:me.json().csrfToken,...me.json()};

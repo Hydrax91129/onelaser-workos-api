@@ -57,7 +57,7 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
     else attempts.set(key,{count:1,expires:now+60000});
     if(attempts.size>1000)for(const[k,v]of attempts)if(v.expires<=now)attempts.delete(k);
   };
-  const returnUrl=(view:string,language:string,billing:string,error?:string)=>{const u=new URL(view==='studio'?'/decision-studio/':'/caldock/',origin);u.searchParams.set('view',view);u.searchParams.set('lang',language);u.searchParams.set('interval',billing);if(error)u.searchParams.set('error',error);return u.toString();};
+  const returnUrl=(view:string,language:string,billing:string,error?:string)=>{const u=new URL(view==='studio'?'/decision-studio/':'/macusa/',origin);u.searchParams.set('view',view);u.searchParams.set('lang',language);u.searchParams.set('interval',billing);if(error)u.searchParams.set('error',error);return u.toString();};
   async function referral(req:FastifyRequest,reply:any,code?:string) {
     const old=readCookie(req.headers.cookie,caldockCookieName(secure,'ref'));
     if(old){const row=(await db.query('SELECT token_hash FROM caldock_referral_visits WHERE token_hash=$1 AND expires_at>now()',[hash(old)])).rows[0];if(row)return row.token_hash;}
@@ -84,7 +84,7 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
         if(typeof supplied!=='string'||!sameSecret(supplied,csrf_token))deny(403,'CALDOCK_CSRF_INVALID','Request origin or security token is invalid');
       }
     });
-    routes.get('/capabilities',async()=>({service:'caldock',accountApp:origin+'/caldock/',providers:{google:!!providers.google,apple:!!providers.apple},payments:!!stripe,paymentMode:stripe?.mode??null,currency:'USD',prices:CALDOCK_PRICES,auth:{session:'httpOnlyCookie',csrf:true},referrals:{attributionDays:30,automaticPayouts:false}}));
+    routes.get('/capabilities',async()=>({service:'caldock',accountApp:origin+'/macusa/',providers:{google:!!providers.google,apple:!!providers.apple},payments:!!stripe,paymentMode:stripe?.mode??null,currency:'USD',prices:CALDOCK_PRICES,auth:{session:'httpOnlyCookie',csrf:true},referrals:{attributionDays:30,automaticPayouts:false}}));
     routes.post('/referral-visits',async(req,reply)=>{checkOrigin(req);limit(req);const input=z.object({code:z.string().regex(/^[A-Z0-9]{12}$/)}).strict().parse(req.body);await referral(req,reply,input.code);return {recorded:true};});
     for(const provider of ['google','apple'] as const){
       routes.get(`/auth/${provider}/start`,async(req,reply)=>{
@@ -144,7 +144,7 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
           if(existing.status==='open'&&typeof existing.url==='string')return {url:existing.url};
           if(existing.status==='complete')deny(409,'CALDOCK_PAYMENT_IN_PROGRESS','Payment for this order is being confirmed; reload in a moment');
         }
-        const back=(view:string,result:string)=>{const u=new URL('/caldock/',origin);u.searchParams.set('view',view);u.searchParams.set('lang',input.lang);u.searchParams.set('interval',order.interval);u.searchParams.set('checkout',result);return u.toString();};
+        const back=(view:string,result:string)=>{const u=new URL('/macusa/',origin);u.searchParams.set('view',view);u.searchParams.set('lang',input.lang);u.searchParams.set('interval',order.interval);u.searchParams.set('checkout',result);return u.toString();};
         const names={month:['Monthly','月付'],quarter:['Quarterly','季付'],year:['Yearly','年付']}[order.interval as 'month'|'quarter'|'year'];
         const recurring=STRIPE_RECURRING[order.interval as 'month'|'quarter'|'year'];
         const params:Record<string,string>={

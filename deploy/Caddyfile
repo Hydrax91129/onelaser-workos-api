@@ -15,17 +15,17 @@ http://:{$PORT:10000} {
     @app_versioned {
         path *.js *.css
         query v=*
-        not path /api/* /wiki/* /caldock/* /decision-studio/*
+        not path /api/* /wiki/* /macusa/* /decision-studio/*
     }
     header @app_versioned Cache-Control "public, max-age=31536000, immutable"
     @app_static path /fonts/* /assets/*
     header @app_static Cache-Control "public, max-age=604800"
     @private_or_uncached {
-        not path /wiki/data/* /wiki/assets/* /caldock/assets/* /fonts/* /assets/*
+        not path /wiki/data/* /wiki/assets/* /macusa/assets/* /fonts/* /assets/*
         not {
             path *.js *.css
             query v=*
-            not path /api/* /wiki/* /caldock/* /decision-studio/*
+            not path /api/* /wiki/* /macusa/* /decision-studio/*
         }
     }
     header @private_or_uncached Cache-Control no-store
@@ -65,12 +65,19 @@ http://:{$PORT:10000} {
         root * /app/caldock/decision-studio
         file_server
     }
+    # The site moved from /caldock/ when the brand became MacUSA; keep old links working.
     handle /caldock {
-        redir * /caldock/?{http.request.uri.query} 308
+        redir * /macusa/?{http.request.uri.query} 308
     }
-    @caldock_public_assets path /caldock/assets/*
-    header @caldock_public_assets Cache-Control "public, max-age=86400"
     handle_path /caldock/* {
+        redir * /macusa{uri} 308
+    }
+    handle /macusa {
+        redir * /macusa/?{http.request.uri.query} 308
+    }
+    @caldock_public_assets path /macusa/assets/*
+    header @caldock_public_assets Cache-Control "public, max-age=86400"
+    handle_path /macusa/* {
         header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-src https://www.youtube-nocookie.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
         root * /app/caldock
         file_server

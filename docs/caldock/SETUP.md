@@ -5,9 +5,9 @@ CalDock reuses the existing craftos.app service and PostgreSQL database, at the 
 ## URLs
 
 - Marketing preview: https://yonge6.github.io/mac-mini-rental/
-- Account app: https://craftos.app/caldock/?view=login&lang=zh
-- Customer center: https://craftos.app/caldock/?view=account&lang=zh
-- Order administration: https://craftos.app/caldock/?view=admin&lang=zh
+- Account app: https://craftos.app/macusa/?view=login&lang=zh
+- Customer center: https://craftos.app/macusa/?view=account&lang=zh
+- Order administration: https://craftos.app/macusa/?view=admin&lang=zh
 - Configuration availability: https://craftos.app/api/caldock/capabilities
 
 Account routes stay on craftos.app so authentication uses first-party HttpOnly cookies rather than third-party cookies or tokens in a marketing-page URL. CalDock statics are built from a full verified commit in `deploy/caldock-revision.txt` and mounted at `/caldock/`. The GitHub marketing site directs account/checkout flows there. All API writes require exact Origin and the session CSRF token.
