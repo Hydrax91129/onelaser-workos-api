@@ -243,6 +243,15 @@ const zh:Record<string,string>={
   'Documents must be PDF, PNG, JPEG or WebP':'文件只能是 PDF、PNG、JPEG 或 WebP 格式。',
   'Documents must be 10 MB or smaller':'文件不能超过 10 MB。',
   'A person can have at most 50 documents':'每位员工最多保存 50 份文件。',
-  'Document not found':'找不到这份文件。'
+  'Document not found':'找不到这份文件。',
+  'This file slot does not exist':'没有这个文件栏位。',
+  'You cannot change files in this slot':'你没有权限修改这个栏位的文件。',
+  'Upload a PDF, PNG, JPG, WebP, CSV or TXT file; save Excel or Word files as PDF or CSV first':'只能上传 PDF、PNG、JPG、WebP、CSV 或 TXT 文件；Excel 和 Word 请先另存为 PDF 或 CSV。',
+  'The main image must be PNG, JPG or WebP':'产品主图只能是 PNG、JPG 或 WebP 格式。',
+  'This slot only takes PDF files':'这个栏位只能上传 PDF 文件。',
+  'The file is empty':'文件是空的。',
+  'Each file must be 20 MB or smaller':'每个文件不能超过 20 MB。',
+  'A product can have at most 100 files':'每个产品最多保存 100 个文件。',
+  'File not found':'找不到这个文件。'
 };
 export function message(text:string,lang:Language) {return lang==='en'?text:(zh[text]||'请求未能处理，请核对输入或联系管理员。');}
