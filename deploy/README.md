@@ -14,7 +14,7 @@
 
 ## Render 托管
 
-1. 打开 [创建 Blueprint](https://dashboard.render.com/select-repo?type=blueprint)，选择本后台仓库 `Yonge6/onelaser-workos-api`，使用根目录 `render.yaml`。
+1. 打开 [创建 Blueprint](https://dashboard.render.com/select-repo?type=blueprint)，选择本后台仓库 `Hydrax91129/onelaser-workos-api`，使用根目录 `render.yaml`。
 2. 审核将创建的 Web Service、PostgreSQL、区域和实际费用。当前模板使用 Singapore、Web `0.5c-512mb`、数据库 `0.1c-256mb`、1 GB 数据盘。计划 ID 和价格以平台当时界面为准；模板未授权任何扣款。
 3. 在平台安全环境变量中配置下表。不要把凭据放入 GitHub、前端、URL 或聊天。
 4. 部署后获得 `https://<service>.onrender.com`。`APP_PUBLIC_URL` 默认读取平台 `RENDER_EXTERNAL_URL`，无需自有域名。将此地址配置为钉钉首页，并注册回调 `https://<service>.onrender.com/api/auth/dingtalk/callback`。
@@ -50,6 +50,16 @@ Bot 触发和回写的具体步骤见 [Bot 接入说明](../docs/integrations/GR
 员工须从新域名重新登录；旧域名的会话与进行中的登录不会迁移。同步调整私有连接器的来源，并让专用 Bot 使用新 MCP 地址重新授权；跳转不替代 OAuth 授权或 API 客户端迁移。此规则的目标是固定的 `https://craftos.app`，不使用请求 Host 或任意环境变量拼接目标域名。
 
 可使用真实 Caddy 2 二进制验证切换前后路由、健康检查和 Host/来源注入防护：`CADDY_BIN=/absolute/path/to/caddy node --import tsx --test test/caddy-redirect.test.ts`。本地没有 `CADDY_BIN` 时该集成测试会明确跳过；CI 在构建生产镜像后提取其中的 Caddy 并设置 `CADDY_BIN`，必须执行这些测试，再运行原有同源 smoke test。用于提取二进制的临时容器在成功或失败后都会清理。
+
+### 私有仓库的下载令牌（`GITHUB_FETCH_TOKEN`）
+
+Docker 构建会下载固定版本的前端（`Hydrax91129/onelaser-workos`）和 Wiki（`Hydrax91129/onelaser-support-center`）。仓库公开时匿名下载即可；改成私有前，必须先配好只读令牌。
+
+1. 令牌：GitHub fine-grained token，只授权上面两个仓库，权限只给 Contents: Read-only。令牌只填进平台的密钥设置，不要放进代码、URL 或聊天。
+2. Render：在服务的 Environment 里添加环境变量 `GITHUB_FETCH_TOKEN`。Dockerfile 用 BuildKit secret（`RUN --mount=type=secret,id=GITHUB_FETCH_TOKEN,dst=/etc/secrets/GITHUB_FETCH_TOKEN`）读取，不用 ARG/ENV，令牌不会留在镜像层里。
+3. GitHub CI：在后端仓库 Settings → Secrets and variables → Actions 添加同名密钥 `GITHUB_FETCH_TOKEN`；`ci.yml` 用 `docker build --secret` 传入。
+4. 核对：构建日志会打印 `GITHUB_FETCH_TOKEN: used`（只说明是否使用，不打印令牌）。Render 和 CI 的日志都显示 `used` 之后，才能把仓库改成私有。看到 `not provided` 说明令牌没有传进构建。
+5. 没有令牌时脚本照旧匿名下载；令牌无效时构建会直接失败（401/404），不会悄悄退回旧版本。CalDock（`Yonge6/mac-mini-rental`）不受影响，仍匿名下载。
 
 ## 自有服务器备选
 
