@@ -100,3 +100,38 @@ http://:{$PORT:10000} {
         file_server
     }
 }
+
+# The wodeMac storefront. Only its pages and /api/caldock/* exist on this host, so
+# no Work OS screen or API can be reached through the storefront domain.
+http://www.wodemac.com:{$PORT:10000} {
+    redir https://wodemac.com{uri} 308
+}
+
+http://wodemac.com:{$PORT:10000} {
+    encode zstd gzip
+    header {
+        X-Content-Type-Options nosniff
+        ?Referrer-Policy no-referrer
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        X-Frame-Options DENY
+        Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-src https://www.youtube-nocookie.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+        Cache-Control no-store
+    }
+    @public_assets path /assets/*
+    header @public_assets Cache-Control "public, max-age=86400"
+    @caldock_api path /api/caldock /api/caldock/*
+    handle @caldock_api {
+        uri strip_prefix /api
+        reverse_proxy 127.0.0.1:3001
+    }
+    handle /api/* {
+        respond 404
+    }
+    handle /decision-studio* {
+        redir https://craftos.app{uri} 308
+    }
+    handle {
+        root * /app/caldock
+        file_server
+    }
+}

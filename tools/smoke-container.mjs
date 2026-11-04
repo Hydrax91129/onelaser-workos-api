@@ -1,3 +1,4 @@
+import { request as httpRequest } from 'node:http';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
@@ -69,11 +70,16 @@ const health = await (await fetch(origin + '/api/health')).json();
 assert.equal(health.database, 'postgres');
 const capabilities = await (await fetch(origin + '/api/capabilities')).json();
 const caldockPage=await fetch(origin+'/caldock/?view=login&lang=zh');
-assert.equal(caldockPage.status,200);assert.match(await caldockPage.text(),/CalDock/);
+assert.equal(caldockPage.status,200);assert.match(await caldockPage.text(),/wodeMac|CalDock/);
 assert.equal(caldockPage.headers.get('cache-control'),'no-store');
 assert.match(caldockPage.headers.get('content-security-policy'),/connect-src 'self'/);
 const caldockBuild=await (await fetch(origin+'/caldock/build-info.json')).json();
 assert.equal(caldockBuild.caldockCommit,(await readFile(new URL('../deploy/caldock-revision.txt',import.meta.url),'utf8')).trim());
+const onSite=(path)=>new Promise((done,fail)=>{const u=new URL(origin+path);const r=httpRequest({hostname:u.hostname,port:u.port,path,headers:{host:'wodemac.com'}},res=>{res.resume();res.on('end',()=>done(res));});r.on('error',fail);r.end();});
+assert.equal((await onSite('/')).statusCode,200);
+assert.equal((await onSite('/api/caldock/capabilities')).statusCode,200);
+for(const closed of ['/api/health','/api/tasks','/wiki/','/caldock/.env'])assert.equal((await onSite(closed)).statusCode,404,closed);
+assert.match((await onSite('/')).headers['content-security-policy'],/frame-ancestors 'none'/);
 const caldockCapabilities=await (await fetch(origin+'/api/caldock/capabilities')).json();
 assert.equal(caldockCapabilities.service,'caldock');assert.equal(caldockCapabilities.providers.google,false);assert.equal(caldockCapabilities.providers.apple,false);assert.equal(caldockCapabilities.payments,false);
 for(const route of ['/api/caldock/me','/api/caldock/orders','/api/caldock/admin/orders'])assert.equal((await fetch(origin+route)).status,401);
