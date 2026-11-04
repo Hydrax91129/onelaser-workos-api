@@ -4,9 +4,13 @@
 > 本文件同时承担两个职能：①所有会话共同遵守的规则；②各模块会话之间唯一的"沟通板"。
 > 会话之间没有共享记忆，彼此看不到对方未合并的工作。想让其他会话知道的事情，必须写进本文件并合并到 main。
 >
-> 版本：v1.1（2026-11-03）｜维护人：KC｜标注"【待填】"的地方由工程师或"平台核心"会话补全
+> 版本：v1.2（2026-11-04）｜维护人：KC｜标注"【待填】"的地方由工程师或"平台核心"会话补全
 >
 > **主版本在后端仓库 `Yonge6/onelaser-workos-api` 根目录。** 前端仓库 `Yonge6/onelaser-workos` 根目录放一份完全相同的副本，只读：要改本文件，一律改后端仓库的主版本，合并后由 core 同步到前端仓库。两边内容不一致时，以后端主版本为准。
+>
+> **新增模块、新增共享数据表，或改了本文件里的任何约定，必须在同一个 PR 里更新本文件的主版本。**
+>
+> **两个仓库都是公开的**：本文件和代码里都不能出现密钥、真实成本、真实价格或计价比例、真实库存、员工薪资和任何客户数据。
 
 ---
 
@@ -52,7 +56,7 @@
 | `Yonge6/onelaser-workos-api`（本仓库） | 后端 API、数据库结构、部署配置；构建时把固定版本的前端一起打进镜像 | 就在这里 |
 | `Yonge6/onelaser-workos` | 网页前端（`dist/` 下的静态文件） | 只读副本，由 core 从这里同步 |
 
-- **前端**：原生 JavaScript + CSS，没有框架，也没有构建步骤，`dist/` 里的文件就是线上文件。每个模块一个文件，例如 `dist/wms.js` + `dist/wms.css`、`dist/kol.js`、`dist/dealers.js`；`dist/live-app.js` 是真实模式的主程序，`dist/api-client.js` 负责 Cookie、CSRF 和错误处理，`dist/i18n.js` 负责中英文。改了 JS/CSS 后要运行 `node tools/stamp-assets.mjs` 更新 `index.html` 里的版本号，否则浏览器会继续用缓存。
+- **前端**：原生 JavaScript + CSS，没有框架，也没有构建步骤，`dist/` 里的文件就是线上文件。每个模块一个文件，例如 `dist/wms.js` + `dist/wms.css`、`dist/kol.js`、`dist/dealers.js`；`dist/live-app.js` 是真实模式的外壳（导航、顶栏、任务抽屉）；各模块挂在 `window.WorkOSXxx` 上，由 live-app 的 `render()` 调用模块的 `configure()`，注入 api、state、语言等。`dist/api-client.js` 负责 Cookie、CSRF 和错误处理，`dist/i18n.js` 负责中英文。改了 JS/CSS 后要运行 `node tools/stamp-assets.mjs` 更新 `index.html` 里的版本号，否则浏览器会继续用缓存。
   - 后端用 `deploy/frontend-revision.txt` 固定前端的某个提交（40 位哈希）；`tools/fetch-frontend.mjs` 构建时按哈希下载并校验 `dist/`。**前端合并后，要在后端改这个哈希并发布，线上才会变。**
   - CalDock 是另一个独立前端，用 `deploy/caldock-revision.txt` 固定；知识中心 Wiki 的公开内容用 `deploy/wiki-revision.txt` 固定。
 - **后端**：Node.js 24（最低 22）+ TypeScript（strict，ES 模块）+ Fastify 5；请求校验用 zod 4。
@@ -101,14 +105,33 @@
   - 其他：`OKR_TIMEZONE`、`NUDGE_INTERVAL_MS`、`FX_FALLBACK_CNY`
   - 新增环境变量时，同时加进 `render.yaml`（密钥用 `sync: false`）和本清单。
 
-**发布方式（读 Render 配置得到，2026-11-03）**：线上服务是 Render 上的 `onelaser-workos-migration`（新加坡），它跟踪 `codex/company-migration-live-20261102` 分支，**自动部署是关闭的**，每次按指定提交手动部署。合并到 `main` 不等于上线。数据库 `onelaser-workos-db`：PostgreSQL 16，磁盘 1 GB，没有开自动扩容。`render.yaml` 里写的服务名和分支和线上实际不一致，以 Render 控制台为准。
+**模块与代码文件对照**（"拥有的数据"只有这个模块能写，别的模块只读或走接口，见 3.3、3.8）：
+
+| 子功能 | 后端 `src/` | 前端 `dist/` | 拥有的数据 |
+|---|---|---|---|
+| 账号、组织、权限（core） | `auth.ts` `org.ts` `members.ts` | `people.js` `erp-access.js` | `users`、`departments`、`grants`（功能权限） |
+| 任务、OKR、项目（core） | `app.ts` `task-board.ts` `completions.ts` `assign.ts` `okr*.ts` `projects.ts` | `task-board.js` `okr-board.js` `projects.js` `reports.js` | `tasks`、`submissions`、`reviews`、`objectives`、`key_results`、`projects` |
+| 站内消息红点（core） | `inbox.ts` | `inbox.js` | `inbox_items`（别的模块只调用 `pushInbox()`，不要自建通知表） |
+| Bug 与建议、版本记录（core） | `feedback.ts` | `feedback.js` `changelog.js` | `feedback` |
+| PIM 与定价（pim） | `products.ts` | `products.js` | `product_catalog`（SKU 主数据、MSRP）、`product_pricing`（成本输入）、`pricing_rules`（公司计价规则）、`product_channel_prices`（各渠道价格及审批） |
+| WMS 库存（wms） | `wms.ts` | `wms.js` | `wms_*`：库位、库存和出入库流水 |
+| 退货维修 RMA（wms） | `rma.ts` | `rma.js` | `rma_*`（翻新机入库走 WMS 流水） |
+| 经销商下单（dealer） | `dealer.ts` `dealer-admin.ts` | `dealers.js` | `dealer_*`（价格读 `product_channel_prices` 的 `dealer` 渠道，发货走 WMS 出库） |
+| 客服（support） | `support.ts` `shopify.ts` `public-wiki.ts` | `company-support.js` `wiki*.js` | `support_*`、`public_wiki_*` |
+| HRM（hrm） | `hr.ts` | `hr.js` | `hr_*`（美国、中国分区权限） |
+| IT 账号与资产（asset） | `it-accounts.ts` | `it.js` | `it_*` |
+| 质量追踪（quality） | `quality.ts` | `quality.js` | `quality_*` |
+| KOL ROI（kol） | 未合并分支 `kol-phase1` | `kol.js` | `kol_*`（待合并） |
+| CalDock（caldock，暂停） | `caldock*.ts` | 独立前端仓库 | `caldock_*`，和 WorkOS 用户完全隔离 |
+
+**发布方式（读 Render 配置得到，2026-11-03）**：线上服务是 Render 上的 `onelaser-workos-migration`（新加坡），它跟踪 `codex/company-migration-live-20261102` 分支，**自动部署是关闭的**，要在 Render 上手动部署。合并到 `main` 不等于上线，完整步骤见 3.10。数据库 `onelaser-workos-db`：PostgreSQL 16，磁盘 1 GB，没有开自动扩容。`render.yaml` 里写的服务名和分支和线上实际不一致，以 Render 控制台为准。
 
 ---
 
 ## 3. 全局规则（所有会话必须遵守）
 
 ### 3.1 开工前
-1. 先拉取最新的 main，确认自己的分支基于最新 main。
+1. 先拉取最新的 main（`git pull --rebase`），确认自己的分支基于最新 main。**推送前再拉一次**：其他会话随时在推送代码。
 2. 读完本文件，确认自己负责的模块和边界（第 6 节）。
 3. 看一下第 8 节变更日志里最近的改动，特别是共享区域的改动。
 
@@ -179,6 +202,32 @@
 - 只改自己模块的那一行和那一段，不改其他模块的内容，避免本文件本身产生合并冲突。
 - 对其他模块有疑问或依赖时，写在第 7 节，不要猜测对方的实现。
 - 对 KC 的汇报用中文，简洁直接，先说结论。
+
+### 3.8 共享数据规则（最重要）
+1. **SKU 只有一份**：所有模块都用 `product_catalog.sku`。不要另建产品表，也不要复制产品名称和价格。要扩展产品字段，由 pim 模块在 `products.ts` 里加。
+2. **价格只有一个来源**：
+   - MSRP 在 `product_catalog`；
+   - 各渠道价格（经销商、Amazon 等）在 `product_channel_prices`；
+   - 公司计价规则在 `pricing_rules`。具体比例属于第 5 节的受限数据，**不写进本文件、代码注释或测试**；测试里用虚构的比例。
+3. **库存只有一份**：数量变化一律写 WMS 出入库流水（经销商发货、RMA 翻新入库都是这样），其他模块只读。
+4. **人和权限只有一份**：用 `users` 和 `grants` 判断权限，不要另建账号体系。经销商和 CalDock 的客户是外部用户，属于例外。
+5. **通知统一走一处**：站内红点用 `pushInbox()`（`src/inbox.ts`）；钉钉和邮件用 `src/app.ts` 里的 `notify`。
+6. **敏感数据**：
+   - 成本和利润只给有 `product_cost_detail` 权限的人和管理员（后端判断在 `src/products.ts`）。这个权限给谁，按第 5 节执行。
+   - 薪资只给对应分区的 HR 权限人。
+
+### 3.9 开发细则
+- 改公共文件（前端 `live-app.js`、`changelog.js`、`index.html`；后端 `app.ts`、`db.ts`、`i18n.ts`）要小步修改，不要整段重写。按第 4 节，这些文件归 core。
+- 前端改完先运行 `node tools/stamp-assets.mjs`（更新资源版本号），再运行 `npm test`；后端运行 `npm test`，大约需要 8–10 分钟。
+- 后端所有报错文案都要在 `src/i18n.ts` 里有中文翻译，有测试会检查。
+- 版本号：在前端 `dist/changelog.js` 的 `RELEASES` 最前面加一条，号码 = 当前最新版本 + 0.1。先拉取最新代码再看最新号，避免撞号。
+
+### 3.10 部署规则（同一时间只能有一个会话部署）
+1. 前端推送 main，记下 commit。
+2. 后端先拉取最新代码，再把这个前端 commit 写进 `deploy/frontend-revision.txt`。新的前端 commit 必须包含之前已上线的前端提交（先拉取再取 HEAD），否则会把别人的功能回滚掉。
+3. 后端推送 main，再推到部署分支 `codex/company-migration-live-20261102`。推之前确认部署分支是 main 的祖先。
+4. 在 Render 点 Manual Deploy → Deploy latest commit，大约等 3 分钟。
+5. 打开 https://craftos.app/build-info.json，确认 `frontendCommit` 等于第 1 步的 commit。核对之前不能说"已上线"。
 
 ---
 
@@ -294,6 +343,7 @@
 - 2026-11-03｜core → KC｜侧边栏差异 4（涉及第 5 节权限）：第 5 节说产品管理区"仅 KC、李帅、袁勇"可见，但代码里所有负责人（manager）都能看到"产品与库存"（只读库存）和"ERP 权限"（只能给自己的下属分配仓库权限）。后端也是这样判断的：`src/wms.ts` 的 `warehouseLevelFor` 和 `/erp/access`。成本核算、智能供应链、产品目录和成本数据，后端都要求 `products` 权限或管理员，这部分和第 5 节一致。谁实际持有 `products` 权限要看线上数据，我连不上生产库，查不了。请 KC 确认：负责人看库存和分配仓库权限是否允许｜待 KC 审批
 - 2026-11-03｜core → KC｜侧边栏差异 5：代码多了"其他"分区（个人设置、组织架构、人事档案、IT 账号与订阅、组织与权限、Bug 与建议、版本更新），原描述没有这个分区｜待 KC 审批
 - 2026-11-03｜core → KC｜侧边栏差异 6：前端仓库最新代码已经加了"营销"分区（KOL 管理），还没上线；按第 1 节规则，新分区要先经 KC 批准，请确认位置｜待 KC 审批
+- 2026-11-04｜core → pim、dealer｜经销商渠道价现在是人工填写，应改为按 `pricing_rules` 的批发规则自动给出建议价，再走价格审批（来源：KC 2026-11-04 提供的规则草稿）｜待处理
 - 2026-11-03｜core → Yongger｜`render.yaml` 写的是服务 `onelaser-workos`、分支 `main`、通过检查后自动部署，但线上实际是 `onelaser-workos-migration`、跟踪 `codex/company-migration-live-20261102`、自动部署关闭。是否要改 `render.yaml` 和线上保持一致？｜处理中：KC 去和 Yongger 确认
 
 ---
@@ -302,6 +352,7 @@
 
 格式：日期｜模块｜做了什么｜涉及的表或接口｜PR 链接
 
+- 2026-11-04｜core｜v1.2：并入 KC 2026-11-04 提供的规则草稿——第 2 节加模块与代码文件对照；新增 3.8 共享数据规则、3.9 开发细则、3.10 部署规则；3.1 加推送前拉取；文件开头注明仓库公开。计价比例按第 5 节不写入；草稿里"两个仓库各自修改"改为按 v1.1 的主版本加同步｜只改本文件｜PR #18
 - 2026-11-03｜core｜v1.1：按 KC 决定更新——前缀方案已批准；RMA 归 wms，新增 quality 模块，CalDock 单独登记并暂停；3.5 写入金额规则；第 1 节侧边栏按线上代码更新，6 处差异登记在第 7 节；补全第 1 节仓库名和主分支；前端仓库放只读副本｜只改本文件｜PR #18
 - 2026-11-03｜core｜放入仓库根目录；补全第 2 节（技术栈、目录、命令、环境变量、发布方式）和 3.5.1 表名前缀方案；第 7 节登记 5 项待决定事项｜只改本文件，不涉及表或接口｜草稿 PR（链接见 PR 页面）
 - 2026-11-03｜core｜建立本文件 v1.0｜—｜—
