@@ -5,7 +5,7 @@ const revision=(await readFile(new URL('../deploy/caldock-revision.txt',import.m
 if(!/^[a-f0-9]{40}$/.test(revision))throw new Error('Pin a full CalDock frontend commit.');
 const destination=path.resolve(process.argv[2]||'/caldock-source');
 const repository='Yonge6/mac-mini-rental',prefix='agent-mac/';
-const rootFiles=new Set(['package.json','package-lock.json','index.html','vite.config.mjs','.openai/hosting.json','worker/index.js','scripts/prepare-sites-build.mjs']);
+const rootFiles=new Set(['package.json','package-lock.json','index.html','vite.config.mjs','.openai/hosting.json','worker/index.js','scripts/prepare-sites-build.mjs','public/robots.txt','public/sitemap.xml','public/404.html']);
 const response=await fetch(`https://api.github.com/repos/${repository}/git/trees/${revision}?recursive=1`,{headers:{'User-Agent':'CalDock-pinned-release'},signal:AbortSignal.timeout(30000)});
 if(!response.ok)throw new Error('CalDock source tree is unavailable.');
 const tree=await response.json();if(tree.truncated)throw new Error('CalDock source tree truncated.');

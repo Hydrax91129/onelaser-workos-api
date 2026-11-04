@@ -116,6 +116,11 @@ http://wodemac.com:{$PORT:10000} {
     }
     @public_assets path /assets/*
     header @public_assets Cache-Control "public, max-age=86400"
+    # Render's health check can arrive on this host; it must reach the API or deploys fail.
+    handle /healthz {
+        rewrite * /health
+        reverse_proxy 127.0.0.1:3001
+    }
     @caldock_api path /api/caldock /api/caldock/*
     handle @caldock_api {
         uri strip_prefix /api
@@ -130,5 +135,13 @@ http://wodemac.com:{$PORT:10000} {
     handle {
         root * /app/caldock
         file_server
+    }
+    handle_errors {
+        @missing expression `{http.error.status_code} == 404`
+        rewrite @missing /404.html
+        root * /app/caldock
+        file_server {
+            status 404
+        }
     }
 }
