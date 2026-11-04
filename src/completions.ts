@@ -247,7 +247,7 @@ export async function registerCompletionRoutes(app: FastifyInstance, db: Databas
     if(!o.model)return 0;
     const due=(await db.query(`SELECT c.id,c.result,c.self_review,c.attachment_ids,c.completed_by,t.id AS task_id
       FROM task_completions c JOIN tasks t ON t.id=c.task_id
-      WHERE c.superseded_at IS NULL AND c.human_score IS NULL AND c.ai_status<>'scored' AND t.board_status='done'
+      WHERE c.superseded_at IS NULL AND c.human_score IS NULL AND c.ai_status<>'scored' AND t.board_status='done' AND t.archived_at IS NULL
         AND c.created_at<=now()-interval '24 hours' AND c.ai_attempts<$1
         AND (c.ai_status<>'pending' OR c.ai_attempted_at IS NULL OR c.ai_attempted_at<now()-interval '2 minutes')
       ORDER BY c.created_at LIMIT $2`,[AUTO_SCORE_MAX_ATTEMPTS,limit])).rows;
@@ -286,7 +286,7 @@ export async function registerCompletionRoutes(app: FastifyInstance, db: Databas
         count(t.id) FILTER (WHERE t.board_status='done' AND t.board_done_at>=$3 AND f.source='ai')::int AS ai_scored,
         round(avg(f.score) FILTER (WHERE t.board_status='done' AND t.board_done_at>=$3),1)::float AS avg_score,
         count(t.id) FILTER (WHERE t.board_status<>'done' AND t.due_at<now())::int AS overdue
-      FROM users u LEFT JOIN tasks t ON t.owner_id=u.id AND t.org_id=u.org_id
+      FROM users u LEFT JOIN tasks t ON t.owner_id=u.id AND t.org_id=u.org_id AND t.archived_at IS NULL
       LEFT JOIN LATERAL (SELECT x.id,x.ai_status,x.ai_score,x.human_score FROM task_completions x WHERE x.task_id=t.id AND x.superseded_at IS NULL ORDER BY x.created_at DESC LIMIT 1) c ON true
       LEFT JOIN LATERAL (SELECT r.quality FROM reviews r WHERE r.task_id=t.id AND r.decision='accept' AND r.quality IS NOT NULL ORDER BY r.created_at DESC LIMIT 1) r ON c.id IS NULL
       LEFT JOIN LATERAL (SELECT CASE WHEN c.id IS NOT NULL THEN ${FINAL_SCORE_SQL} ELSE r.quality END AS score,

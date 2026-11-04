@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-const { githubToken, githubFileRequests, githubTreeHeaders, describeTokenUse, describeStatus, secretPath } =
+const { githubToken, githubFileRequests, githubTreeHeaders, describeTokenUse, describeStatus, fetchWithRetry, secretPath } =
   await import(new URL('../tools/github-fetch-auth.mjs', import.meta.url).href);
 const fictionalToken = 'github_pat_FICTIONAL0example';
 const file = { path: 'dist/live-app.js', sha: 'b'.repeat(40) };
@@ -46,4 +46,19 @@ test('build log says whether a token was used and never prints it', () => {
   assert.equal(describeTokenUse(fictionalToken), 'GITHUB_FETCH_TOKEN: used');
   assert.ok(!describeTokenUse(fictionalToken).includes(fictionalToken));
   assert.match(describeTokenUse(''), /not provided/);
+});
+
+test('downloads retry momentary GitHub errors but return 404 and other answers at once', async () => {
+  const run = async (statuses: (number | 'network')[]) => {
+    const seen: number[] = []; let call = 0;
+    const fetchImpl = async () => { const next = statuses[call++]; if (next === 'network') throw new Error('reset'); seen.push(next); return { status: next } as Response; };
+    try { return { status: (await fetchWithRetry('https://example.invalid', {}, { fetchImpl, wait: async () => {} })).status, calls: call }; }
+    catch { return { status: 'threw', calls: call }; }
+  };
+  assert.deepEqual(await run([503, 200]), { status: 200, calls: 2 });
+  assert.deepEqual(await run(['network', 429, 200]), { status: 200, calls: 3 });
+  assert.deepEqual(await run([503, 503, 503, 200]), { status: 503, calls: 3 });
+  assert.deepEqual(await run([404, 200]), { status: 404, calls: 1 });
+  assert.deepEqual(await run([403]), { status: 403, calls: 1 });
+  assert.deepEqual(await run(['network', 'network', 'network']), { status: 'threw', calls: 3 });
 });

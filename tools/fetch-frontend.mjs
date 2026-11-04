@@ -1,14 +1,14 @@
 import { createHash } from 'node:crypto';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { githubToken, githubFileRequests, githubTreeHeaders, describeTokenUse, describeStatus } from './github-fetch-auth.mjs';
+import { githubToken, githubFileRequests, githubTreeHeaders, describeTokenUse, describeStatus, fetchWithRetry } from './github-fetch-auth.mjs';
 
 const revision=(await readFile(new URL('../deploy/frontend-revision.txt',import.meta.url),'utf8')).trim();
 if(!/^[a-f0-9]{40}$/.test(revision)) throw new Error('Pin a full frontend commit before building.');
 const destination=path.resolve(process.argv[2]||'public');
 const repository='Hydrax91129/onelaser-workos',userAgent='OneLaser-WorkOS-release',token=githubToken();
 console.log(describeTokenUse(token));
-const treeResponse=await fetch(`https://api.github.com/repos/${repository}/git/trees/${revision}?recursive=1`,{headers:githubTreeHeaders(token,userAgent),signal:AbortSignal.timeout(30000)});
+const treeResponse=await fetchWithRetry(`https://api.github.com/repos/${repository}/git/trees/${revision}?recursive=1`,{headers:githubTreeHeaders(token,userAgent)});
 if(!treeResponse.ok) throw new Error(`Frontend tree unavailable (${describeStatus(treeResponse)}).`);
 const tree=await treeResponse.json();
 if(tree.truncated) throw new Error('Frontend tree unexpectedly truncated.');
@@ -20,8 +20,8 @@ for(const file of files){
   if(!/^[a-zA-Z0-9_./-]+$/.test(relative)||relative.split('/').includes('..')||file.mode!=='100644'||file.size>2*1024*1024)throw new Error('Unexpected frontend asset.');
   let response;
   for(const request of githubFileRequests(repository,revision,file,token,userAgent)){
-    response=await fetch(request.url,{headers:request.headers,signal:AbortSignal.timeout(30000)});
-    if(response.status!==404)break;
+    response=await fetchWithRetry(request.url,{headers:request.headers});
+    if(response.ok)break;
   }
   if(!response.ok)throw new Error(`Frontend asset unavailable (${describeStatus(response)}).`);
   const buffer=Buffer.from(await response.arrayBuffer());total+=buffer.length;

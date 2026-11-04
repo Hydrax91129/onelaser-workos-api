@@ -37,7 +37,7 @@ export async function registerInboxRoutes(app: FastifyInstance, db: Database) {
     const own = (await db.query(`SELECT i.*, (SELECT display_name FROM users WHERE id=i.actor_id) AS actor_name, (SELECT json_build_object('zh',name_zh,'en',name_en) FROM users WHERE id=i.actor_id) AS actor_names
       FROM inbox_items i WHERE i.org_id=$1 AND i.user_id=$2 AND i.created_at>$3 ORDER BY i.created_at DESC LIMIT 60`, [u.org_id, u.id, since])).rows;
     const nudges = (await db.query(`SELECT n.*, t.title AS task_title FROM task_nudges n LEFT JOIN tasks t ON t.id=n.task_id
-      WHERE n.org_id=$1 AND n.user_id=$2 AND n.created_at>$3 ORDER BY n.created_at DESC LIMIT 60`, [u.org_id, u.id, since])).rows;
+      WHERE n.org_id=$1 AND t.archived_at IS NULL AND n.user_id=$2 AND n.created_at>$3 ORDER BY n.created_at DESC LIMIT 60`, [u.org_id, u.id, since])).rows;
     const items = [
       ...own.map((r: any) => ({ id: r.id, source: 'inbox', kind: r.kind, taskId: r.task_id, title: r.title, body: r.body, actorName: r.actor_name, actorNames: r.actor_names, createdAt: r.created_at, read: !!r.read_at })),
       ...nudges.map((r: any) => { const okr = String(r.kind).startsWith('okr_') || String(r.task_id).startsWith('okr:');

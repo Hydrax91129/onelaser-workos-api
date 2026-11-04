@@ -114,7 +114,7 @@ export async function packageWiki(destination, revision) {
       let buffer;
       for (const [index, request] of requests.entries()) {
         try { buffer = await boundedFetch(request.url, file.size, request.headers); break; }
-        catch (error) { if (error.status !== 404 || index === requests.length - 1) throw error; }
+        catch (error) { if (index === requests.length - 1) throw error; }
       }
       verifyWikiBlob(file, buffer); buffers.set(file.path, buffer);
     }
