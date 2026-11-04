@@ -8,9 +8,9 @@
 
 ## 1. 系统结构
 
-- 前端 `Yonge6/onelaser-workos`：`dist/` 下的原生 JS，无构建步骤。`dist/live-app.js` 是外壳（导航、顶栏、任务抽屉），
+- 前端 `Hydrax91129/onelaser-workos`：`dist/` 下的原生 JS，无构建步骤。`dist/live-app.js` 是外壳（导航、顶栏、任务抽屉），
   各模块是独立文件，挂在 `window.WorkOSXxx` 上，由 live-app 的 `render()` 调用 `configure()` 注入 api、state、lang 等。
-- 后端 `Yonge6/onelaser-workos-api`：Fastify + TypeScript，PostgreSQL（本地测试用 PGlite），参数校验用 zod。
+- 后端 `Hydrax91129/onelaser-workos-api`：Fastify + TypeScript，PostgreSQL（本地测试用 PGlite），参数校验用 zod。
   每个模块一个文件，导出 `xxxSchema`（建表 SQL，汇总到 `src/db.ts` 的 `schema`）和 `registerXxxRoutes`（在 `src/app.ts` 注册）。
 - 上线：后端仓库 `deploy/frontend-revision.txt` 写死前端的 commit，Docker 构建时拉取这个版本的前端。线上服务在 Render（onelaser-workos-migration）。
 
