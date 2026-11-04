@@ -12,8 +12,11 @@ const clock=()=>new Date('2026-11-02T10:00:00Z').getTime();
 async function setup(hr:{dataKey?:string;previousKeys?:string[]}={dataKey:KEY},db?:Database){
  if(!db){db=await createDatabase();await db.exec(schema);await seedDemo(db);
   // m2 reports to m1; m4 is HR (and a manager of another department)
-  await db.query("UPDATE users SET manager_id='m1' WHERE id='m2'");}
- const app=await buildApp({db,integrations:{executiveUserIds:['m1']},hr:{userIds:['m4'],...hr},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0,clock,closeDatabase:false});
+  await db.query("UPDATE users SET manager_id='m1' WHERE id='m2'");
+  // m4 is HR for China (granted per person; WORKOS_HR_USER_IDS no longer opens anything) and everyone here is in China.
+  await db.query(`UPDATE users SET grants='["hr_cn_manage"]' WHERE id='m4'`);
+  await db.query("INSERT INTO hr_profiles(user_id,org_id,region,version) SELECT id,org_id,'cn',0 FROM users ON CONFLICT DO NOTHING");}
+ const app=await buildApp({db,integrations:{executiveUserIds:['m6']},hr:{userIds:['m4'],...hr},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0,clock,closeDatabase:false});
  const tokens:Record<string,string>={};
  const call=async(who:string,method:'GET'|'POST'|'PUT'|'DELETE',url:string,payload?:any,lang='zh')=>{tokens[who]??=(await issueSession(db!,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who],'accept-language':lang}});};
  return {db,app,call};
@@ -23,8 +26,8 @@ test('HR records: who sees whom, versioned profile edits and history',async()=>{
  const {db,app,call}=await setup();
  try{
   assert.equal((await call('m3','GET','/capabilities')).json().hr,true);
-  assert.deepEqual((await call('m4','GET','/hr/access')).json(),{isHr:true,hasReports:false,sensitive:'configured'});
-  assert.equal((await call('m1','GET','/hr/access')).json().isHr,false,'company admins are not HR by default');
+  assert.deepEqual((await call('m4','GET','/hr/access')).json(),{isHr:true,global:false,regions:{us:null,cn:'manage',intl:null},hasReports:false,sensitive:'configured'});
+  assert.equal((await call('m1','GET','/hr/access')).json().isHr,false,'company admins are not HR by default (m1 is a manager, not the owner)');
   assert.deepEqual((await call('m3','GET','/hr/people')).json().items.map((p:any)=>p.id),['m3'],'employees see only themselves');
   assert.deepEqual((await call('m1','GET','/hr/people')).json().items.map((p:any)=>p.id).sort(),['m1','m2'],'managers see their reports');
   assert.equal((await call('m4','GET','/hr/people')).json().items.length,6,'HR sees everyone');
@@ -46,7 +49,7 @@ test('HR records: who sees whom, versioned profile edits and history',async()=>{
   assert.equal(mgr.profile.notes,undefined);assert.equal(mgr.secrets,undefined);assert.equal(mgr.salary,undefined);assert.equal(mgr.documents,undefined);
   assert.ok(!mgr.events.some((e:any)=>e.kind==='warning'),'managers do not see warnings');
   const self=(await call('m2','GET','/hr/people/m2')).json();
-  assert.equal(self.access,'self');assert.equal(self.profile.notes,undefined,'internal HR notes stay with HR');assert.ok(self.secrets);
+  assert.equal(self.access,'basic');assert.equal(self.profile.notes,undefined,'internal HR notes stay with HR');assert.equal(self.secrets,undefined,'people see only basics of their own record');
 
   const audit=(await db.query("SELECT details FROM audit_events WHERE action='hr.profile.update'")).rows;
   assert.ok(audit.length>=2);assert.ok(!JSON.stringify(audit).includes('HR only note'),'audit holds field names, not values');
@@ -56,42 +59,40 @@ test('HR records: who sees whom, versioned profile edits and history',async()=>{
  }finally{await app.close();await db.close();}
 });
 
-test('HR sensitive data: encrypted at rest, masked in reads, revealed only with an audited request',async()=>{
+test('HR sensitive data: encrypted at rest, shown in full to whoever may read the record, never to managers',async()=>{
  const {db,app,call}=await setup();
  try{
-  const put=await call('m4','PUT','/hr/people/m2/secrets',{idNumber:'110101199001011234',bankAccount:'6222 0200 1234 5678',emergencyPhone:'13800138000'});
+  const put=await call('m4','PUT','/hr/people/m2/secrets',{idNumber:'TEST-0000-0000-1234',bankAccount:'0000 0000 1234 5678',emergencyPhone:'000-000-0000'});
   assert.equal(put.statusCode,200,put.body);
   const rows=(await db.query("SELECT * FROM hr_secrets WHERE user_id='m2'")).rows;
   assert.equal(rows.length,3);
-  for(const r of rows)for(const plain of ['110101199001011234','6222','13800138000'])assert.ok(!r.ciphertext.includes(plain),'no plaintext in the database');
+  for(const r of rows)for(const plain of ['TEST-0000','0000 0000','000-000-0000'])assert.ok(!r.ciphertext.includes(plain),'no plaintext in the database');
   assert.equal((await call('m4','POST','/hr/people/m2/salary',{effectiveDate:'2026-01-01',base:12000,allowance:800,reason:'年度调薪'})).statusCode,201);
   assert.ok(!JSON.stringify((await db.query("SELECT ciphertext FROM hr_salary")).rows).includes('12000'));
 
   const view=(await call('m4','GET','/hr/people/m2')).json();
-  assert.deepEqual(view.secrets.idNumber.hint,'****1234');assert.equal(view.secrets.bankAccount.hint,'****5678');
-  assert.equal(view.salary.set,true);assert.equal(view.salary.latestEffective,'2026-01-01');assert.ok(!JSON.stringify(view).includes('12000'));
-
-  assert.equal((await call('m1','POST','/hr/people/m2/reveal',{field:'idNumber',reason:'核对合同'})).statusCode,403,'managers never see sensitive values');
-  assert.equal((await call('m1','PUT','/hr/people/m2/secrets',{idNumber:'X1234'})).statusCode,403);
-  assert.equal((await call('m4','POST','/hr/people/m2/reveal',{field:'idNumber'})).statusCode,400,'HR must give a reason');
-  const r=await call('m4','POST','/hr/people/m2/reveal',{field:'idNumber',reason:'办理社保'});
-  assert.equal(r.json().value,'110101199001011234');
-  const sal=(await call('m4','POST','/hr/people/m2/reveal',{field:'salary',reason:'核对工资单'})).json().value;
+  assert.equal(view.secrets.idNumber.value,'TEST-0000-0000-1234','no masking: HR for the region sees the full value');assert.equal(view.secrets.bankAccount.value,'0000 0000 1234 5678');
+  assert.equal(view.salary.set,true);assert.equal(view.salary.latestEffective,'2026-01-01');
+  const sal=view.salary.list;
   assert.equal(sal[0].base,12000);assert.equal(sal[0].allowance,800);assert.equal(sal[0].currency,'CNY');assert.equal(sal[0].reason,'年度调薪');
-  assert.equal((await call('m2','POST','/hr/people/m2/reveal',{field:'bankAccount'})).json().value,'6222 0200 1234 5678','people can see their own');
-  assert.equal((await call('m3','POST','/hr/people/m2/reveal',{field:'bankAccount'})).statusCode,404);
 
-  const reveals=(await db.query("SELECT actor_id,owner_id,details FROM audit_events WHERE action='hr.sensitive.reveal' ORDER BY created_at")).rows;
-  assert.equal(reveals.length,3);assert.equal(reveals[0].actor_id,'m4');assert.equal(reveals[0].owner_id,'m2');
-  assert.ok(!JSON.stringify(reveals).includes('110101'),'the audit never holds the value');
-  assert.match(JSON.stringify(reveals),/办理社保/);
+  const mgr=(await call('m1','GET','/hr/people/m2')).json();
+  assert.equal(mgr.secrets,undefined);assert.equal(mgr.salary,undefined);assert.ok(!JSON.stringify(mgr).includes('TEST-0000'),'managers never see sensitive values');
+  assert.equal((await call('m1','POST','/hr/people/m2/reveal',{field:'idNumber'})).statusCode,403);
+  assert.equal((await call('m1','PUT','/hr/people/m2/secrets',{idNumber:'X1234'})).statusCode,403);
+  const own=(await call('m2','GET','/hr/people/m2')).json();
+  assert.equal(own.access,'basic');assert.equal(own.secrets,undefined,'people see only the basic facts of their own record');
+  for(const url of ['/hr/people/m2/payroll'])assert.equal((await call('m2','GET',url)).statusCode,403);
+  assert.equal((await call('m2','POST','/hr/people/m2/reveal',{field:'bankAccount'})).statusCode,403);
+  assert.equal((await call('m3','GET','/hr/people/m2')).statusCode,404);
+  assert.equal((await db.query("SELECT count(*)::int n FROM audit_events WHERE action LIKE 'hr.%view%' OR action='hr.sensitive.reveal'")).rows[0].n,0,'reading is not logged');
 
   // clearing a field removes it; a ciphertext moved onto another person does not decrypt
   assert.equal((await call('m4','PUT','/hr/people/m2/secrets',{emergencyPhone:''})).json().updated[0],'emergencyPhone');
   assert.equal((await call('m4','GET','/hr/people/m2')).json().secrets.emergencyPhone.set,false);
   await db.query("INSERT INTO hr_secrets(org_id,user_id,field,ciphertext,key_id,hint,updated_by) SELECT org_id,'m3',field,ciphertext,key_id,hint,updated_by FROM hr_secrets WHERE user_id='m2' AND field='id_number'");
-  const moved=await call('m4','POST','/hr/people/m3/reveal',{field:'idNumber',reason:'核对搬移后的资料'});
-  assert.equal(moved.statusCode,409);assert.equal(moved.json().error.code,'HR_DECRYPT_FAILED');
+  const moved=await call('m4','GET','/hr/people/m3');
+  assert.equal(moved.statusCode,200);assert.equal(moved.json().secrets.idNumber.value,null,'a moved ciphertext does not decrypt');
  }finally{await app.close();await db.close();}
 });
 
@@ -99,7 +100,7 @@ test('HR data key: missing or invalid key disables only sensitive features; rota
  assert.equal(keyringFrom({}).status,'not_configured');
  assert.equal(keyringFrom({dataKey:'short'}).status,'invalid_key');
  const first=await setup();
- await first.call('m4','PUT','/hr/people/m2/secrets',{idNumber:'110101199001011234'});
+ await first.call('m4','PUT','/hr/people/m2/secrets',{idNumber:'TEST-0000-0000-1234'});
  await first.app.close();
  const db=first.db;
  try{
@@ -113,7 +114,7 @@ test('HR data key: missing or invalid key disables only sensitive features; rota
 
   const NEW=randomBytes(32).toString('base64');
   const rotated=await setup({dataKey:NEW,previousKeys:[KEY]},db);
-  assert.equal((await rotated.call('m4','POST','/hr/people/m2/reveal',{field:'idNumber',reason:'轮换后核对'})).json().value,'110101199001011234');
+  assert.equal((await rotated.call('m4','POST','/hr/people/m2/reveal',{field:'idNumber',reason:'轮换后核对'})).json().value,'TEST-0000-0000-1234');
   await rotated.app.close();
   const lost=await setup({dataKey:NEW},db);
   const gone=await lost.call('m4','POST','/hr/people/m2/reveal',{field:'idNumber',reason:'旧密钥已删'});
@@ -134,11 +135,11 @@ test('HR documents: encrypted files, HR and the person only, type and size limit
   assert.equal((await call('m2','POST','/hr/people/m2/documents',{kind:'other',name:'a.pdf',mime:'application/pdf',dataBase64:pdf.toString('base64')})).statusCode,403,'only HR uploads');
   const doc=(await call('m4','GET','/hr/people/m2')).json().documents[0];
   assert.equal(doc.name,'劳动合同.pdf');assert.equal(doc.daysToExpiry,18);
-  const own=await call('m2','GET',`/hr/people/m2/documents/${docId}`);
-  assert.equal(own.statusCode,200);assert.equal(own.headers['content-type'],'application/pdf');assert.equal(own.headers['cache-control'],'no-store');
-  assert.deepEqual(own.rawPayload,pdf);
+  assert.equal((await call('m2','GET',`/hr/people/m2/documents/${docId}`)).statusCode,403,'people do not download their own HR files (self-service is phase 2)');
+  const hrDl=await call('m4','GET',`/hr/people/m2/documents/${docId}`);
+  assert.equal(hrDl.statusCode,200);assert.equal(hrDl.headers['content-type'],'application/pdf');assert.equal(hrDl.headers['cache-control'],'no-store');
+  assert.deepEqual(hrDl.rawPayload,pdf);
   assert.equal((await call('m1','GET',`/hr/people/m2/documents/${docId}`)).statusCode,403,'managers cannot open documents');
-  assert.ok((await db.query("SELECT 1 FROM audit_events WHERE action='hr.document.view'")).rows.length===1);
   assert.equal((await call('m4','DELETE',`/hr/people/m2/documents/${docId}`)).statusCode,200);
   assert.equal((await call('m4','GET','/hr/people/m2')).json().documents.length,0);
  }finally{await app.close();await db.close();}

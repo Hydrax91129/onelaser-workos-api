@@ -60,7 +60,8 @@ test('second leader sees what the first leader sees: tasks, OKRs, projects, team
    const team=(await call(who,'GET','/reports/team')).json().members.find((m:any)=>m.id==='m2');assert.ok(team,who+' has m2 in the team report');
    assert.equal(team.line,who==='m4'?'second':'first');
    const hr=await call(who,'GET','/hr/people/m2');assert.equal(hr.statusCode,200,who+' sees the non-sensitive HR profile like any leader');
-   assert.equal((await call(who,'POST','/hr/people/m2/reveal',{field:'salary',reason:'curious'})).statusCode,403,who+' never sees salary');
+   // m1 is also the company owner here, and owners see all HR data (hr.ts); being a leader alone never opens salary.
+   if(who!=='m1')assert.equal((await call(who,'POST','/hr/people/m2/reveal',{field:'salary',reason:'curious'})).statusCode,403,who+' never sees salary');
   }
   // The project stays editable only by its members (same as for the first leader).
   assert.equal((await call('m4','PATCH',`/projects/${project.json().id}`,{name:'Renamed by a leader'})).statusCode,403);
