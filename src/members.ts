@@ -146,7 +146,7 @@ export async function registerMemberRoutes(app: FastifyInstance, db: Database, o
       const reports = (await tx.query('UPDATE users SET manager_id=$2 WHERE manager_id=$1 AND org_id=$3 RETURNING id', [member.id, member.manager_id && member.manager_id !== member.id ? member.manager_id : null, user.org_id])).rows.length;
       let owned = 0, reviewing = 0;
       if (heir) {
-        const open = "status<>'accepted' AND COALESCE(board_status,'')<>'done'";
+        const open = "status<>'accepted' AND COALESCE(board_status,'')<>'done' AND archived_at IS NULL";
         const ownedRows = (await tx.query(`SELECT id,reviewer_id FROM tasks WHERE org_id=$1 AND owner_id=$2 AND ${open}`, [user.org_id, member.id])).rows;
         for (const t of ownedRows) {
           let reviewer = t.reviewer_id;
@@ -168,8 +168,8 @@ export async function registerMemberRoutes(app: FastifyInstance, db: Database, o
   app.get<{ Params: { id: string } }>('/org/members/:id/open-tasks', async req => {
     const user = requireAdmin(req), target = id.parse(req.params.id);
     const row = (await db.query(`SELECT
-        (SELECT count(*)::int FROM tasks WHERE org_id=$1 AND owner_id=$2 AND status<>'accepted' AND COALESCE(board_status,'')<>'done') AS owned,
-        (SELECT count(*)::int FROM tasks WHERE org_id=$1 AND reviewer_id=$2 AND status<>'accepted' AND COALESCE(board_status,'')<>'done') AS reviewing,
+        (SELECT count(*)::int FROM tasks WHERE org_id=$1 AND owner_id=$2 AND archived_at IS NULL AND status<>'accepted' AND COALESCE(board_status,'')<>'done') AS owned,
+        (SELECT count(*)::int FROM tasks WHERE org_id=$1 AND reviewer_id=$2 AND archived_at IS NULL AND status<>'accepted' AND COALESCE(board_status,'')<>'done') AS reviewing,
         (SELECT count(*)::int FROM users WHERE org_id=$1 AND manager_id=$2) AS reports`, [user.org_id, target])).rows[0];
     return row;
   });

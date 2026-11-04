@@ -3,7 +3,8 @@ import type { User } from './auth.js';
 // Once the org has reporting lines, a user sees tasks they own, review, or that belong to anyone below them.
 // Before any reporting line exists, the original department rule applies so nothing disappears during rollout.
 export function visibleTask(user: User, task: any) {
-  if (!task || task.org_id !== user.org_id) return false;
+  // A deleted (archived) task is gone for everyone until it is restored.
+  if (!task || task.org_id !== user.org_id || task.archived_at) return false;
   if (task.owner_id === user.id || task.reviewer_id === user.id) return true;
   if (Array.isArray(user.visibleOwnerIds)) return user.visibleOwnerIds.includes(task.owner_id);
   return user.role === 'manager' && task.department_id === user.department_id;
