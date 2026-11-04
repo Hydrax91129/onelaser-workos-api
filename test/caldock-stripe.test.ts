@@ -181,6 +181,47 @@ test('three first-period seats a day: 20% off once, weekly excluded, a cancelled
   }finally{await db.query("UPDATE caldock_orders SET offer_day=NULL");await offerApp.close();}
 });
 
+test('paid orders update the live stock, mail the owners once, and sold-out stops new orders',async()=>{
+  const sent:{to:string;subject:string;text:string}[]=[];let failing=false;
+  const stockApp=await buildApp({db,environment:'production',closeDatabase:false,mailer:async m=>{if(failing)throw new Error('down');sent.push(m);},caldock:{publicUrl:origin,providers:gateways,stripe,liveStock:true,orderNotifyEmails:['a@example.test','b@example.test']}});
+  const signIn=async(code:string)=>{
+    const start=await stockApp.inject('/caldock/auth/google/start?next=account&lang=zh&interval=month');
+    const state=new URL(start.headers.location!).searchParams.get('state')!,flow=cookieList(start).map(c=>c.split(';')[0]).join('; ');
+    const back=await stockApp.inject({url:`/caldock/auth/google/callback?state=${state}&code=${code}`,headers:{cookie:flow}});
+    const cookie=cookieList(back).find(c=>c.startsWith('__Host-caldock_session='))!.split(';')[0];
+    return {cookie,csrf:(await stockApp.inject({url:'/caldock/me',headers:{cookie}})).json().csrfToken};
+  };
+  const order=(who:{cookie:string;csrf:string})=>stockApp.inject({method:'POST',url:'/caldock/orders',payload:{interval:'month',requestKey:randomUUID()},headers:{cookie:who.cookie,origin,'x-csrf-token':who.csrf}});
+  const pay=(event:Record<string,unknown>)=>{const payload=JSON.stringify({livemode:false,...event});return stockApp.inject({method:'POST',url:'/caldock/stripe/webhook',payload,headers:{'content-type':'application/json','stripe-signature':signStripePayload(payload,webhookSecret)}});};
+  const stock=async()=>(await stockApp.inject('/caldock/capabilities')).json().stock;
+  try{
+    await db.query("UPDATE caldock_orders SET paid_at='2026-01-01' WHERE paid_at IS NOT NULL");
+    assert.deepEqual(await stock(),{total:10,rented:7,left:3});
+    const buyer=await order(await signIn('stock-1')),id=buyer.json().id,event=completed(id,'cs_stock_1',19900);
+    assert.deepEqual(await stock(),{total:10,rented:7,left:3}); // an unpaid order holds no Mac
+    assert.equal((await pay(event)).statusCode,200);
+    assert.deepEqual(await stock(),{total:10,rented:8,left:2});
+    assert.deepEqual(sent.map(m=>m.to),['a@example.test','b@example.test']);
+    assert.match(sent[0].subject,/新订单.*月付 \$199\.00/);assert.match(sent[0].text,/stock-1@example\.test/);assert.match(sent[0].text,/剩余 2 台/);
+    assert.equal((await pay({...event,id:'evt_'+randomUUID()})).statusCode,200);assert.equal(sent.length,2); // a redelivered payment mails nobody
+    failing=true;
+    const second=(await order(await signIn('stock-2'))).json().id;
+    assert.equal((await pay(completed(second,'cs_stock_2',19900))).statusCode,200); // mail down, payment still recorded
+    assert.equal((await db.query('SELECT status FROM caldock_orders WHERE id=$1',[second])).rows[0].status,'paid');
+    assert.equal((await db.query("SELECT count(*)::int AS n FROM caldock_audit WHERE action='notify.order_mail_failed' AND object_id=$1",[second])).rows[0].n,1);
+    failing=false;
+    const third=(await order(await signIn('stock-3'))).json().id;
+    await pay(completed(third,'cs_stock_3',19900));
+    assert.deepEqual(await stock(),{total:10,rented:10,left:0});
+    const late=await order(await signIn('stock-4'));
+    assert.equal(late.statusCode,409);assert.equal(late.json().error.code,'CALDOCK_SOLD_OUT');
+    await db.query("UPDATE caldock_orders SET billing_ends_at=now()-interval '4 days' WHERE id=$1",[third]); // lapsed past the grace
+    assert.equal((await stock()).left,1);
+    await db.query("UPDATE caldock_orders SET status='refunded' WHERE id=$1",[second]);
+    assert.equal((await stock()).left,2);
+  }finally{await db.query("UPDATE caldock_orders SET paid_at='2026-01-01' WHERE paid_at IS NOT NULL");await stockApp.close();}
+});
+
 test('the launch commission default applies once and never overrides a later admin choice',async()=>{
   assert.equal((await db.query('SELECT commission_bps FROM caldock_settings WHERE id=1')).rows[0].commission_bps,2000);
   await db.query('UPDATE caldock_settings SET commission_bps=0 WHERE id=1');

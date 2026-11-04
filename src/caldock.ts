@@ -5,13 +5,14 @@ import type { Database, Queryable } from './db.js';
 import { hash, sameSecret, readCookie } from './auth.js';
 import { deny } from './errors.js';
 import { createCaldockGateway, type CaldockGateway, type CaldockProvider } from './caldock-oidc.js';
-import { applyCaldockOffer, recordCaldockRenewalCommission, caldockAudit, caldockOfferStatus, CALDOCK_OFFER, CALDOCK_PRICES, createCaldockOrder, recordVerifiedCaldockPayment } from './caldock-domain.js';
+import { applyCaldockOffer, recordCaldockRenewalCommission, caldockAudit, caldockOfferStatus, caldockStockStatus, CALDOCK_OFFER, CALDOCK_PRICES, createCaldockOrder, recordVerifiedCaldockPayment } from './caldock-domain.js';
 import { ApiError } from './errors.js';
+import type { Mailer } from './members.js';
 import { isStaleTestSession, stripeFromEnv, verifyStripeEvent, StripeRequestError, STRIPE_RECURRING, type CaldockStripe } from './caldock-stripe.js';
 
 type Customer = {id:string;display_name:string;email:string|null;active:boolean;created_at:string};
 type Session = {user:Customer;csrf:string;token:string};
-export type CaldockOptions = {publicUrl?:string;siteUrl?:string;firstPeriodOffer?:boolean;marketingUrl?:string;secureCookies?:boolean;adminUserIds?:string[];providers?:Partial<Record<CaldockProvider,CaldockGateway>>;stripe?:CaldockStripe};
+export type CaldockOptions = {publicUrl?:string;siteUrl?:string;firstPeriodOffer?:boolean;liveStock?:boolean;mailer?:Mailer|null;orderNotifyEmails?:string[];marketingUrl?:string;secureCookies?:boolean;adminUserIds?:string[];providers?:Partial<Record<CaldockProvider,CaldockGateway>>;stripe?:CaldockStripe};
 const id=z.string().uuid(),providerName=z.enum(['google','apple']);
 const status=z.enum(['pending_payment','paid','provisioning','active','cancelled','refunded']);
 const interval=z.enum(['week','month','quarter','half','year']);
@@ -34,7 +35,7 @@ export function caldockOptionsFromEnv(env:NodeJS.ProcessEnv):CaldockOptions {
   let stripe:CaldockStripe|undefined;
   // A Stripe misconfiguration disables CalDock payments only; it must never stop the shared Work OS service.
   try{stripe=stripeFromEnv(env);}catch(error){console.error('CalDock payments disabled: '+(error as Error).message);}
-  return {stripe,firstPeriodOffer:true,publicUrl:env.APP_PUBLIC_URL||env.RENDER_EXTERNAL_URL||'http://localhost:4173',siteUrl:'https://wodemac.com',secureCookies:env.NODE_ENV==='production',marketingUrl:env.CALDOCK_MARKETING_URL||'https://yonge6.github.io/mac-mini-rental/',adminUserIds:(env.CALDOCK_ADMIN_USER_IDS||'').split(',').map(x=>x.trim()).filter(Boolean),providers};
+  return {stripe,firstPeriodOffer:true,liveStock:true,orderNotifyEmails:(env.CALDOCK_ORDER_NOTIFY_EMAILS||'').split(',').map(x=>x.trim()).filter(Boolean),publicUrl:env.APP_PUBLIC_URL||env.RENDER_EXTERNAL_URL||'http://localhost:4173',siteUrl:'https://wodemac.com',secureCookies:env.NODE_ENV==='production',marketingUrl:env.CALDOCK_MARKETING_URL||'https://yonge6.github.io/mac-mini-rental/',adminUserIds:(env.CALDOCK_ADMIN_USER_IDS||'').split(',').map(x=>x.trim()).filter(Boolean),providers};
 }
 export async function registerCaldockRoutes(app:FastifyInstance,db:Database,options:CaldockOptions={}) {
   const publicUrl=new URL(options.publicUrl||'http://localhost:4173');
@@ -45,6 +46,7 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
   const market=new URL(options.siteUrl||options.marketingUrl||'https://yonge6.github.io/mac-mini-rental/');
   if(!['http:','https:'].includes(market.protocol)||market.username||market.password)throw new Error('Invalid CalDock marketing URL');
   const stripe=options.stripe;
+  const requireStock=async()=>{if(options.liveStock&&(await caldockStockStatus(db)).left===0)deny(409,'CALDOCK_SOLD_OUT','All Macs are rented right now');};
   const viaStripe=async<T>(call:()=>Promise<T>):Promise<T>=>{try{return await call();}catch(error){if(error instanceof StripeRequestError)deny(502,'CALDOCK_PAYMENT_PROVIDER_ERROR','The payment provider could not complete the request; try again');throw error;}};
   const stopStripeRenewal=async(subscriptionId:string|null)=>{if(stripe&&subscriptionId)await viaStripe(()=>stripe.request('POST','/v1/subscriptions/'+encodeURIComponent(subscriptionId),{cancel_at_period_end:'true'},'caldock-stop-'+subscriptionId));};
   const sessions=new WeakMap<FastifyRequest,Session>();
@@ -90,7 +92,7 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
         if(typeof supplied!=='string'||!sameSecret(supplied,csrf_token))deny(403,'CALDOCK_CSRF_INVALID','Request origin or security token is invalid');
       }
     });
-    routes.get('/capabilities',async req=>({service:'caldock',offer:options.firstPeriodOffer?await caldockOfferStatus(db):null,accountApp:originFor(req)+appPath(req),providers:{google:!!providers.google,apple:!!providers.apple},payments:!!stripe,paymentMode:stripe?.mode??null,currency:'USD',prices:CALDOCK_PRICES,auth:{session:'httpOnlyCookie',csrf:true},referrals:{attributionDays:30,automaticPayouts:false}}));
+    routes.get('/capabilities',async req=>({service:'caldock',offer:options.firstPeriodOffer?await caldockOfferStatus(db):null,stock:options.liveStock?await caldockStockStatus(db):null,accountApp:originFor(req)+appPath(req),providers:{google:!!providers.google,apple:!!providers.apple},payments:!!stripe,paymentMode:stripe?.mode??null,currency:'USD',prices:CALDOCK_PRICES,auth:{session:'httpOnlyCookie',csrf:true},referrals:{attributionDays:30,automaticPayouts:false}}));
     routes.post('/referral-visits',async(req,reply)=>{checkOrigin(req);limit(req);const input=z.object({code:z.string().regex(/^[A-Z0-9]{12}$/)}).strict().parse(req.body);await referral(req,reply,input.code);return {recorded:true};});
     for(const provider of ['google','apple'] as const){
       routes.get(`/auth/${provider}/start`,async(req,reply)=>{
@@ -136,10 +138,11 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
     routes.patch('/profile',async req=>{const current=actor(req),input=z.object({displayName:z.string().trim().min(1).max(100)}).strict().parse(req.body);return (await db.query('UPDATE caldock_users SET display_name=$2 WHERE id=$1 RETURNING id,display_name,email',[current.user.id,input.displayName])).rows[0];});
     routes.get('/orders',async req=>({items:(await db.query('SELECT * FROM caldock_orders WHERE customer_id=$1 ORDER BY created_at DESC LIMIT 100',[actor(req).user.id])).rows}));
     routes.get<{Params:{id:string}}>('/orders/:id',async req=>{const row=(await db.query('SELECT * FROM caldock_orders WHERE id=$1 AND customer_id=$2',[id.parse(req.params.id),actor(req).user.id])).rows[0];if(!row)deny(404,'NOT_FOUND','Order not found');return row;});
-    routes.post('/orders',async(req,reply)=>{const input=z.object({interval,requestKey:id}).strict().parse(req.body);return reply.code(201).send(await createCaldockOrder(db,actor(req).user.id,input.interval,input.requestKey));});
+    routes.post('/orders',async(req,reply)=>{const input=z.object({interval,requestKey:id}).strict().parse(req.body);await requireStock();return reply.code(201).send(await createCaldockOrder(db,actor(req).user.id,input.interval,input.requestKey));});
     routes.post<{Params:{id:string}}>('/orders/:id/checkout',async req=>{
       const current=actor(req),input=z.object({lang:z.enum(['zh','en']).default('zh')}).strict().parse(req.body||{});
       if(!stripe)deny(503,'CALDOCK_PAYMENTS_UNAVAILABLE','Online payment is not available yet');
+      await requireStock();
       return db.transaction(async tx=>{
         // Row lock: one hosted payment page per order, so a customer cannot pay twice in parallel tabs.
         let order=(await tx.query('SELECT * FROM caldock_orders WHERE id=$1 AND customer_id=$2 FOR UPDATE',[id.parse(req.params.id),current.user.id])).rows[0];
@@ -239,10 +242,27 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
       return {received:true};
     });
   });
+  // Runs after the payment is committed: a mail failure is audited and never fails the webhook.
+  async function notifyNewOrder(orderId:string) {
+    const mailer=options.mailer,recipients=options.orderNotifyEmails||[];
+    if(!recipients.length)return;
+    if(!mailer){await caldockAudit(db,null,'notify.order_mail_unavailable',orderId,{});return;}
+    try{
+      const order=(await db.query('SELECT o.*,u.display_name,u.email FROM caldock_orders o JOIN caldock_users u ON u.id=o.customer_id WHERE o.id=$1',[orderId])).rows[0];
+      const stock=await caldockStockStatus(db),amount='$'+(order.amount_cents/100).toLocaleString('en-US',{minimumFractionDigits:2});
+      const plan=({week:'周付',month:'月付',quarter:'季付',half:'半年付',year:'年付'} as Record<string,string>)[order.interval]||order.interval,short=order.id.slice(0,8).toUpperCase();
+      const lines=[`订单号：#${short}`,`方案：${plan}`,`实付：${amount}${order.offer_day?'（限时 8 折）':''}`,`客户：${order.display_name}${order.email?' <'+order.email+'>':''}`,`库存：共 ${stock.total} 台，已租出 ${stock.rented} 台，剩余 ${stock.left} 台`,`交付后台：${market.origin}/?view=admin`];
+      const esc=(s:string)=>s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
+      const subject=`${stripe?.mode==='test'?'[测试] ':''}wodeMac 新订单 #${short} · ${plan} ${amount}`;
+      const sent=await Promise.allSettled(recipients.map(to=>mailer({to,subject,text:lines.join('\n'),html:lines.map(l=>`<p>${esc(l)}</p>`).join('')})));
+      const failed=sent.filter(r=>r.status==='rejected').length;
+      if(failed)await caldockAudit(db,null,'notify.order_mail_failed',orderId,{failed});
+    }catch{await caldockAudit(db,null,'notify.order_mail_failed',orderId,{}).catch(()=>{});}
+  }
   async function handleStripeEvent(event:any) {
     const object=event.data.object;
     const record=async(fields:{orderId:string;type:'paid'|'refunded';eventId:string;amountCents:number;currency:string})=>{
-      try{await recordVerifiedCaldockPayment(db,fields);}
+      try{const result=await recordVerifiedCaldockPayment(db,fields);if(fields.type==='paid'&&!result.duplicate)await notifyNewOrder(fields.orderId);}
       catch(error){
         // Deterministic rejections (state, amount) are kept for manual review instead of endless provider retries.
         if(!(error instanceof ApiError)||error.status>=500)throw error;

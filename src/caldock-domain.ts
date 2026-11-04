@@ -5,6 +5,14 @@ import { deny } from './errors.js';
 export const CALDOCK_PRICES = Object.freeze({ week:6900, month:19900, quarter:53700, half:95400, year:166800 });
 // Daily first-period offer. Seats are counted here on the server; the page only displays them.
 export const CALDOCK_OFFER = Object.freeze({ percentOff:20, dailySeats:3, utcOffsetHours:8, holdMinutes:32, sessionMinutes:31, couponId:'caldock-first-period-20', excluded:['week'] });
+// Launch stock. Seven Macs were rented before online sales; orders paid from countFrom on are added to them.
+// A rental frees its Mac once its paid period has ended; the grace leaves room for a late renewal charge.
+export const CALDOCK_STOCK = Object.freeze({ total:10, rentedBefore:7, countFrom:'2026-11-04T00:00:00Z', graceDays:3 });
+export async function caldockStockStatus(db:Queryable) {
+  const row=(await db.query("SELECT count(*)::int AS rented FROM caldock_orders WHERE status IN ('paid','provisioning','active') AND paid_at>=$1::timestamptz AND (billing_ends_at IS NULL OR billing_ends_at+make_interval(days=>$2::int)>now())",[CALDOCK_STOCK.countFrom,CALDOCK_STOCK.graceDays])).rows[0];
+  const rented=Math.min(CALDOCK_STOCK.total,CALDOCK_STOCK.rentedBefore+Number(row.rented));
+  return {total:CALDOCK_STOCK.total,rented,left:CALDOCK_STOCK.total-rented};
+}
 const offerDay=(now:number)=>new Date(now+CALDOCK_OFFER.utcOffsetHours*3600000).toISOString().slice(0,10);
 const offerResetsAt=(now:number)=>new Date(Date.parse(offerDay(now)+'T00:00:00Z')+(24-CALDOCK_OFFER.utcOffsetHours)*3600000).toISOString();
 async function offerSeatsUsed(db:Queryable,day:string,excludeOrderId:string|null) {
