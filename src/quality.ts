@@ -87,7 +87,7 @@ export async function factoryUserIds(db: Queryable, o: QualityOptions, orgId: st
   return new Set(rows.map((r: any) => r.id as string).filter(id => !leads.has(id)));
 }
 /* Factory accounts are outside staff: besides the quality pages they may only manage their own session and
- * profile, and send bug reports / ideas. Everything else in CraftOS (tasks, OKRs, people, products, prices, stock, support…) is refused. */
+ * profile, and send bug reports / ideas. Everything else in WorkOS (tasks, OKRs, people, products, prices, stock, support…) is refused. */
 const FACTORY_PATHS = [/^\/me(?:\/(?:profile|avatar|password))?$/, /^\/auth\/(?:session|csrf)$/, /^\/quality(?:\/.*)?$/, /^\/inbox(?:\/read)?$/, /^\/translate$/];
 export const factoryPathAllowed = (method: string, path: string) => FACTORY_PATHS.some(re => re.test(path)) || (method === 'POST' && path === '/feedback');
 

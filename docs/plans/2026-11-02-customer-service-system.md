@@ -1,6 +1,6 @@
 # 客服系统（Customer Service OS）规划
 
-**目标：** 把口碑监控、工单分析、客服政策、产品问题追踪、知识库五件事放进 CraftOS，形成一个闭环：
+**目标：** 把口碑监控、工单分析、客服政策、产品问题追踪、知识库五件事放进 WorkOS，形成一个闭环：
 外部声音 / 工单 → 归类 → 标准答案或产品问题 → 工厂整改 → 知识库更新 → AI 下次直接调用。
 
 **原则：** 复用现有模块（support.ts、public-wiki.ts、quality.js、rma.ts），新增部分也遵循相同模式：
@@ -93,5 +93,5 @@ Fastify + PostgreSQL、审计日志、人工确认后才生效，AI 只做建议
 ## 待确认
 - 口碑监控：具体平台清单；是否接受付费数据服务（如 Brand24、Trustpilot API）
 - 官网 /support 的技术架构（Shopify？）和是否直接替换现有 wiki.1laser.com
-- 工厂是否需要登录 CraftOS 填写方案，还是由我们的人代填
+- 工厂是否需要登录 WorkOS 填写方案，还是由我们的人代填
 - 现有政策文档在哪里（Zoho、钉钉文档、Google Drive？）

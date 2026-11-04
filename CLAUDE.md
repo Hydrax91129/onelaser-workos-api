@@ -1,8 +1,9 @@
 # OneLaser WorkOS（craftos.app）— 所有 Claude Code 会话必读
 
 这份文件放在两个仓库的根目录（onelaser-workos 前端、onelaser-workos-api 后端），内容相同。
-每个 Claude Code 会话开始工作前都会自动读到它。**多个会话在同时开发不同子功能，彼此看不到对方的对话**，
-这里是唯一的共同约定。新增模块、新增共享数据表或改了下面任何约定，必须在同一个提交里更新这份文件（两个仓库都改）。
+新增模块、新增共享数据表或改了下面任何约定，必须在同一个提交里更新这份文件（两个仓库都改）。
+
+产品名统一叫 **WorkOS**（不再用 CraftOS）；正式域名仍是 craftos.app，不要改域名。
 
 仓库是公开的：这里和代码里都不能出现密钥、真实成本、真实库存、员工薪资或任何客户数据。
 
@@ -60,15 +61,13 @@
 
 ## 4. 开发规则（所有改动都走 PR）
 
-- **开工前**：先看 GitHub Issues，在要做的 Issue 下留言认领，避免两个会话做同一件事；再 `git pull --rebase` 拿到最新 `main`。
 - **不直接推 main**（分支保护会拒绝）：在 `claude/<简短描述>` 分支上开发，推送后开 PR 到 `main`。
   PR 必须基于最新 `main`、CI 通过才能合并；合并前如果 `main` 有新提交，先 `git pull --rebase origin main` 再推。
-- 改公共文件（live-app.js、changelog.js、index.html、app.ts、db.ts、i18n.ts）要小步修改，不要整段重写。
-- 前端改完运行 `node tools/stamp-assets.mjs`（更新资源版本号，CI 会检查），再 `npm test`；后端 `npm test`（约 8 分钟）。
+- 前端改完运行 `node tools/stamp-assets.mjs`（更新资源版本号，CI 会检查），再 `npm ci && npm test`；后端 `npm test`（约 8 分钟）。
 - 后端所有报错文案都要在 i18n.ts 里有中文（有测试检查）。
 - 上传文件统一用前端的 `dist/upload-zone.js`（`window.WorkOSUpload`）：一个框同时支持粘贴、拖拽、点击选择和“上传”按钮，
   只负责收文件和检查类型、大小，存储和权限仍由各模块自己的接口负责。新功能不要再自己写一套上传。
-- 版本号：在 dist/changelog.js 的 RELEASES 最前面加一条，号码 = 当前最新版本 + 0.1。合并前再 pull 一次确认没撞号；撞号就改成下一个号。
+- 版本号：在 dist/changelog.js 的 RELEASES 最前面加一条，号码 = 当前最新版本 + 0.1，date 要晚于上一版。
 - 只用虚构的示例数据写测试和种子数据。
 
 ## 5. 上线规则（全自动，任何会话都不手动部署）
@@ -76,7 +75,8 @@
 上线只有一条路：**代码合进 `main` → CI 通过 → 自动部署**。
 
 1. 前端 PR 合进前端 `main` 后，GitHub Action（`.github/workflows/pin-frontend.yml`）会自动在后端仓库开一个 PR（分支 `auto/pin-frontend`），
-   把 `deploy/frontend-revision.txt` 改成这个提交；后端 CI 通过后自动合并。不要手动改 `frontend-revision.txt`。
+   把 `deploy/frontend-revision.txt` 改成这个提交；后端 CI 通过后自动合并（没有自动合并时，CI 通过后可手动合）。不要手动改 `frontend-revision.txt`。
+   先合后端、再合前端，避免页面先于接口上线。
 2. 后端 `main` 有新提交且 CI 通过后，Render 自动部署 `main`（Auto-Deploy：After CI checks pass）。
 3. **禁止**：在 Render 点手动部署、通过 API 触发部署、修改 Render 服务的分支或其他设置、部署不在 `main` 上的提交、强推任何不属于自己的分支。
    需要改环境变量或 Render 设置时，请用户本人在 Render 后台操作。

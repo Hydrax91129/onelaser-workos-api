@@ -35,9 +35,9 @@ export async function registerFeedbackRoutes(app: FastifyInstance, db: Database,
     let emailed = false;
     if (o.mailer) {
       const who = (u as any).display_name || u.id, when = new Date().toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
-      const subject = `[craftos 反馈] ${who}：${(v.body || '截图').replace(/\s+/g, ' ').slice(0, 60)}`;
+      const subject = `[WorkOS 反馈] ${who}：${(v.body || '截图').replace(/\s+/g, ' ').slice(0, 60)}`;
       const text = `提交人：${who}\n页面：${v.page || '—'}\n时间：${when}\n\n${v.body || '（只有截图）'}\n\n截图 ${v.images.length} 张（见附件）`;
-      const html = `<p><b>提交人：</b>${esc(who)}<br><b>页面：</b>${esc(v.page || '—')}<br><b>时间：</b>${when}</p><p style="white-space:pre-wrap">${esc(v.body || '（只有截图）')}</p><p>截图 ${v.images.length} 张（见附件）${o.appUrl ? ` · <a href="${esc(o.appUrl)}/#feedback">在 craftos 里查看</a>` : ''}</p>`;
+      const html = `<p><b>提交人：</b>${esc(who)}<br><b>页面：</b>${esc(v.page || '—')}<br><b>时间：</b>${when}</p><p style="white-space:pre-wrap">${esc(v.body || '（只有截图）')}</p><p>截图 ${v.images.length} 张（见附件）${o.appUrl ? ` · <a href="${esc(o.appUrl)}/#feedback">在 WorkOS 里查看</a>` : ''}</p>`;
       try {
         await o.mailer({ to, subject, text, html, attachments: v.images.map((im, i) => ({ filename: `${i + 1}-${im.name.replace(/[^\w.\-]+/g, '_') || 'image'}${/\.\w+$/.test(im.name) ? '' : '.' + im.type.split('/')[1]}`, content: im.data })) });
         emailed = true; await db.query('UPDATE feedback SET emailed=true WHERE id=$1', [id]);
