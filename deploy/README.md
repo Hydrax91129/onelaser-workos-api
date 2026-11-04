@@ -56,8 +56,8 @@ Bot 触发和回写的具体步骤见 [Bot 接入说明](../docs/integrations/GR
 Docker 构建会下载固定版本的前端（`Hydrax91129/onelaser-workos`）和 Wiki（`Hydrax91129/onelaser-support-center`）。仓库公开时匿名下载即可；改成私有前，必须先配好只读令牌。
 
 1. 令牌：GitHub fine-grained token，只授权上面两个仓库，权限只给 Contents: Read-only。令牌只填进平台的密钥设置，不要放进代码、URL 或聊天。
-2. Render：在服务的 Environment 里添加环境变量 `GITHUB_FETCH_TOKEN`。Dockerfile 用 BuildKit secret（`RUN --mount=type=secret,id=GITHUB_FETCH_TOKEN,dst=/etc/secrets/GITHUB_FETCH_TOKEN`）读取，不用 ARG/ENV，令牌不会留在镜像层里。
-3. GitHub CI：在后端仓库 Settings → Secrets and variables → Actions 添加同名密钥 `GITHUB_FETCH_TOKEN`；`ci.yml` 用 `docker build --secret` 传入。
+2. Render：在服务的 Environment → **Secret Files** 里添加文件 `GITHUB_FETCH_TOKEN`，内容是令牌（普通环境变量不会传进 Docker 构建）。Dockerfile 用 BuildKit secret（`RUN --mount=type=secret,id=GITHUB_FETCH_TOKEN,dst=/etc/secrets/GITHUB_FETCH_TOKEN`）读取，不用 ARG/ENV，令牌不会留在镜像层里。
+3. GitHub CI：在后端仓库 Settings → Secrets and variables → Actions 添加密钥 `_GITHUB_FETCH_TOKEN`（GitHub 不允许密钥名以 `GITHUB_` 开头）；`ci.yml` 用 `docker build --secret` 传入。
 4. 核对：构建日志会打印 `GITHUB_FETCH_TOKEN: used`（只说明是否使用，不打印令牌）。Render 和 CI 的日志都显示 `used` 之后，才能把仓库改成私有。看到 `not provided` 说明令牌没有传进构建。
 5. 没有令牌时脚本照旧匿名下载；令牌无效时构建会直接失败（401/404），不会悄悄退回旧版本。CalDock（`Yonge6/mac-mini-rental`）不受影响，仍匿名下载。
 

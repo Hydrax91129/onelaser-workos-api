@@ -56,8 +56,8 @@ Run the routing, health and Host/origin-injection integration checks against a r
 The Docker build downloads the pinned frontend (`Hydrax91129/onelaser-workos`) and Wiki (`Hydrax91129/onelaser-support-center`). Anonymous downloads work while they are public; set up a read-only token before making them private.
 
 1. Token: a GitHub fine-grained token limited to those two repositories, with Contents: Read-only. Enter it only in the platform's secret settings, never in code, URLs or chat.
-2. Render: add the environment variable `GITHUB_FETCH_TOKEN` to the service. The Dockerfile reads it as a BuildKit secret (`RUN --mount=type=secret,id=GITHUB_FETCH_TOKEN,dst=/etc/secrets/GITHUB_FETCH_TOKEN`), not ARG/ENV, so it never lands in an image layer.
-3. GitHub CI: add the Actions secret `GITHUB_FETCH_TOKEN` to this repository; `ci.yml` passes it with `docker build --secret`.
+2. Render: add a **Secret File** named `GITHUB_FETCH_TOKEN` (Environment → Secret Files) containing the token; plain environment variables do not reach the Docker build. The Dockerfile reads it as a BuildKit secret (`RUN --mount=type=secret,id=GITHUB_FETCH_TOKEN,dst=/etc/secrets/GITHUB_FETCH_TOKEN`), not ARG/ENV, so it never lands in an image layer.
+3. GitHub CI: add the Actions secret `_GITHUB_FETCH_TOKEN` to this repository (GitHub rejects secret names starting with `GITHUB_`); `ci.yml` passes it with `docker build --secret`.
 4. Check: the build log prints `GITHUB_FETCH_TOKEN: used` (whether it was used, never the value). Make the repositories private only after both the Render and CI logs say `used`. `not provided` means the token did not reach the build.
 5. Without a token the scripts download anonymously; an invalid token fails the build (401/404) instead of silently falling back. CalDock (`Yonge6/mac-mini-rental`) is unaffected and stays anonymous.
 
