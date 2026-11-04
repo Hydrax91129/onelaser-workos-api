@@ -21,7 +21,7 @@
 | 账号、组织、权限 | auth.ts, org.ts, members.ts | people.js, erp-access.js | users、departments、grants（功能权限） |
 | 任务、OKR、项目 | app.ts, task-board.ts, completions.ts, assign.ts, okr*.ts, projects.ts | task-board.js, okr-board.js, projects.js, reports.js | tasks、submissions、reviews、objectives、key_results、projects |
 | 消息红点 | inbox.ts | inbox.js | inbox_items（其他模块只调用 `pushInbox()`，不要自建通知表） |
-| PIM 与定价 | products.ts, product-fields.ts, product-pim.ts, pricing-sheet.ts | products.js | product_catalog（SKU 主数据、MSRP、产品资料字段 attrs）、product_pricing（成本输入、成本/敏感字段 attrs）、pricing_rules（公司计价规则）、product_channel_prices（各渠道价格及审批，含 MAP、官网促销底价）、product_files（产品主图和资料文件） |
+| PIM 与定价 | products.ts, product-fields.ts, product-pim.ts, pricing-sheet.ts, product-import.ts, xlsx.ts | products.js | product_catalog（SKU 主数据、MSRP、产品资料字段 attrs）、product_pricing（成本输入、成本/敏感字段 attrs）、pricing_rules（公司计价规则）、product_channel_prices（各渠道价格及审批，含 MAP、官网促销底价）、product_files（产品主图和资料文件） |
 | WMS 库存 | wms.ts | wms.js | WMS 库位与出入库流水 |
 | 退货维修 RMA | rma.ts | rma.js | rma_cases（翻新机入库走 WMS） |
 | 经销商下单 portal | dealer.ts, dealer-admin.ts | dealers.js | dealer_accounts、dealer_orders（价格读 product_channel_prices 的 dealer 渠道，发货走 WMS 出库） |
@@ -46,7 +46,7 @@
 6. 成本和利润只给有 `product_cost_detail` 权限的人和主管理员（部署配置 `WORKOS_EXECUTIVE_USER_IDS`）；在系统里勾选的管理员**不会**自动看到产品、成本、价格、库存、经销商数据，也要单独授权。功能权限（grants）只有主管理员能改，任何人都不能改自己的。薪资只给 HR 权限对应分区的人。后端新模块判断敏感数据时用 `isExecutive`，不要用 `isAdmin`。
 7. **产品资料字段的可见级别**（product-fields.ts，服务端强制，导出和模板同样适用）：全员 = 有 `products` 权限；产品与供应链 = 另有 `products_manage`、`supply*`、`warehouse*` 或 `product_cost_detail` 之一；
    仅成本权限、敏感 · 仅编辑者 = `product_cost_detail`；仅管理员 = 主管理员。修改字段需要 `products_manage`（价格字段也可用 `pricing_msrp` / `product_cost_detail`），且必须能看到该字段。
-   新增产品字段只改 product-fields.ts 的 FIELDS，不要另建字段表。
+   新增产品字段只改 product-fields.ts 的 FIELDS，不要另建字段表。批量模板、上传预览、确认和撤销在 product-import.ts（记录在 product_imports，kind='pim'），模板列同样按可见级别。
 8. **工厂对接人**：`users.quality_factory` 非空（邀请时选“工厂对接人”，或管理员在成员列表里改）的账号只能用质量追踪，后端会拦截其他接口。
    面向全公司的流程（季度确认、全员提醒、统计人数等）要用 quality.ts 的 `factoryUserIds()` 把他们排除。
 

@@ -21,6 +21,7 @@ import { registerItRoutes, type ItOptions } from './it-accounts.js';
 import { registerQualityRoutes, qualityFactoryOf, factoryPathAllowed, type QualityOptions } from './quality.js';
 import { registerProductRoutes } from './products.js';
 import { registerPimRoutes } from './product-pim.js';
+import { registerImportRoutes } from './product-import.js';
 import { registerInboxRoutes, pushInbox, taskFollowers } from './inbox.js';
 import { registerFeedbackRoutes } from './feedback.js';
 import { registerOkrCycle } from './okr-cycle.js';
@@ -312,6 +313,7 @@ export async function buildApp(options:AppOptions) {
   await registerInboxRoutes(app,db);
   await registerProductRoutes(app,db,{isAdmin:isExecutive /* sensitive ERP data: only deployment-configured executives bypass grants; in-app admins need grants */});
   await registerPimRoutes(app,db,{isAdmin:isExecutive /* same rule as products: only deployment-configured executives bypass grants */});
+  await registerImportRoutes(app,db,{isAdmin:isExecutive,now:options.clock});
   await registerFeedbackRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),mailer,to:process.env.FEEDBACK_EMAIL,appUrl:integrations.appPublicUrl});
   await registerOkrScoreRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),visible:visibleObjective});
   await registerCompletionRoutes(app,db,{model:completionModel,fxFetcher:options.fxFetcher,fxFallback:Number(process.env.FX_FALLBACK_CNY)||7.1});
