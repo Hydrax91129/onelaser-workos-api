@@ -131,6 +131,6 @@ createServer(async (req, res) => {
   } catch (error) { console.error(error); res.writeHead(500); res.end('Local server error'); }
 }).listen(PORT, '127.0.0.1', () => {
   console.log(`Dealer portal:   ${ORIGIN}/dealer/`);
-  console.log(`CraftOS (staff): ${ORIGIN}/  → admin@onelaser.test / onelaser-local  → 产品与库存 → 经销商订单`);
+  console.log(`WorkOS (staff): ${ORIGIN}/  → admin@onelaser.test / onelaser-local  → 产品与库存 → 经销商订单`);
   console.log(`Payments: ${env.stripe ? 'Stripe test mode (real API)' : 'local Stripe stand-in'} · Google: ${env.google ? 'real Google' : 'local stand-in'}`);
 });

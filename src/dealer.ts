@@ -214,7 +214,7 @@ export async function registerDealerRoutes(app: FastifyInstance, db: Database, o
         [id, orgId, v.email, passwordHash, v.company, v.contactName, v.phone, v.website || '', v.resaleCert || '', JSON.stringify(v.address)]);
       if (!created.rows.length) deny(409, 'DEALER_EMAIL_IN_USE', 'An account with this email already exists; sign in instead');
       await issue(reply, id);
-      await sendMail(o.mailer, o.notifyEmail, `New dealer application: ${v.company}`, [`${v.company} (${v.contactName}, ${v.email}) applied for a dealer account.`, 'Review it on the Dealer orders page in CraftOS.']);
+      await sendMail(o.mailer, o.notifyEmail, `New dealer application: ${v.company}`, [`${v.company} (${v.contactName}, ${v.email}) applied for a dealer account.`, 'Review it on the Dealer orders page in WorkOS.']);
       return reply.code(201).send({ registered: true, status: 'pending' });
     });
     routes.post('/auth/login', async (req, reply) => {
@@ -283,7 +283,7 @@ export async function registerDealerRoutes(app: FastifyInstance, db: Database, o
       const wasComplete = profileComplete(d);
       const row = (await db.query(`UPDATE dealer_accounts SET company=$2,contact_name=$3,phone=$4,website=$5,resale_cert=$6,address=$7,version=version+1 WHERE id=$1 RETURNING *`,
         [d.id, v.company, v.contactName, v.phone, v.website || '', v.resaleCert || '', JSON.stringify(v.address)])).rows[0];
-      if (!wasComplete) await sendMail(o.mailer, o.notifyEmail, `New dealer application: ${v.company}`, [`${v.company} (${v.contactName}, ${d.email}) applied for a dealer account.`, 'Review it on the Dealer orders page in CraftOS.']);
+      if (!wasComplete) await sendMail(o.mailer, o.notifyEmail, `New dealer application: ${v.company}`, [`${v.company} (${v.contactName}, ${d.email}) applied for a dealer account.`, 'Review it on the Dealer orders page in WorkOS.']);
       return { dealer: accountOut(row) };
     });
 
