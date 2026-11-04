@@ -12,6 +12,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
 import { deny } from './errors.js';
+import { worksheetOf, configured, dtcRate, whRate } from './pricing-sheet.js';
 import { FIELD, SLOT, SLOT_VIS, levelsOf } from './product-fields.js';
 
 export const productSchema = `
@@ -84,14 +85,23 @@ const STATUS_NEEDS_NOTE = new Set(['clearance', 'eolPlanned', 'eol']);
  * Without a landed cost the margin is unknown, so the change applies and is recorded as unchecked. */
 export const CHANNELS = ['shopify', 'amazon', 'ebay', 'dealer'] as const;
 /* Selling prices of the 产品资料 page that live next to the channel prices (product_channel_prices). */
-export const SHEET_PRICE_CHANNELS = ['map', 'promo_floor'] as const;
+export const SHEET_PRICE_CHANNELS = ['map', 'promo_floor', 'wholesale_1', 'wholesale_2', 'wholesale_3', 'wholesale_4', 'wholesale_5', 'wholesale_6'] as const;
 export const PRICE_TARGETS = ['msrp', 'actual', ...CHANNELS, ...SHEET_PRICE_CHANNELS] as const;
 export type PriceTarget = typeof PRICE_TARGETS[number];
 export function priceCheck(rules: typeof DEFAULT_PRICING_RULES, cat: any, pr: any, target: PriceTarget, price: number | null) {
   const landed = pr?.landed_usd == null ? null : Number(pr.landed_usd);
   if (price == null || price <= 0) return { cmPct: null as number | null, needs: null as string | null };
   const round = (n: number) => Math.round(n * 10) / 10;
-  if (target === 'dealer') {
+  // Once 价格参数 (the worksheet) is filled in, it decides the selling-cost rates and floors.
+  const w = worksheetOf(rules);
+  if (configured(w)) {
+    const wholesale = target === 'dealer' || target.startsWith('wholesale_'), delivered = landed == null ? null : landed + (pr?.last_mile_usd == null ? 0 : Number(pr.last_mile_usd));
+    const cost = wholesale ? landed : delivered, rate = wholesale ? whRate(w) : dtcRate(w) + (target === 'amazon' || target === 'ebay' ? (w.mktExtra ?? 0) / 100 : 0);
+    if (cost == null) return { cmPct: null, needs: null };
+    const cm = round((price * (1 - rate) - cost) / price * 100), floor = wholesale ? w.whFloor : w.dtcFloor;
+    return { cmPct: cm, needs: cm < 0 ? 'loss' : floor != null && cm < floor ? 'floor' : null };
+  }
+  if (target === 'dealer' || target.startsWith('wholesale_')) {
     const cm = landed == null ? null : round((price * (1 - rules.wholesalePct / 100) - landed) / price * 100);
     const msrp = cat?.msrp == null ? null : Number(cat.msrp), deepest = rules.wholesale.large + rules.wholesale.over100k;
     return { cmPct: cm, needs: cm != null && cm < 0 ? 'loss' : msrp && price < msrp * (1 - deepest / 100) - 0.005 ? 'dealer_discount' : null };
@@ -448,8 +458,10 @@ export async function registerProductRoutes(app: FastifyInstance, db: Database, 
     if (!o.isAdmin(u)) deny(403, 'PRICING_RULES_EDIT_FORBIDDEN', 'Only company administrators can change the pricing rules');
     const v = pricingRulesSchema.parse(req.body);
     return db.transaction(async tx => {
+      // The 价格参数 worksheet shares this row; keep it when the legacy rules are saved.
+      const ws = (await tx.query('SELECT rules FROM pricing_rules WHERE org_id=$1 FOR UPDATE', [u.org_id])).rows[0]?.rules?.worksheet;
       await tx.query(`INSERT INTO pricing_rules(org_id,rules,updated_by,updated_at) VALUES($1,$2,$3,now())
-        ON CONFLICT(org_id) DO UPDATE SET rules=$2,updated_by=$3,updated_at=now()`, [u.org_id, JSON.stringify(v), u.id]);
+        ON CONFLICT(org_id) DO UPDATE SET rules=$2,updated_by=$3,updated_at=now()`, [u.org_id, JSON.stringify(ws ? { ...v, worksheet: ws } : v), u.id]);
       await audit(tx, u, 'products.pricing_rules', u.org_id, v);
       return { rules: { ...v, updatedAt: new Date().toISOString(), updatedBy: u.id }, canEdit: true };
     });

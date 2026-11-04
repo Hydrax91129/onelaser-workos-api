@@ -21,7 +21,7 @@
 | 账号、组织、权限 | auth.ts, org.ts, members.ts | people.js, erp-access.js | users、departments、grants（功能权限） |
 | 任务、OKR、项目 | app.ts, task-board.ts, completions.ts, assign.ts, okr*.ts, projects.ts | task-board.js, okr-board.js, projects.js, reports.js | tasks、submissions、reviews、objectives、key_results、projects |
 | 消息红点 | inbox.ts | inbox.js | inbox_items（其他模块只调用 `pushInbox()`，不要自建通知表） |
-| PIM 与定价 | products.ts, product-fields.ts, product-pim.ts | products.js | product_catalog（SKU 主数据、MSRP、产品资料字段 attrs）、product_pricing（成本输入、成本/敏感字段 attrs）、pricing_rules（公司计价规则）、product_channel_prices（各渠道价格及审批，含 MAP、官网促销底价）、product_files（产品主图和资料文件） |
+| PIM 与定价 | products.ts, product-fields.ts, product-pim.ts, pricing-sheet.ts | products.js | product_catalog（SKU 主数据、MSRP、产品资料字段 attrs）、product_pricing（成本输入、成本/敏感字段 attrs）、pricing_rules（公司计价规则）、product_channel_prices（各渠道价格及审批，含 MAP、官网促销底价）、product_files（产品主图和资料文件） |
 | WMS 库存 | wms.ts | wms.js | WMS 库位与出入库流水 |
 | 退货维修 RMA | rma.ts | rma.js | rma_cases（翻新机入库走 WMS） |
 | 经销商下单 portal | dealer.ts, dealer-admin.ts | dealers.js | dealer_accounts、dealer_orders（价格读 product_channel_prices 的 dealer 渠道，发货走 WMS 出库） |
@@ -38,6 +38,7 @@
 1. **SKU 只有一份**：所有模块都用 `product_catalog.sku`。不要另建产品表、不要复制产品名称和价格。要扩展产品字段，在 products.ts 里加。
 2. **价格只有一个来源**：MSRP 在 product_catalog；各渠道价格（经销商、Amazon 等）在 product_channel_prices；
    公司计价规则在 pricing_rules（零售 17%、批发 7%、MSRP 30/40/50%、批发按 MSRP 打 25%/30%，单笔超 $5 万再加 2 点、超 $10 万再加 5 点）。
+   产品资料页的定价工作表（价格参数）存在 pricing_rules.rules.worksheet，仓库里是空的，由主管理员在系统里录入；填好后价格审批的底线也用它。
    **待对齐**：经销商渠道价目前是人工填写，应改为按 pricing_rules 的批发规则自动建议、再走价格审批。
 3. **库存只有一份**：数量变化一律写 WMS 出入库流水（经销商发货、RMA 翻新入库都是这样），其他模块只读。
 4. **人和权限只有一份**：用 users 和 grants 判断权限，不要另建账号体系（CalDock 和经销商是外部客户，例外）。

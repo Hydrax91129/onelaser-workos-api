@@ -110,6 +110,7 @@ const RAW: [string, Raw[]][] = [
     f('promoFloor', '官网促销底价', 'Website promotion floor', '仅限固定促销节点', 'roorn', 'all', 'price', { unit: 'USD', store: { t: 'price', target: 'promo_floor' } }),
   ]],
   ['5', [
+    ...[1, 2, 3, 4, 5, 6].map(i => f(`wh${i}`, `批发价手动调整 · 档位 ${i}`, `Wholesale price override · tier ${i}`, '自动', 'oooon', 'sens', 'price', { unit: 'USD', store: { t: 'price', target: `wholesale_${i}` } })),
     f('whFreight', '批发运费承担方', 'Wholesale freight paid by', '', 'ooonn', 'ops', 'enum', { options: [{ value: 'dealer', zh: '经销商付运费', en: 'Dealer pays freight' }, { value: 'us', zh: '我们付运费', en: 'We pay freight' }] }),
   ]],
   ['6', [

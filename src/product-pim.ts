@@ -11,7 +11,8 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
 import { deny, denyWith } from './errors.js';
-import { priceOps, PRODUCT_STATUSES, STATUS_NEXT } from './products.js';
+import { priceOps, PRODUCT_STATUSES, STATUS_NEXT, DEFAULT_PRICING_RULES } from './products.js';
+import { calc, publicPrices, worksheetOf, worksheetSchema, MAX_WH_TIERS, type PriceInputs } from './pricing-sheet.js';
 import {
   FIELDS, FIELD, SLOT, SLOT_VIS, FILE_MIME, IMAGE_MIME, MAX_FILE_BYTES,
   levelsOf, canEditField, checkRecord, modelFor, parseValue, type Issue, type Values, type Viewer, type Vis,
@@ -30,6 +31,12 @@ CREATE INDEX IF NOT EXISTS product_files_sku ON product_files(org_id,sku,slot);
 
 const num = (v: any) => v == null ? null : Number(v);
 const STATUS_NEEDS_NOTE = new Set(['clearance', 'eolPlanned', 'eol']);
+/** The worksheet inputs of one product (cost values are present only in unfiltered records). */
+export const priceInputs = (v: Values): PriceInputs => {
+  const n = (k: string) => v[k] == null ? null : Number(v[k]);
+  return { landed: n('landed'), lastMile: n('lastMile'), msrp: n('msrp'), map: n('map'), promoFloor: n('promoFloor'),
+    whOv: Array.from({ length: MAX_WH_TIERS }, (_, i) => n('wh' + (i + 1))), whFreight: (v.whFreight as string) || null };
+};
 export type Rec = { sku: string; values: Values; files: Record<string, number>; updatedAt: string | null };
 
 /** Reads products with every stored value (unfiltered; callers filter by viewer). */
@@ -264,6 +271,34 @@ export async function registerPimRoutes(app: FastifyInstance, db: Database, o: {
       prices: prices.filter((p: any) => lv.has(priceVis(p.target) as Vis))
         .map((p: any) => ({ id: p.id, target: p.target, from: num(p.old_price), to: num(p.new_price), status: p.status, reason: p.reason, actor: { id: p.requested_by, name: p.actor_name }, at: p.created_at })),
     };
+  });
+
+  /* Pricing worksheet for one product. Without cost access only the selling prices and the public wholesale tiers are returned. */
+  app.get('/products/records/:sku/pricing', async req => {
+    const u = actorOf(req), v = access(u), rec = await one(db, u.org_id, skuParam(req));
+    const w = worksheetOf(await ops.rulesFor(u.org_id)), inputs = priceInputs(rec.values);
+    if (!canPricing(u)) return { sku: rec.sku, full: false, ...publicPrices(w, inputs) };
+    return { sku: rec.sku, full: true, settings: w, ...calc(w, inputs), public: publicPrices(w, inputs) };
+  });
+
+  /* 价格参数: read with cost access, changed by executives only. Stored in pricing_rules.rules.worksheet. */
+  app.get('/products/pricing-settings', async req => {
+    const u = actorOf(req); access(u);
+    if (!canPricing(u)) deny(403, 'PRICING_RULES_FORBIDDEN', 'Only people with the full price build-up can see the pricing rules');
+    const r = await ops.rulesFor(u.org_id);
+    return { settings: worksheetOf(r), updatedAt: r.updatedAt, updatedBy: r.updatedBy, canEdit: o.isAdmin(u) };
+  });
+  app.put('/products/pricing-settings', async req => {
+    const u = actorOf(req);
+    if (!o.isAdmin(u)) deny(403, 'PRICING_RULES_EDIT_FORBIDDEN', 'Only company administrators can change the pricing rules');
+    const w = worksheetSchema.parse(req.body);
+    return db.transaction(async tx => {
+      const cur = (await tx.query('SELECT rules FROM pricing_rules WHERE org_id=$1 FOR UPDATE', [u.org_id])).rows[0]?.rules || DEFAULT_PRICING_RULES;
+      await tx.query(`INSERT INTO pricing_rules(org_id,rules,updated_by,updated_at) VALUES($1,$2,$3,now())
+        ON CONFLICT(org_id) DO UPDATE SET rules=$2,updated_by=$3,updated_at=now()`, [u.org_id, JSON.stringify({ ...cur, worksheet: w }), u.id]);
+      await audit(tx, u, 'products.pricing_settings', u.org_id, { items: w.dtcItems.length + w.whItems.length, tiers: w.retailTiers.length + w.whTiers.length });
+      return { settings: w, canEdit: true };
+    });
   });
 
   /* Uploads: the main image (everyone sees it) and the group-3 file slots (敏感 · 仅编辑者). PDF/PNG/JPG/WebP/CSV/TXT, 20 MB. */
