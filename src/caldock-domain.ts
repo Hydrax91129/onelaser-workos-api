@@ -49,18 +49,26 @@ export async function createCaldockOrder(db:Database,customerId:string,interval:
     if(active)deny(409,'ACTIVE_ORDER_EXISTS','An open order already exists');
     const settings=(await tx.query('SELECT * FROM caldock_settings WHERE id=1')).rows[0];
     const referral=(await tx.query('SELECT r.affiliate_id FROM caldock_referrals r JOIN caldock_affiliates a ON a.user_id=r.affiliate_id WHERE r.customer_id=$1 AND a.active=true AND r.affiliate_id<>$1',[customerId])).rows[0];
-    const row=(await tx.query('INSERT INTO caldock_orders(id,customer_id,request_key,interval,amount_cents,affiliate_id,commission_bps,commission_mode) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *',[randomUUID(),customerId,requestKey,interval,CALDOCK_PRICES[interval],referral?.affiliate_id||null,settings.commission_bps,settings.commission_mode])).rows[0];
+    // The referrer's own parent earns the second tier, unless the parent is the buyer.
+    const second=referral?(await tx.query('SELECT a.parent_id FROM caldock_affiliates a JOIN caldock_affiliates p ON p.user_id=a.parent_id WHERE a.user_id=$1 AND p.active=true AND a.parent_id<>$2',[referral.affiliate_id,customerId])).rows[0]?.parent_id||null:null;
+    const row=(await tx.query('INSERT INTO caldock_orders(id,customer_id,request_key,interval,amount_cents,affiliate_id,commission_bps,commission_mode,second_affiliate_id,second_tier_bps) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *',[randomUUID(),customerId,requestKey,interval,CALDOCK_PRICES[interval],referral?.affiliate_id||null,settings.commission_bps,settings.commission_mode,second,second?settings.second_tier_bps:0])).rows[0];
     await caldockAudit(tx,customerId,'order.created',row.id,{interval,amountCents:row.amount_cents});return row;
   });
 }
 
 // A renewal earns only when the order's first payment earned, at the rate snapshotted on the order.
+// Second-tier commission for one collected payment; sourceId keeps each payment to one record.
+async function recordSecondTierCommission(db:Queryable,order:any,paidCents:number,sourceId:string) {
+  const cents=Math.floor(paidCents*order.second_tier_bps/10000);
+  if(order.second_affiliate_id&&cents>0)await db.query('INSERT INTO caldock_commissions(id,order_id,affiliate_id,amount_cents,rate_bps,source_id,tier) VALUES($1,$2,$3,$4,$5,$6,2) ON CONFLICT (source_id) WHERE source_id IS NOT NULL DO NOTHING',[randomUUID(),order.id,order.second_affiliate_id,cents,order.second_tier_bps,sourceId]);
+}
 export async function recordCaldockRenewalCommission(db:Queryable,order:any,invoiceId:string,amountPaidCents:number) {
   if(!Number.isInteger(amountPaidCents)||amountPaidCents<=0)return;
   const earned=(await db.query("SELECT 1 FROM caldock_commissions WHERE order_id=$1 AND status<>'void' LIMIT 1",[order.id])).rows.length>0;
   if(!earned)return;
   const cents=Math.floor(amountPaidCents*order.commission_bps/10000);
   if(cents>0)await db.query('INSERT INTO caldock_commissions(id,order_id,affiliate_id,amount_cents,rate_bps,source_id) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (source_id) WHERE source_id IS NOT NULL DO NOTHING',[randomUUID(),order.id,order.affiliate_id,cents,order.commission_bps,'stripe_in:'+invoiceId]);
+  await recordSecondTierCommission(db,order,amountPaidCents,'stripe_in:'+invoiceId+':t2');
 }
 
 // Trusted adapter entry point ONLY. Deliberately not registered as a public HTTP route.
@@ -85,6 +93,7 @@ export async function recordVerifiedCaldockPayment(db:Database,input:{eventId:st
       if(order.affiliate_id&&order.affiliate_id!==order.customer_id&&order.commission_bps>0&&(order.commission_mode==='each_order'||!previous)){
         const cents=Math.floor(order.amount_cents*order.commission_bps/10000);
         if(cents>0)await tx.query('INSERT INTO caldock_commissions(id,order_id,affiliate_id,amount_cents,rate_bps) VALUES($1,$2,$3,$4,$5)',[randomUUID(),order.id,order.affiliate_id,cents,order.commission_bps]);
+        await recordSecondTierCommission(tx,order,order.amount_cents,'order:'+order.id+':t2');
       }
     } else {
       await tx.query("UPDATE caldock_orders SET status='refunded',renewal_enabled=false,version=version+1 WHERE id=$1",[order.id]);
