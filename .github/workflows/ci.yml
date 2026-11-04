@@ -47,7 +47,11 @@ jobs:
           TEST_DATABASE_URL: postgres://workos_ci:ephemeral-ci-password@127.0.0.1:5432/workos_test
       - run: npm run build
       - name: Build production image with pinned frontend
-        run: docker build -t workos-ci .
+        # GITHUB_FETCH_TOKEN (optional repository secret) lets the build download the frontend and Wiki
+        # once those repositories are private; it reaches the build as a BuildKit secret, not a build arg.
+        env:
+          GITHUB_FETCH_TOKEN: ${{ secrets.GITHUB_FETCH_TOKEN }}
+        run: docker build --secret id=GITHUB_FETCH_TOKEN,env=GITHUB_FETCH_TOKEN -t workos-ci .
       - name: Verify private import CLI is included in the production image
         run: docker run --rm --entrypoint node workos-ci build/src/cli/import-okr.js --help
       - name: Test canonical redirect with production Caddy

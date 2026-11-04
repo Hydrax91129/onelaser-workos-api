@@ -5,12 +5,16 @@ RUN npm ci
 COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
 RUN ./node_modules/.bin/tsc -p tsconfig.build.json
-COPY tools/fetch-frontend.mjs ./tools/fetch-frontend.mjs
+# Optional read-only token for the pinned frontend and Wiki repositories, passed as a BuildKit
+# secret so it never lands in an image layer (see deploy/README.md). Without it, downloads are anonymous.
+COPY tools/github-fetch-auth.mjs tools/fetch-frontend.mjs ./tools/
 COPY deploy/frontend-revision.txt ./deploy/frontend-revision.txt
-RUN node tools/fetch-frontend.mjs /frontend
+RUN --mount=type=secret,id=GITHUB_FETCH_TOKEN,dst=/etc/secrets/GITHUB_FETCH_TOKEN \
+    node tools/fetch-frontend.mjs /frontend
 COPY tools/fetch-wiki.mjs tools/wiki-safety.mjs ./tools/
 COPY deploy/wiki-revision.txt ./deploy/wiki-revision.txt
-RUN node tools/fetch-wiki.mjs /wiki
+RUN --mount=type=secret,id=GITHUB_FETCH_TOKEN,dst=/etc/secrets/GITHUB_FETCH_TOKEN \
+    node tools/fetch-wiki.mjs /wiki
 COPY tools/fetch-caldock.mjs ./tools/fetch-caldock.mjs
 COPY deploy/caldock-revision.txt ./deploy/caldock-revision.txt
 RUN node tools/fetch-caldock.mjs /caldock-source

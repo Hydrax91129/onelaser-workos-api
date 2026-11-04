@@ -14,7 +14,7 @@ The production host supplies an HTTPS subdomain. GitHub Pages remains a public d
 
 ## Managed hosting with Render
 
-1. Open [New Blueprint](https://dashboard.render.com/select-repo?type=blueprint), select `Yonge6/onelaser-workos-api`, and use the root `render.yaml`.
+1. Open [New Blueprint](https://dashboard.render.com/select-repo?type=blueprint), select `Hydrax91129/onelaser-workos-api`, and use the root `render.yaml`.
 2. Review the Web Service, PostgreSQL instance, region and actual charges before applying. The template selects Singapore, web plan `0.5c-512mb`, database plan `0.1c-256mb` and 1 GB storage. Current platform plans and displayed prices govern; this template authorizes no payment.
 3. Enter credentials only in the hosting secret settings. Never put them in GitHub, the frontend, URLs or chat.
 4. Use the assigned `https://<service>.onrender.com` URL. `APP_PUBLIC_URL` defaults to Render's `RENDER_EXTERNAL_URL`; no purchased domain is required. Register the app homepage and `https://<service>.onrender.com/api/auth/dingtalk/callback` in DingTalk.
@@ -50,6 +50,16 @@ Verify `craftos.app` DNS, Render domain verification and HTTPS before setting `A
 Employees must sign in at the new domain; existing sessions and in-progress logins do not migrate. Update the private connector origin and reauthorize the dedicated Bot at its new MCP URL. Redirects do not replace OAuth consent or API client migration. The destination is the literal `https://craftos.app`, never an incoming Host or an arbitrary environment URL.
 
 Run the routing, health and Host/origin-injection integration checks against a real Caddy 2 binary: `CADDY_BIN=/absolute/path/to/caddy node --import tsx --test test/caddy-redirect.test.ts`. Local runs explicitly skip when `CADDY_BIN` is absent. After building the production image, CI extracts its Caddy binary and sets `CADDY_BIN` to require these checks before the existing same-origin smoke test. The temporary extraction container is removed on success or failure.
+
+### Download token for private repositories (`GITHUB_FETCH_TOKEN`)
+
+The Docker build downloads the pinned frontend (`Hydrax91129/onelaser-workos`) and Wiki (`Hydrax91129/onelaser-support-center`). Anonymous downloads work while they are public; set up a read-only token before making them private.
+
+1. Token: a GitHub fine-grained token limited to those two repositories, with Contents: Read-only. Enter it only in the platform's secret settings, never in code, URLs or chat.
+2. Render: add the environment variable `GITHUB_FETCH_TOKEN` to the service. The Dockerfile reads it as a BuildKit secret (`RUN --mount=type=secret,id=GITHUB_FETCH_TOKEN,dst=/etc/secrets/GITHUB_FETCH_TOKEN`), not ARG/ENV, so it never lands in an image layer.
+3. GitHub CI: add the Actions secret `GITHUB_FETCH_TOKEN` to this repository; `ci.yml` passes it with `docker build --secret`.
+4. Check: the build log prints `GITHUB_FETCH_TOKEN: used` (whether it was used, never the value). Make the repositories private only after both the Render and CI logs say `used`. `not provided` means the token did not reach the build.
+5. Without a token the scripts download anonymously; an invalid token fails the build (401/404) instead of silently falling back. CalDock (`Yonge6/mac-mini-rental`) is unaffected and stays anonymous.
 
 ## Existing server alternative
 

@@ -46,6 +46,15 @@ export async function createCaldockOrder(db:Database,customerId:string,interval:
   });
 }
 
+// A renewal earns only when the order's first payment earned, at the rate snapshotted on the order.
+export async function recordCaldockRenewalCommission(db:Queryable,order:any,invoiceId:string,amountPaidCents:number) {
+  if(!Number.isInteger(amountPaidCents)||amountPaidCents<=0)return;
+  const earned=(await db.query("SELECT 1 FROM caldock_commissions WHERE order_id=$1 AND status<>'void' LIMIT 1",[order.id])).rows.length>0;
+  if(!earned)return;
+  const cents=Math.floor(amountPaidCents*order.commission_bps/10000);
+  if(cents>0)await db.query('INSERT INTO caldock_commissions(id,order_id,affiliate_id,amount_cents,rate_bps,source_id) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (source_id) WHERE source_id IS NOT NULL DO NOTHING',[randomUUID(),order.id,order.affiliate_id,cents,order.commission_bps,'stripe_in:'+invoiceId]);
+}
+
 // Trusted adapter entry point ONLY. Deliberately not registered as a public HTTP route.
 // A future payment adapter must validate its provider signature before calling this.
 export async function recordVerifiedCaldockPayment(db:Database,input:{eventId:string;orderId:string;type:'paid'|'refunded';amountCents:number;currency:string}) {

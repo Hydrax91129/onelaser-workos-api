@@ -3,6 +3,7 @@ import { readFile, readdir, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hardenWikiApp, hardenWikiLocale } from './wiki-safety.mjs';
+import { githubToken, githubFileRequest, githubTreeHeaders, describeTokenUse } from './github-fetch-auth.mjs';
 
 const repository = 'Hydrax91129/onelaser-support-center';
 const fixedFiles = new Set([
@@ -72,11 +73,13 @@ export function validateWikiPackage(buffers) {
   }
 }
 
-async function boundedFetch(url, maximum) {
+const userAgent = 'OneLaser-WorkOS-release';
+
+async function boundedFetch(url, maximum, headers) {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const response = await fetch(url, {
-        headers: { 'User-Agent': 'OneLaser-WorkOS-release', Accept: 'application/vnd.github+json' },
+        headers,
         signal: AbortSignal.timeout(30000), redirect: 'error',
       });
       if (!response.ok) throw new Error(`Wiki download unavailable (${response.status}).`);
@@ -98,13 +101,17 @@ export async function packageWiki(destination, revision) {
   if (!/^[a-f0-9]{40}$/.test(revision)) throw new Error('Pin a full Wiki commit before building.');
   await mkdir(destination, { recursive: true });
   if ((await readdir(destination)).length) throw new Error('Wiki package destination must be empty.');
+  const token = githubToken();
+  console.log(describeTokenUse(token));
   const tree = JSON.parse((await boundedFetch(
-    `https://api.github.com/repos/${repository}/git/trees/${revision}?recursive=1`, 1024 * 1024)).toString('utf8'));
+    `https://api.github.com/repos/${repository}/git/trees/${revision}?recursive=1`, 1024 * 1024,
+    githubTreeHeaders(token, userAgent))).toString('utf8'));
   const files = validateWikiTree(tree), buffers = new Map(); let cursor = 0;
   await Promise.all(Array.from({ length: 8 }, async () => {
     while (cursor < files.length) {
       const file = files[cursor++];
-      const buffer = await boundedFetch(`https://raw.githubusercontent.com/${repository}/${revision}/${file.path}`, file.size);
+      const request = githubFileRequest(repository, revision, file, token, userAgent);
+      const buffer = await boundedFetch(request.url, file.size, request.headers);
       verifyWikiBlob(file, buffer); buffers.set(file.path, buffer);
     }
   }));

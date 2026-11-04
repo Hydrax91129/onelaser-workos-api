@@ -181,6 +181,54 @@ test('three first-period seats a day: 20% off once, weekly excluded, a cancelled
   }finally{await db.query("UPDATE caldock_orders SET offer_day=NULL");await offerApp.close();}
 });
 
+test('the launch commission default applies once and never overrides a later admin choice',async()=>{
+  assert.equal((await db.query('SELECT commission_bps FROM caldock_settings WHERE id=1')).rows[0].commission_bps,2000);
+  await db.query('UPDATE caldock_settings SET commission_bps=0 WHERE id=1');
+  await db.exec(schema);
+  assert.equal((await db.query('SELECT commission_bps FROM caldock_settings WHERE id=1')).rows[0].commission_bps,0);
+});
+
+test('referral links open the storefront domain',async()=>{
+  const site=await buildApp({db,environment:'production',closeDatabase:false,caldock:{publicUrl:origin,siteUrl:'https://wodemac.example',marketingUrl:'https://old.example/',providers:gateways,stripe}});
+  try{
+    const start=await site.inject('/caldock/auth/google/start?next=account&lang=zh&interval=year');
+    const state=new URL(start.headers.location!).searchParams.get('state')!,flow=cookieList(start).map(c=>c.split(';')[0]).join('; ');
+    const back=await site.inject({url:`/caldock/auth/google/callback?state=${state}&code=stripe-link`,headers:{cookie:flow}});
+    const cookie=cookieList(back).find(c=>c.startsWith('__Host-caldock_session='))!.split(';')[0];
+    const csrf=(await site.inject({url:'/caldock/me',headers:{cookie}})).json().csrfToken;
+    await site.inject({method:'POST',url:'/caldock/affiliate',payload:{},headers:{cookie,origin,'x-csrf-token':csrf}});
+    const data=(await site.inject({url:'/caldock/affiliate',headers:{cookie}})).json();
+    assert.match(JSON.stringify(data),/https:\/\/wodemac\.example\/\?ref=/);
+  }finally{await site.close();}
+});
+
+test('renewals of a referred order earn commission once per invoice; unreferred orders earn none',async()=>{
+  const partner=await login('stripe-partner'),plain=await login('stripe-renew-plain');
+  await send(partner,'POST','/affiliate',{});
+  await db.query("UPDATE caldock_settings SET commission_bps=1000,commission_mode='first_order' WHERE id=1");
+  try{
+    const buyer=await login('stripe-renew-buyer');
+    await db.query('INSERT INTO caldock_referrals(customer_id,affiliate_id) VALUES($1,$2) ON CONFLICT DO NOTHING',[buyer.user.id,partner.user.id]);
+    const pay=async(who:Login,sub:string)=>{
+      const order=(await send(who,'POST','/orders',{interval:'month',requestKey:randomUUID()})).json();
+      await send(who,'POST',`/orders/${order.id}/checkout`,{});
+      assert.equal((await webhook(completed(order.id,[...sessions.keys()].pop()!,19900,{subscription:sub,customer:'cus_'+sub}))).statusCode,200);
+      return order;
+    };
+    const renew=(sub:string,invoice:string)=>webhook({id:'evt_'+randomUUID(),type:'invoice.paid',data:{object:{id:invoice,billing_reason:'subscription_cycle',subscription:sub,amount_paid:19900}}});
+    const referred=await pay(buyer,'sub_renew_ref');
+    const rows=async(id:string)=>(await db.query('SELECT amount_cents,rate_bps FROM caldock_commissions WHERE order_id=$1',[id])).rows;
+    assert.equal((await rows(referred.id)).length,1);
+    assert.equal((await renew('sub_renew_ref','in_renew_1')).statusCode,200);
+    assert.equal((await renew('sub_renew_ref','in_renew_1')).statusCode,200);
+    let list=await rows(referred.id);assert.equal(list.length,2);assert.equal(list[1].amount_cents,1990);assert.equal(list[1].rate_bps,1000);
+    await renew('sub_renew_ref','in_renew_2');assert.equal((await rows(referred.id)).length,3);
+    const own=await pay(plain,'sub_renew_plain');await renew('sub_renew_plain','in_plain_1');assert.equal((await rows(own.id)).length,0);
+    await db.query("UPDATE caldock_commissions SET status='void' WHERE order_id=$1",[referred.id]);
+    await renew('sub_renew_ref','in_renew_3');assert.equal((await rows(referred.id)).length,3);
+  }finally{await db.query('UPDATE caldock_settings SET commission_bps=0 WHERE id=1');}
+});
+
 test('amount mismatch is recorded for review and never marks the order paid',async()=>{
   const buyer=await login('stripe-mismatch');
   const order=(await send(buyer,'POST','/orders',{interval:'month',requestKey:randomUUID()})).json();
