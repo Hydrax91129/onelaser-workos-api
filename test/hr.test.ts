@@ -164,3 +164,27 @@ test('HR reminders: probation, contract and document dates reach HR once per thr
   await worker.close();
  }finally{await app.close();await db.close();}
 });
+
+test('a disabled account marks the HR record as left; enabling it again brings the person back to active',async()=>{
+ const {db,app,call}=await setup();
+ try{
+  assert.equal((await call('m6','POST','/org/members/m3/status',{active:false})).statusCode,200);
+  let row=(await call('m6','GET','/hr/people')).json().items.find((p:any)=>p.id==='m3');
+  assert.equal(row.status,'left');assert.equal(row.accountActive,false);assert.ok(row.lastDay,'last day is set to the disable date');
+  let detail=(await call('m6','GET','/hr/people/m3')).json();
+  assert.equal(detail.profile.status,'left');assert.ok(detail.events.some((e:any)=>e.kind==='left'),'the history shows the person left');
+  // Disabling twice does not add a second "left" entry.
+  await db.query("UPDATE users SET active=true,disabled_at=NULL WHERE id='m3'");
+  assert.equal((await call('m6','POST','/org/members/m3/status',{active:false})).statusCode,200);
+  assert.equal((await db.query("SELECT count(*)::int AS n FROM hr_events WHERE user_id='m3' AND kind='left'")).rows[0].n,1);
+  assert.equal((await call('m6','POST','/org/members/m3/status',{active:true})).statusCode,200);
+  detail=(await call('m6','GET','/hr/people/m3')).json();
+  assert.equal(detail.profile.status,'active');assert.equal(detail.profile.lastDay,null);
+  // Accounts disabled before this rule existed are marked left when the schema runs (it runs at every start).
+  await db.query("UPDATE users SET active=false,disabled_at='2026-11-01T08:00:00Z' WHERE id='m5'");
+  await db.query("DELETE FROM hr_profiles WHERE user_id='m5'");
+  await db.exec(schema);
+  const m5=(await db.query("SELECT status,last_day::text AS d FROM hr_profiles WHERE user_id='m5'")).rows[0];
+  assert.deepEqual(m5,{status:'left',d:'2026-11-01'});
+ }finally{await app.close();await db.close();}
+});

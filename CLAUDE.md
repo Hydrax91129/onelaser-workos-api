@@ -53,6 +53,7 @@
    修改：产品字段要 `products_manage`，成本/敏感字段和文件要 `product_cost_detail`，MSRP/MAP/促销底价沿用 MSRP 规则；价格参数只有主管理员能改。
    人事档案按地区：美国区只有主管理员（`WORKOS_EXECUTIVE_USER_IDS`）能看能改，没有授权项；中国、海外其他地区用 grants 里的
    `hr_cn_view` / `hr_cn_manage`、`hr_intl_view` / `hr_intl_manage`（只读 / 可管理）逐人授权，只有主管理员能分配。`WORKOS_HR_USER_IDS` 不再给任何权限。
+   停用账号（members.ts）会在同一事务里调用 hr.ts 的 `hrMarkLeft`，把人事档案改为已离职、最后工作日取停用日期并记一条离职记录；恢复账号调用 `hrMarkReturned` 改回在职。反过来，把人事状态改为已离职不会停用账号。
    员工所属地区只有主管理员能改。有权限的人看到完整资料（数据库里加密保存）。员工本人只看自己的基本雇佣信息，自助填写个人资料是第二期。
    婚姻、子女、受抚养人和 EEO 只放在加密字段里，只能用于 payroll、福利和合规统计，不能用于聘用决定。
 7. **工厂对接人**：`users.quality_factory` 非空（邀请时选“工厂对接人”，或管理员在成员列表里改）的账号只能用质量追踪，后端会拦截其他接口。
