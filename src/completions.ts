@@ -66,7 +66,7 @@ export function jsonModel(config: { apiKey?: string; model?: string; baseUrl?: s
     async json(system, user, schema, name, maxTokens = 800) {
       const r = await fetcher(endpoint, { method: 'POST', headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(30000),
         body: JSON.stringify({ model, stream: false, max_tokens: Math.max(100, Math.min(8000, maxTokens)), response_format: { type: 'json_schema', json_schema: { name, strict: true, schema } }, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }) });
-      if (!r.ok) throw new Error('AI_UPSTREAM_FAILED');
+      if (!r.ok) { const e: any = new Error('AI_UPSTREAM_FAILED'); e.status = r.status; e.detail = (await r.text().catch(() => '')).slice(0, 300); throw e; }
       const text = await r.text(); if (text.length > 256 * 1024) throw new Error('AI_UPSTREAM_FAILED');
       const choice = JSON.parse(text).choices?.[0];
       if (choice?.finish_reason !== 'stop' || typeof choice?.message?.content !== 'string') throw new Error('AI_INVALID_OUTPUT');

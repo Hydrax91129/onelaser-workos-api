@@ -60,7 +60,7 @@ export async function registerTranslateRoutes(app: FastifyInstance, db: Database
               cached.set(batch[i][0], t);
               await db.query('INSERT INTO text_translations(text_hash,target,translated,model) VALUES($1,$2,$3,$4) ON CONFLICT(text_hash,target) DO NOTHING', [batch[i][0], v.target, t, o.model.model]);
             }
-          } catch { /* the UI keeps the original text */ }
+          } catch (e: any) { req.log.warn({ err: e?.message, status: e?.status, detail: e?.detail }, 'translation failed'); /* the UI keeps the original text */ }
         }
       }
     }
