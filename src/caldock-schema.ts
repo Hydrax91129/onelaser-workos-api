@@ -39,6 +39,10 @@ CREATE TABLE IF NOT EXISTS caldock_settings (
  version integer NOT NULL DEFAULT 1, updated_at timestamptz NOT NULL DEFAULT now()
 );
 INSERT INTO caldock_settings(id) VALUES(1) ON CONFLICT DO NOTHING;
+-- One-time data change: the launch commission is 20%. The marker keeps a later admin choice, including 0, from being overwritten.
+CREATE TABLE IF NOT EXISTS caldock_data_migrations (id text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());
+WITH applied AS (INSERT INTO caldock_data_migrations(id) VALUES('commission-default-20') ON CONFLICT DO NOTHING RETURNING id)
+UPDATE caldock_settings SET commission_bps=2000 WHERE id=1 AND commission_bps=0 AND EXISTS (SELECT 1 FROM applied);
 CREATE TABLE IF NOT EXISTS caldock_orders (
  id text PRIMARY KEY, customer_id text NOT NULL REFERENCES caldock_users(id), request_key text NOT NULL,
  interval text NOT NULL CHECK(interval IN ('week','month','quarter','half','year')), amount_cents integer NOT NULL CHECK(amount_cents>0),
@@ -71,6 +75,11 @@ CREATE TABLE IF NOT EXISTS caldock_commissions (
  settlement_reference text, settled_at timestamptz, created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS caldock_commission_owner ON caldock_commissions(affiliate_id,status);
+-- An order can now earn once per collected payment; source_id keeps each payment to one commission.
+ALTER TABLE caldock_commissions DROP CONSTRAINT IF EXISTS caldock_commissions_order_id_key;
+ALTER TABLE caldock_commissions ADD COLUMN IF NOT EXISTS source_id text;
+CREATE UNIQUE INDEX IF NOT EXISTS caldock_commission_source ON caldock_commissions(source_id) WHERE source_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS caldock_commission_order ON caldock_commissions(order_id);
 CREATE TABLE IF NOT EXISTS caldock_payment_events (
  event_id text PRIMARY KEY, order_id text NOT NULL REFERENCES caldock_orders(id),
  event_type text NOT NULL CHECK(event_type IN ('paid','refunded')), amount_cents integer NOT NULL,
