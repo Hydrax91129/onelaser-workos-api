@@ -78,6 +78,7 @@ export function signStripePayload(payload:string,secret:string,timestamp=Math.fl
 }
 
 export const STRIPE_RECURRING={
+  week:{interval:'week',interval_count:'1'},
   month:{interval:'month',interval_count:'1'},
   quarter:{interval:'month',interval_count:'3'},
   year:{interval:'year',interval_count:'1'},

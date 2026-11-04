@@ -80,11 +80,11 @@ test('signature verification rejects tampering, stale timestamps and wrong secre
 test('checkout uses the server price, reuses one open page, and only a signed event marks the order paid',async()=>{
   const buyer=await login('stripe-buyer');
   const order=(await send(buyer,'POST','/orders',{interval:'quarter',requestKey:randomUUID()})).json();
-  assert.equal(order.amount_cents,50700);
+  assert.equal(order.amount_cents,47700);
   const first=await send(buyer,'POST',`/orders/${order.id}/checkout`,{lang:'en'});assert.equal(first.statusCode,200,first.body);
   const created=calls.find(c=>c.method==='POST'&&c.path==='/v1/checkout/sessions')!;
   assert.equal(created.params.get('mode'),'subscription');
-  assert.equal(created.params.get('line_items[0][price_data][unit_amount]'),'50700');
+  assert.equal(created.params.get('line_items[0][price_data][unit_amount]'),'47700');
   assert.equal(created.params.get('line_items[0][price_data][recurring][interval]'),'month');
   assert.equal(created.params.get('line_items[0][price_data][recurring][interval_count]'),'3');
   assert.equal(created.params.get('metadata[caldock_order_id]'),order.id);
@@ -98,17 +98,35 @@ test('checkout uses the server price, reuses one open page, and only a signed ev
   assert.equal((await app.inject({method:'POST',url:`/caldock/orders/${order.id}/checkout`,payload:{},headers:{cookie:buyer.cookie}})).statusCode,403);
 
   const sessionId=[...sessions.keys()].pop()!;
-  assert.equal((await webhook(completed(order.id,sessionId,50700),{secret:'whsec_forgedSecret123456'})).statusCode,400);
-  assert.equal((await webhook(completed(order.id,sessionId,50700),{timestamp:Math.floor(Date.now()/1000)-3600})).statusCode,400);
-  assert.equal((await webhook({...completed(order.id,sessionId,50700),livemode:true})).statusCode,400);
+  assert.equal((await webhook(completed(order.id,sessionId,47700),{secret:'whsec_forgedSecret123456'})).statusCode,400);
+  assert.equal((await webhook(completed(order.id,sessionId,47700),{timestamp:Math.floor(Date.now()/1000)-3600})).statusCode,400);
+  assert.equal((await webhook({...completed(order.id,sessionId,47700),livemode:true})).statusCode,400);
   assert.equal((await send(buyer,'GET',`/orders/${order.id}`)).json().status,'pending_payment');
 
-  const ok=await webhook(completed(order.id,sessionId,50700));assert.equal(ok.statusCode,200,ok.body);
+  const ok=await webhook(completed(order.id,sessionId,47700));assert.equal(ok.statusCode,200,ok.body);
   const paid=(await send(buyer,'GET',`/orders/${order.id}`)).json();
   assert.equal(paid.status,'paid');assert.equal(paid.stripe_subscription_id,'sub_'+order.id.slice(0,8));
-  assert.equal((await webhook(completed(order.id,sessionId,50700))).statusCode,200); // duplicate delivery is harmless
+  assert.equal((await webhook(completed(order.id,sessionId,47700))).statusCode,200); // duplicate delivery is harmless
   assert.equal((await db.query('SELECT count(*)::int AS n FROM caldock_payment_events WHERE order_id=$1',[order.id])).rows[0].n,1);
   assert.equal((await send(buyer,'POST',`/orders/${order.id}/checkout`,{})).statusCode,409);
+});
+
+test('the weekly plan charges 6900 every week and delivery covers 7 days',async()=>{
+  const owner=await login('stripe-owner'),buyer=await login('stripe-weekly');
+  const order=(await send(buyer,'POST','/orders',{interval:'week',requestKey:randomUUID()})).json();
+  assert.equal(order.amount_cents,6900);
+  await send(buyer,'POST',`/orders/${order.id}/checkout`,{});
+  const created=calls.filter(c=>c.method==='POST'&&c.path==='/v1/checkout/sessions').pop()!;
+  assert.equal(created.params.get('line_items[0][price_data][unit_amount]'),'6900');
+  assert.equal(created.params.get('line_items[0][price_data][recurring][interval]'),'week');
+  assert.equal(created.params.get('line_items[0][price_data][recurring][interval_count]'),'1');
+  const sessionId=[...sessions.keys()].pop()!;
+  assert.equal((await webhook(completed(order.id,sessionId,6900))).statusCode,200);
+  const paid=(await send(buyer,'GET',`/orders/${order.id}`)).json();assert.equal(paid.status,'paid');
+  const preparing=(await send(owner,'PATCH',`/admin/orders/${order.id}`,{status:'provisioning',expectedVersion:paid.version,deliveryNote:'preparing'}));assert.equal(preparing.statusCode,200,preparing.body);
+  const live=(await send(owner,'PATCH',`/admin/orders/${order.id}`,{status:'active',expectedVersion:preparing.json().version,deliveryNote:'ready'}));assert.equal(live.statusCode,200,live.body);
+  const days=(new Date(live.json().billing_ends_at).getTime()-new Date(live.json().delivered_at).getTime())/86400000;
+  assert.ok(Math.abs(days-7)<0.01,String(days));
 });
 
 test('amount mismatch is recorded for review and never marks the order paid',async()=>{

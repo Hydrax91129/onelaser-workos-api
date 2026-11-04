@@ -14,7 +14,7 @@ type Session = {user:Customer;csrf:string;token:string};
 export type CaldockOptions = {publicUrl?:string;marketingUrl?:string;secureCookies?:boolean;adminUserIds?:string[];providers?:Partial<Record<CaldockProvider,CaldockGateway>>;stripe?:CaldockStripe};
 const id=z.string().uuid(),providerName=z.enum(['google','apple']);
 const status=z.enum(['pending_payment','paid','provisioning','active','cancelled','refunded']);
-const interval=z.enum(['month','quarter','year']);
+const interval=z.enum(['week','month','quarter','year']);
 const nextView=z.enum(['account','orders','affiliate','checkout','admin','studio']);
 const token=()=>randomBytes(32).toString('base64url');
 export const caldockCookieName=(secure:boolean,kind='session')=>(secure?'__Host-':'')+'caldock_'+kind;
@@ -145,8 +145,8 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
           if(existing.status==='complete')deny(409,'CALDOCK_PAYMENT_IN_PROGRESS','Payment for this order is being confirmed; reload in a moment');
         }
         const back=(view:string,result:string)=>{const u=new URL('/caldock/',origin);u.searchParams.set('view',view);u.searchParams.set('lang',input.lang);u.searchParams.set('interval',order.interval);u.searchParams.set('checkout',result);return u.toString();};
-        const names={month:['Monthly','月付'],quarter:['Quarterly','季付'],year:['Yearly','年付']}[order.interval as 'month'|'quarter'|'year'];
-        const recurring=STRIPE_RECURRING[order.interval as 'month'|'quarter'|'year'];
+        const names={week:['Weekly','周付'],month:['Monthly','月付'],quarter:['Quarterly','季付'],year:['Yearly','年付']}[order.interval as 'week'|'month'|'quarter'|'year'];
+        const recurring=STRIPE_RECURRING[order.interval as 'week'|'month'|'quarter'|'year'];
         const params:Record<string,string>={
           mode:'subscription',client_reference_id:order.id,locale:input.lang==='en'?'en':'zh',
           success_url:back('orders','success'),cancel_url:back('checkout','cancelled'),
@@ -193,7 +193,7 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
     routes.get('/admin/orders',async req=>{admin(req);const q=z.object({status:status.optional(),search:z.string().max(100).default(''),page:z.coerce.number().int().min(0).max(100000).default(0)}).strict().parse(req.query);const where="WHERE ($1::text IS NULL OR o.status=$1) AND ($2='' OR o.id ILIKE $3 OR u.email ILIKE $3 OR u.display_name ILIKE $3)";const params=[q.status||null,q.search,'%'+q.search+'%'];return {items:(await db.query(`SELECT o.*,u.email,u.display_name,a.code AS referral_code FROM caldock_orders o JOIN caldock_users u ON u.id=o.customer_id LEFT JOIN caldock_affiliates a ON a.user_id=o.affiliate_id ${where} ORDER BY o.created_at DESC,o.id LIMIT 50 OFFSET $4`,[...params,q.page*50])).rows,total:Number((await db.query(`SELECT count(*) FROM caldock_orders o JOIN caldock_users u ON u.id=o.customer_id ${where}`,params)).rows[0].count)};});
     routes.patch<{Params:{id:string}}>('/admin/orders/:id',async req=>{
       const current=admin(req),input=z.object({status:z.enum(['provisioning','active']),expectedVersion:z.number().int().positive(),deliveryNote:z.string().trim().max(1000).default('')}).strict().parse(req.body);
-      return db.transaction(async tx=>{const order=(await tx.query('SELECT * FROM caldock_orders WHERE id=$1 FOR UPDATE',[id.parse(req.params.id)])).rows[0];if(!order)deny(404,'NOT_FOUND','Order not found');if(order.version!==input.expectedVersion)deny(409,'VERSION_CONFLICT','Order changed; reload before continuing');if(!(order.status==='paid'&&input.status==='provisioning'||order.status==='provisioning'&&input.status==='active'))deny(409,'INVALID_ORDER_STATE','Only verified paid orders can be provisioned and delivered');const row=(await tx.query("UPDATE caldock_orders SET status=$2,version=version+1,delivery_note=$3,delivered_at=CASE WHEN $2='active' THEN now() ELSE delivered_at END,billing_ends_at=CASE WHEN $2='active' THEN now()+CASE WHEN interval='year' THEN interval '1 year' WHEN interval='quarter' THEN interval '3 months' ELSE interval '1 month' END ELSE billing_ends_at END WHERE id=$1 RETURNING *",[order.id,input.status,input.deliveryNote])).rows[0];
+      return db.transaction(async tx=>{const order=(await tx.query('SELECT * FROM caldock_orders WHERE id=$1 FOR UPDATE',[id.parse(req.params.id)])).rows[0];if(!order)deny(404,'NOT_FOUND','Order not found');if(order.version!==input.expectedVersion)deny(409,'VERSION_CONFLICT','Order changed; reload before continuing');if(!(order.status==='paid'&&input.status==='provisioning'||order.status==='provisioning'&&input.status==='active'))deny(409,'INVALID_ORDER_STATE','Only verified paid orders can be provisioned and delivered');const row=(await tx.query("UPDATE caldock_orders SET status=$2,version=version+1,delivery_note=$3,delivered_at=CASE WHEN $2='active' THEN now() ELSE delivered_at END,billing_ends_at=CASE WHEN $2='active' THEN now()+CASE WHEN interval='year' THEN interval '1 year' WHEN interval='quarter' THEN interval '3 months' WHEN interval='week' THEN interval '7 days' ELSE interval '1 month' END ELSE billing_ends_at END WHERE id=$1 RETURNING *",[order.id,input.status,input.deliveryNote])).rows[0];
         if(input.status==='active'&&stripe&&row.stripe_subscription_id){
           // Billing starts on delivery: push the next automatic charge to the end of the delivered period.
           const next=Math.floor(new Date(row.billing_ends_at).getTime()/1000);
@@ -265,7 +265,7 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
     if(!order)return;
     if(event.type==='invoice.paid'&&object.billing_reason==='subscription_cycle'){
       // Renewal collected: extend the paid service period. Renewal commissions remain a separate decision.
-      await db.query("UPDATE caldock_orders SET billing_ends_at=GREATEST(COALESCE(billing_ends_at,now()),now())+CASE WHEN interval='year' THEN interval '1 year' WHEN interval='quarter' THEN interval '3 months' ELSE interval '1 month' END,version=version+1 WHERE id=$1 AND status='active'",[order.id]);
+      await db.query("UPDATE caldock_orders SET billing_ends_at=GREATEST(COALESCE(billing_ends_at,now()),now())+CASE WHEN interval='year' THEN interval '1 year' WHEN interval='quarter' THEN interval '3 months' WHEN interval='week' THEN interval '7 days' ELSE interval '1 month' END,version=version+1 WHERE id=$1 AND status='active'",[order.id]);
       await caldockAudit(db,null,'payment.renewal',order.id,{invoice:object.id,amountCents:Number(object.amount_paid)});
     } else if(event.type==='invoice.payment_failed'){
       await caldockAudit(db,null,'payment.renewal_failed',order.id,{invoice:object.id});
