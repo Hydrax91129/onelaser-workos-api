@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS caldock_settings (
 INSERT INTO caldock_settings(id) VALUES(1) ON CONFLICT DO NOTHING;
 CREATE TABLE IF NOT EXISTS caldock_orders (
  id text PRIMARY KEY, customer_id text NOT NULL REFERENCES caldock_users(id), request_key text NOT NULL,
- interval text NOT NULL CHECK(interval IN ('month','quarter','year')), amount_cents integer NOT NULL CHECK(amount_cents>0),
+ interval text NOT NULL CHECK(interval IN ('week','month','quarter','half','year')), amount_cents integer NOT NULL CHECK(amount_cents>0),
  currency text NOT NULL DEFAULT 'USD' CHECK(currency='USD'),
  status text NOT NULL DEFAULT 'pending_payment' CHECK(status IN ('pending_payment','paid','provisioning','active','cancelled','refunded')),
  affiliate_id text REFERENCES caldock_affiliates(user_id), commission_bps integer NOT NULL CHECK(commission_bps BETWEEN 0 AND 10000),
@@ -53,14 +53,14 @@ CREATE TABLE IF NOT EXISTS caldock_orders (
 CREATE INDEX IF NOT EXISTS caldock_order_customer ON caldock_orders(customer_id,created_at DESC);
 CREATE INDEX IF NOT EXISTS caldock_order_status ON caldock_orders(status,created_at DESC);
 CREATE INDEX IF NOT EXISTS caldock_order_affiliate ON caldock_orders(affiliate_id);
--- Expand the previous two-term constraint without changing existing order amounts.
+-- Expand the previous constraint without changing existing order amounts.
 DO $caldock$
 BEGIN
- IF EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='caldock_orders'::regclass AND conname='caldock_orders_interval_check' AND pg_get_constraintdef(oid) NOT LIKE '%quarter%') THEN
+ IF EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='caldock_orders'::regclass AND conname='caldock_orders_interval_check' AND pg_get_constraintdef(oid) NOT LIKE '%half%') THEN
   ALTER TABLE caldock_orders DROP CONSTRAINT caldock_orders_interval_check;
  END IF;
  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='caldock_orders'::regclass AND conname='caldock_orders_interval_check') THEN
-  ALTER TABLE caldock_orders ADD CONSTRAINT caldock_orders_interval_check CHECK(interval IN ('month','quarter','year'));
+  ALTER TABLE caldock_orders ADD CONSTRAINT caldock_orders_interval_check CHECK(interval IN ('week','month','quarter','half','year'));
  END IF;
 END $caldock$;
 CREATE TABLE IF NOT EXISTS caldock_commissions (
@@ -78,6 +78,10 @@ CREATE TABLE IF NOT EXISTS caldock_payment_events (
 );
 -- Stripe adapter (additive and repeatable). Provider IDs only; no card data is stored.
 ALTER TABLE caldock_orders ADD COLUMN IF NOT EXISTS stripe_checkout_session_id text;
+ALTER TABLE caldock_orders ADD COLUMN IF NOT EXISTS list_amount_cents integer;
+ALTER TABLE caldock_orders ADD COLUMN IF NOT EXISTS offer_day text;
+ALTER TABLE caldock_orders ADD COLUMN IF NOT EXISTS offer_hold_until timestamptz;
+CREATE TABLE IF NOT EXISTS caldock_offer_days (day text PRIMARY KEY);
 ALTER TABLE caldock_orders ADD COLUMN IF NOT EXISTS stripe_customer_id text;
 ALTER TABLE caldock_orders ADD COLUMN IF NOT EXISTS stripe_subscription_id text;
 CREATE INDEX IF NOT EXISTS caldock_order_stripe_subscription ON caldock_orders(stripe_subscription_id);

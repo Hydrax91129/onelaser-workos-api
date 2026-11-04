@@ -29,7 +29,7 @@ before(async()=>{
 after(async()=>{if(app)await app.close();else if(db)await db.close();if(dbAdmin&&isolated){await dbAdmin.exec(`DROP SCHEMA ${isolated} CASCADE`);await dbAdmin.close();}});
 const send=(who:Login,method:'GET'|'POST'|'PATCH'|'DELETE',url:string,payload?:Record<string,unknown>,headers:Record<string,string>={})=>app.inject({method,url:'/caldock'+url,payload,headers:{cookie:who.cookie,origin,'x-csrf-token':who.csrf,...headers}});
 function cookies(response:any){return [response.headers['set-cookie']].flat().filter(Boolean).map(String);}
-async function login(code:string,provider:CaldockProvider='google',ref?:string,billing:'month'|'quarter'|'year'='year'):Promise<Login>{
+async function login(code:string,provider:CaldockProvider='google',ref?:string,billing:'week'|'month'|'quarter'|'half'|'year'='year'):Promise<Login>{
  const start=await app.inject(`/caldock/auth/${provider}/start?next=account&lang=zh&interval=${billing}${ref?'&ref='+ref:''}`);assert.equal(start.statusCode,302,start.body);
  const state=new URL(start.headers.location!).searchParams.get('state')!;
  const cookie=cookies(start).map(c=>c.split(';')[0]).join('; ');
@@ -40,7 +40,7 @@ async function login(code:string,provider:CaldockProvider='google',ref?:string,b
  return {cookie:session.split(';')[0],csrf:me.json().csrfToken,...me.json()};
 }
 test('capabilities report server prices and no live payment; missing providers fail closed',async()=>{
- const cap=(await app.inject('/caldock/capabilities')).json();assert.equal(cap.prices.month,19900);assert.equal(cap.prices.quarter,50700);assert.equal(cap.prices.year,154800);assert.equal(cap.payments,false);assert.equal(cap.referrals.automaticPayouts,false);
+ const cap=(await app.inject('/caldock/capabilities')).json();assert.equal(cap.prices.month,19900);assert.equal(cap.prices.quarter,53700);assert.equal(cap.prices.year,166800);assert.equal(cap.payments,false);assert.equal(cap.referrals.automaticPayouts,false);
  const empty=await buildApp({db,environment:'production',closeDatabase:false,caldock:{publicUrl:origin}});
  try{assert.equal((await empty.inject('/caldock/auth/google/start')).statusCode,503);assert.equal((await empty.inject('/caldock/me')).statusCode,401);assert.equal((await empty.inject('/caldock/admin/orders')).statusCode,401);}finally{await empty.close();}
  const config=caldockOptionsFromEnv({NODE_ENV:'production',CALDOCK_GOOGLE_CLIENT_ID:'incomplete'});assert.equal(config.providers?.google,undefined);assert.deepEqual(config.adminUserIds,[]);
@@ -87,7 +87,7 @@ test('server owns order prices and customer identity; retries return one order',
  const key=randomUUID();const payload={interval:'year',requestKey:key};
  assert.equal((await send(buyer,'POST','/orders',{...payload,amountCents:1})).statusCode,400);
  assert.equal((await send(buyer,'POST','/orders',{...payload,customerId:owner.user.id})).statusCode,400);
- const created=await send(buyer,'POST','/orders',payload);assert.equal(created.statusCode,201,created.body);const row=created.json();assert.equal(row.amount_cents,154800);assert.equal(row.customer_id,buyer.user.id);assert.equal(row.status,'pending_payment');
+ const created=await send(buyer,'POST','/orders',payload);assert.equal(created.statusCode,201,created.body);const row=created.json();assert.equal(row.amount_cents,166800);assert.equal(row.customer_id,buyer.user.id);assert.equal(row.status,'pending_payment');
  const retry=await send(buyer,'POST','/orders',payload);assert.equal(retry.json().id,row.id);
  assert.equal((await send(buyer,'POST','/orders',{interval:'month',requestKey:key})).statusCode,409);
  assert.equal((await send(buyer,'POST','/orders',{interval:'month',requestKey:randomUUID()})).statusCode,409);
@@ -148,10 +148,10 @@ test('quarterly login, authoritative upfront price, referral commission and thre
  const key=randomUUID();
  assert.equal((await send(customer,'POST','/orders',{interval:'quarter',requestKey:key,amountCents:16900})).statusCode,400);
  const created=await send(customer,'POST','/orders',{interval:'quarter',requestKey:key});assert.equal(created.statusCode,201,created.body);
- const row=created.json();assert.equal(row.amount_cents,50700);assert.equal(row.interval,'quarter');
+ const row=created.json();assert.equal(row.amount_cents,53700);assert.equal(row.interval,'quarter');
  assert.equal((await send(customer,'POST','/orders',{interval:'quarter',requestKey:key})).json().id,row.id);
- await recordVerifiedCaldockPayment(db,{eventId:'quarterly-verified-paid',orderId:row.id,type:'paid',amountCents:50700,currency:'USD'});
- const ledger=(await db.query('SELECT amount_cents FROM caldock_commissions WHERE order_id=$1',[row.id])).rows[0];assert.equal(ledger.amount_cents,10140);
+ await recordVerifiedCaldockPayment(db,{eventId:'quarterly-verified-paid',orderId:row.id,type:'paid',amountCents:53700,currency:'USD'});
+ const ledger=(await db.query('SELECT amount_cents FROM caldock_commissions WHERE order_id=$1',[row.id])).rows[0];assert.equal(ledger.amount_cents,10740);
  const paid=(await send(customer,'GET','/orders/'+row.id)).json();
  const provisioning=(await send(owner,'PATCH','/admin/orders/'+row.id,{status:'provisioning',expectedVersion:paid.version})).json();
  const delivered=await send(owner,'PATCH','/admin/orders/'+row.id,{status:'active',expectedVersion:provisioning.version});assert.equal(delivered.statusCode,200,delivered.body);

@@ -27,7 +27,7 @@ test('public view contains defaults; members and writes remain protected and com
  assert.equal((await app.inject('/caldock/studio/health')).json().publicView,true);
  const s=await state();assert.deepEqual(s.state,studioSeed);assert.equal(s.revision,0);
  assert.equal((await app.inject('/caldock/studio/members')).statusCode,403);
- const caps=(await app.inject('/caldock/capabilities')).json();assert.equal(caps.prices.year,154800);
+ const caps=(await app.inject('/caldock/capabilities')).json();assert.equal(caps.prices.year,166800);
  assert.equal((await app.inject({method:'PATCH',url:'/caldock/studio/state',payload:change(s,annual,130)})).statusCode,403);
  for(const role of ['viewer','outsider'])assert.equal((await send(role,'PATCH','/state',change(s,annual,130))).statusCode,403);
  assert.equal((await send('editor','PATCH','/state',change(s,annual,130),{'x-csrf-token':'wrong'})).statusCode,403);

@@ -20,6 +20,7 @@ const fakeFetch:StripeFetch=async(url,init)=>{
   assert.equal(init.headers.authorization,'Bearer sk_test_fakeKey1234567890');
   const ok=(body:any)=>({ok:true,status:200,json:async()=>body});
   if(init.method==='POST'&&u.pathname==='/v1/checkout/sessions'){const id='cs_test_'+(++sessionCount);sessions.set(id,{status:'open',url:'https://checkout.stripe.test/'+id});return ok({id,...sessions.get(id)});}
+  if(init.method==='POST'&&u.pathname==='/v1/coupons')return ok({id:params.get('id')});
   const cs=/^\/v1\/checkout\/sessions\/([^/]+)(\/expire)?$/.exec(u.pathname);
   if(cs){const s=sessions.get(cs[1]);if(!s)return {ok:false,status:404,json:async()=>({error:{code:'resource_missing',message:'secret detail'}})};if(cs[2])s.status='expired';return ok({id:cs[1],...s});}
   if(u.pathname.startsWith('/v1/subscriptions/'))return ok({id:u.pathname.split('/').pop()});
@@ -80,11 +81,11 @@ test('signature verification rejects tampering, stale timestamps and wrong secre
 test('checkout uses the server price, reuses one open page, and only a signed event marks the order paid',async()=>{
   const buyer=await login('stripe-buyer');
   const order=(await send(buyer,'POST','/orders',{interval:'quarter',requestKey:randomUUID()})).json();
-  assert.equal(order.amount_cents,50700);
+  assert.equal(order.amount_cents,53700);
   const first=await send(buyer,'POST',`/orders/${order.id}/checkout`,{lang:'en'});assert.equal(first.statusCode,200,first.body);
   const created=calls.find(c=>c.method==='POST'&&c.path==='/v1/checkout/sessions')!;
   assert.equal(created.params.get('mode'),'subscription');
-  assert.equal(created.params.get('line_items[0][price_data][unit_amount]'),'50700');
+  assert.equal(created.params.get('line_items[0][price_data][unit_amount]'),'53700');
   assert.equal(created.params.get('line_items[0][price_data][recurring][interval]'),'month');
   assert.equal(created.params.get('line_items[0][price_data][recurring][interval_count]'),'3');
   assert.equal(created.params.get('metadata[caldock_order_id]'),order.id);
@@ -98,17 +99,86 @@ test('checkout uses the server price, reuses one open page, and only a signed ev
   assert.equal((await app.inject({method:'POST',url:`/caldock/orders/${order.id}/checkout`,payload:{},headers:{cookie:buyer.cookie}})).statusCode,403);
 
   const sessionId=[...sessions.keys()].pop()!;
-  assert.equal((await webhook(completed(order.id,sessionId,50700),{secret:'whsec_forgedSecret123456'})).statusCode,400);
-  assert.equal((await webhook(completed(order.id,sessionId,50700),{timestamp:Math.floor(Date.now()/1000)-3600})).statusCode,400);
-  assert.equal((await webhook({...completed(order.id,sessionId,50700),livemode:true})).statusCode,400);
+  assert.equal((await webhook(completed(order.id,sessionId,53700),{secret:'whsec_forgedSecret123456'})).statusCode,400);
+  assert.equal((await webhook(completed(order.id,sessionId,53700),{timestamp:Math.floor(Date.now()/1000)-3600})).statusCode,400);
+  assert.equal((await webhook({...completed(order.id,sessionId,53700),livemode:true})).statusCode,400);
   assert.equal((await send(buyer,'GET',`/orders/${order.id}`)).json().status,'pending_payment');
 
-  const ok=await webhook(completed(order.id,sessionId,50700));assert.equal(ok.statusCode,200,ok.body);
+  const ok=await webhook(completed(order.id,sessionId,53700));assert.equal(ok.statusCode,200,ok.body);
   const paid=(await send(buyer,'GET',`/orders/${order.id}`)).json();
   assert.equal(paid.status,'paid');assert.equal(paid.stripe_subscription_id,'sub_'+order.id.slice(0,8));
-  assert.equal((await webhook(completed(order.id,sessionId,50700))).statusCode,200); // duplicate delivery is harmless
+  assert.equal((await webhook(completed(order.id,sessionId,53700))).statusCode,200); // duplicate delivery is harmless
   assert.equal((await db.query('SELECT count(*)::int AS n FROM caldock_payment_events WHERE order_id=$1',[order.id])).rows[0].n,1);
   assert.equal((await send(buyer,'POST',`/orders/${order.id}/checkout`,{})).statusCode,409);
+});
+
+test('the weekly plan charges 6900 every week and delivery covers 7 days',async()=>{
+  const owner=await login('stripe-owner'),buyer=await login('stripe-weekly');
+  const order=(await send(buyer,'POST','/orders',{interval:'week',requestKey:randomUUID()})).json();
+  assert.equal(order.amount_cents,6900);
+  await send(buyer,'POST',`/orders/${order.id}/checkout`,{});
+  const created=calls.filter(c=>c.method==='POST'&&c.path==='/v1/checkout/sessions').pop()!;
+  assert.equal(created.params.get('line_items[0][price_data][unit_amount]'),'6900');
+  assert.equal(created.params.get('line_items[0][price_data][recurring][interval]'),'week');
+  assert.equal(created.params.get('line_items[0][price_data][recurring][interval_count]'),'1');
+  const sessionId=[...sessions.keys()].pop()!;
+  assert.equal((await webhook(completed(order.id,sessionId,6900))).statusCode,200);
+  const paid=(await send(buyer,'GET',`/orders/${order.id}`)).json();assert.equal(paid.status,'paid');
+  const preparing=(await send(owner,'PATCH',`/admin/orders/${order.id}`,{status:'provisioning',expectedVersion:paid.version,deliveryNote:'preparing'}));assert.equal(preparing.statusCode,200,preparing.body);
+  const live=(await send(owner,'PATCH',`/admin/orders/${order.id}`,{status:'active',expectedVersion:preparing.json().version,deliveryNote:'ready'}));assert.equal(live.statusCode,200,live.body);
+  const days=(new Date(live.json().billing_ends_at).getTime()-new Date(live.json().delivered_at).getTime())/86400000;
+  assert.ok(Math.abs(days-7)<0.01,String(days));
+});
+
+test('the half-yearly plan charges 95400 every 6 months',async()=>{
+  const buyer=await login('stripe-half');
+  const order=(await send(buyer,'POST','/orders',{interval:'half',requestKey:randomUUID()})).json();
+  assert.equal(order.amount_cents,95400);
+  await send(buyer,'POST',`/orders/${order.id}/checkout`,{});
+  const created=calls.filter(c=>c.method==='POST'&&c.path==='/v1/checkout/sessions').pop()!;
+  assert.equal(created.params.get('line_items[0][price_data][recurring][interval]'),'month');
+  assert.equal(created.params.get('line_items[0][price_data][recurring][interval_count]'),'6');
+});
+
+test('three first-period seats a day: 20% off once, weekly excluded, a cancelled hold frees its seat',async()=>{
+  const offerApp=await buildApp({db,environment:'production',closeDatabase:false,caldock:{publicUrl:origin,providers:gateways,stripe,firstPeriodOffer:true}});
+  const signIn=async(code:string)=>{
+    const start=await offerApp.inject('/caldock/auth/google/start?next=account&lang=zh&interval=month');
+    const state=new URL(start.headers.location!).searchParams.get('state')!,flow=cookieList(start).map(c=>c.split(';')[0]).join('; ');
+    const back=await offerApp.inject({url:`/caldock/auth/google/callback?state=${state}&code=${code}`,headers:{cookie:flow}});
+    const cookie=cookieList(back).find(c=>c.startsWith('__Host-caldock_session='))!.split(';')[0];
+    return {cookie,csrf:(await offerApp.inject({url:'/caldock/me',headers:{cookie}})).json().csrfToken};
+  };
+  const call=(who:{cookie:string;csrf:string},method:'POST'|'PATCH',url:string,payload:Record<string,unknown>)=>offerApp.inject({method,url:'/caldock'+url,payload,headers:{cookie:who.cookie,origin,'x-csrf-token':who.csrf}});
+  const buy=async(code:string,interval:string)=>{
+    const who=await signIn(code),order=(await call(who,'POST','/orders',{interval,requestKey:randomUUID()})).json();
+    assert.equal((await call(who,'POST',`/orders/${order.id}/checkout`,{})).statusCode,200);
+    const params=calls.filter(c=>c.method==='POST'&&c.path==='/v1/checkout/sessions').pop()!.params;
+    const row=(await db.query('SELECT * FROM caldock_orders WHERE id=$1',[order.id])).rows[0];
+    return {who,order,row,params};
+  };
+  const left=async()=>(await offerApp.inject('/caldock/capabilities')).json().offer;
+  try{
+    await db.query("UPDATE caldock_orders SET offer_day=NULL");
+    const fresh=await left();assert.equal(fresh.seatsLeft,3);assert.equal(fresh.percentOff,20);
+    assert.ok(Date.parse(fresh.resetsAt)>Date.now());assert.ok(Date.parse(fresh.resetsAt)-Date.now()<=86400000);
+    assert.equal(new Date(fresh.resetsAt).getUTCHours(),16);
+    const weekly=await buy('offer-weekly','week');
+    assert.equal(weekly.row.amount_cents,6900);assert.equal(weekly.params.get('discounts[0][coupon]'),null);assert.equal((await left()).seatsLeft,3);
+    const first=await buy('offer-1','month');
+    assert.equal(first.row.amount_cents,15920);assert.equal(first.row.list_amount_cents,19900);
+    assert.equal(first.params.get('line_items[0][price_data][unit_amount]'),'19900');assert.equal(first.params.get('discounts[0][coupon]'),'caldock-first-period-20');assert.ok(first.params.get('expires_at'));
+    const coupon=calls.filter(c=>c.path==='/v1/coupons').pop()!.params;assert.equal(coupon.get('duration'),'once');assert.equal(coupon.get('percent_off'),'20');
+    const second=await buy('offer-2','year');assert.equal(second.row.amount_cents,133440);
+    const third=await buy('offer-3','half');assert.equal(third.row.amount_cents,76320);
+    assert.equal((await left()).seatsLeft,0);
+    const fourth=await buy('offer-4','quarter');
+    assert.equal(fourth.row.amount_cents,53700);assert.equal(fourth.row.offer_day,null);assert.equal(fourth.params.get('discounts[0][coupon]'),null);
+    assert.equal((await call(first.who,'PATCH',`/orders/${first.order.id}`,{action:'cancel_pending',expectedVersion:first.order.version})).statusCode,200);
+    assert.equal((await left()).seatsLeft,1);
+    await db.query("UPDATE caldock_orders SET offer_hold_until=now()-interval '1 minute' WHERE id=$1",[second.order.id]);
+    assert.equal((await left()).seatsLeft,2);
+  }finally{await db.query("UPDATE caldock_orders SET offer_day=NULL");await offerApp.close();}
 });
 
 test('amount mismatch is recorded for review and never marks the order paid',async()=>{
@@ -148,7 +218,7 @@ test('delivery moves the next charge, stopping renewal syncs Stripe, and a full 
   const owner=await login('stripe-owner'),buyer=await login('stripe-lifecycle');
   const order=(await send(buyer,'POST','/orders',{interval:'year',requestKey:randomUUID()})).json();
   await send(buyer,'POST',`/orders/${order.id}/checkout`,{});
-  await webhook(completed(order.id,[...sessions.keys()].pop()!,154800));
+  await webhook(completed(order.id,[...sessions.keys()].pop()!,166800));
   let row=(await send(buyer,'GET',`/orders/${order.id}`)).json();
   row=(await send(owner,'PATCH',`/admin/orders/${order.id}`,{status:'provisioning',expectedVersion:row.version})).json();
   const delivered=await send(owner,'PATCH',`/admin/orders/${order.id}`,{status:'active',expectedVersion:row.version});assert.equal(delivered.statusCode,200,delivered.body);
@@ -156,7 +226,7 @@ test('delivery moves the next charge, stopping renewal syncs Stripe, and a full 
   assert.equal(Number(move.params.get('trial_end')),Math.floor(new Date(delivered.json().billing_ends_at).getTime()/1000));
   assert.equal(move.params.get('proration_behavior'),'none');
 
-  const renewal={id:'evt_'+randomUUID(),type:'invoice.paid',data:{object:{id:'in_1',billing_reason:'subscription_cycle',subscription:row.stripe_subscription_id,amount_paid:154800}}};
+  const renewal={id:'evt_'+randomUUID(),type:'invoice.paid',data:{object:{id:'in_1',billing_reason:'subscription_cycle',subscription:row.stripe_subscription_id,amount_paid:166800}}};
   const before=new Date(delivered.json().billing_ends_at).getTime();
   await webhook(renewal);await webhook(renewal); // same event twice extends once
   const extended=(await send(buyer,'GET',`/orders/${order.id}`)).json();
@@ -167,7 +237,7 @@ test('delivery moves the next charge, stopping renewal syncs Stripe, and a full 
   assert.equal(stop.json().renewal_enabled,false);
   assert.ok(calls.some(c=>c.path==='/v1/subscriptions/'+row.stripe_subscription_id&&c.params.get('cancel_at_period_end')==='true'));
 
-  const refund={id:'evt_'+randomUUID(),type:'charge.refunded',data:{object:{id:'ch_1',refunded:true,amount:154800,currency:'usd',customer:row.stripe_customer_id}}};
+  const refund={id:'evt_'+randomUUID(),type:'charge.refunded',data:{object:{id:'ch_1',refunded:true,amount:166800,currency:'usd',customer:row.stripe_customer_id}}};
   assert.equal((await webhook(refund)).statusCode,200);
   assert.equal((await send(buyer,'GET',`/orders/${order.id}`)).json().status,'refunded');
   assert.ok(calls.some(c=>c.method==='DELETE'&&c.path==='/v1/subscriptions/'+row.stripe_subscription_id));
