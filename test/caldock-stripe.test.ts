@@ -124,6 +124,26 @@ test('amount mismatch is recorded for review and never marks the order paid',asy
   assert.equal(sessions.get(sessionId)!.status,'expired');
 });
 
+test('after going live, an order left with a test session can still be paid or cancelled',async()=>{
+  const buyer=await login('stripe-stale-pay'),canceller=await login('stripe-stale-cancel');
+  const order=(await send(buyer,'POST','/orders',{interval:'month',requestKey:randomUUID()})).json();
+  const other=(await send(canceller,'POST','/orders',{interval:'month',requestKey:randomUUID()})).json();
+  await db.query("UPDATE caldock_orders SET stripe_checkout_session_id='cs_test_from_before_live' WHERE id=ANY($1)",[[order.id,other.id]]);
+  stripe.mode='live';
+  try{
+    const before=calls.length;
+    const paid=await send(buyer,'POST',`/orders/${order.id}/checkout`,{});
+    assert.equal(paid.statusCode,200,paid.body);
+    assert.ok(!calls.slice(before).some(c=>c.path.includes('cs_test_from_before_live')));
+    assert.notEqual((await send(buyer,'GET',`/orders/${order.id}`)).json().stripe_checkout_session_id,'cs_test_from_before_live');
+    const cancelled=await send(canceller,'PATCH',`/orders/${other.id}`,{action:'cancel_pending',expectedVersion:other.version});
+    assert.equal(cancelled.statusCode,200,cancelled.body);
+    assert.equal(cancelled.json().status,'cancelled');
+  }finally{stripe.mode='test';}
+  // In test mode the same session id is real and still has to be looked up.
+  assert.equal((await send(buyer,'PATCH',`/orders/${order.id}`,{action:'cancel_pending',expectedVersion:order.version})).statusCode,200);
+});
+
 test('delivery moves the next charge, stopping renewal syncs Stripe, and a full refund ends the rental',async()=>{
   const owner=await login('stripe-owner'),buyer=await login('stripe-lifecycle');
   const order=(await send(buyer,'POST','/orders',{interval:'year',requestKey:randomUUID()})).json();
