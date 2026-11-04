@@ -1,12 +1,15 @@
-/* Task completion with an AI score, task attachments, AI report insights and live FX.
+/* Task completion, scoring, task attachments, AI report insights and live FX.
  *
- * Completion rule (product decision):
+ * Completion rule (product decision, 2026-11-04):
  *  - A task can only be marked done through POST /tasks/:id/complete with a written result and a
- *    self-evaluation. The board cannot set "done" directly.
- *  - On completion the AI scores the result 0–10 ("完成 9.5/10"). Without an AI score the task is
- *    shown as "awaiting AI score" and does not count as completed in rankings.
- *  - Within 3 days the owner may reopen and resubmit; after 3 days the task moves to Completed and
- *    the completion is locked. An unscored result can still be scored by its owner or reviewer. Successful scores are immutable.
+ *    self-evaluation. The board cannot set "done" directly. Marking it done counts as done right away
+ *    (rankings count it immediately); scoring comes later.
+ *  - Scoring: within 24 hours of completion a person (the reviewer, the assigner, the owner's manager or
+ *    an administrator — never the owner) may give a 0–10 score. If nobody has scored it after 24 hours,
+ *    a periodic job asks the AI to score it. Each completion has one final score: the person's score if
+ *    given, otherwise the AI's. Final scores are immutable; the AI never overwrites a person's score.
+ *  - Within 3 days the owner may reopen and resubmit (which starts a new 24-hour window); after 3 days
+ *    the task moves to Completed and the completion is locked.
  */
 import { pushInbox, taskFollowers } from './inbox.js';
 import { randomUUID, createHash } from 'node:crypto';
@@ -18,6 +21,10 @@ import { deny } from './errors.js';
 import { visibleTask } from './domain.js';
 
 export const COMPLETION_LOCK_MS = 3 * 86400000;
+/** A person may score a completion within this window; after it the AI scores unscored completions. */
+export const HUMAN_SCORE_WINDOW_MS = 24 * 3600000;
+/** Automatic AI attempts per completion before the job leaves it for a manual retry. */
+const AUTO_SCORE_MAX_ATTEMPTS = 5;
 
 export const completionSchema = `
 CREATE TABLE IF NOT EXISTS task_completions (
@@ -30,6 +37,13 @@ CREATE TABLE IF NOT EXISTS task_completions (
 ALTER TABLE task_completions ADD COLUMN IF NOT EXISTS ai_attempted_at timestamptz;
 ALTER TABLE task_completions ADD COLUMN IF NOT EXISTS ai_attempt_id text;
 ALTER TABLE task_completions ADD COLUMN IF NOT EXISTS ai_attempts integer NOT NULL DEFAULT 0;
+ALTER TABLE task_completions ADD COLUMN IF NOT EXISTS human_score numeric(3,1);
+ALTER TABLE task_completions ADD COLUMN IF NOT EXISTS human_scored_by text REFERENCES users(id);
+ALTER TABLE task_completions ADD COLUMN IF NOT EXISTS human_scored_at timestamptz;
+ALTER TABLE task_completions ADD COLUMN IF NOT EXISTS human_note text;
+ALTER TABLE task_completions DROP CONSTRAINT IF EXISTS task_completions_human_score_0_10;
+ALTER TABLE task_completions ADD CONSTRAINT task_completions_human_score_0_10 CHECK(human_score IS NULL OR human_score BETWEEN 0 AND 10);
+CREATE INDEX IF NOT EXISTS task_completion_unscored_idx ON task_completions(created_at) WHERE superseded_at IS NULL AND human_score IS NULL AND ai_status<>'scored';
 CREATE INDEX IF NOT EXISTS task_completion_task_idx ON task_completions(task_id,created_at DESC);
 CREATE TABLE IF NOT EXISTS task_attachments (
  id text PRIMARY KEY, org_id text NOT NULL, task_id text NOT NULL REFERENCES tasks(id), uploader_id text NOT NULL REFERENCES users(id),
@@ -48,6 +62,11 @@ const completeInput = z.object({
   selfReview: z.string().trim().max(5000).default(''),
   attachmentIds: z.array(id).max(20).default([]),
   expectedVersion: z.number().int().positive(),
+}).strict();
+const humanScoreInput = z.object({
+  completionId: id,
+  score: z.number().min(0).max(10).refine(v => Math.abs(v * 10 - Math.round(v * 10)) < 1e-9, 'Use at most one decimal'),
+  note: z.string().trim().max(1000).default(''),
 }).strict();
 const attachmentInput = z.object({ name: z.string().trim().min(1).max(200), mime: z.string().trim().max(120), dataBase64: z.string().min(4).max(Math.ceil(MAX_ATTACHMENT * 4 / 3) + 8) }).strict();
 const insightInput = z.object({ board: z.enum(['home', 'okr', 'project', 'task', 'supply', 'quality']), lang: z.enum(['zh', 'en']).default('zh'), facts: z.record(z.string(), z.union([z.string().max(300), z.number(), z.null(), z.array(z.string().max(300)).max(8), z.array(z.union([z.string().max(120), z.number()])).max(4)])).refine(f => Object.keys(f).length <= 30, 'Too many facts') }).strict();
@@ -85,41 +104,55 @@ export async function scoreCompletion(model: JsonModel, task: { title: string; d
   return { score, summary: out.summary.slice(0, 500) };
 }
 
-export type CompletionOptions = { model?: JsonModel; fxFetcher?: typeof fetch; fxFallback?: number };
+export type CompletionOptions = { model?: JsonModel; fxFetcher?: typeof fetch; fxFallback?: number; intervalMs?: number; isAdmin?: (u: User) => boolean };
 const actorOf = (req: FastifyRequest): User => req.actor || deny(401, 'UNAUTHENTICATED', 'Authentication is required');
 
+/** SQL for the one final score of a completion row aliased `c`: a person's score wins, otherwise the AI's. */
+export const FINAL_SCORE_SQL = "COALESCE(c.human_score, CASE WHEN c.ai_status='scored' THEN c.ai_score END)";
+export const SCORE_SOURCE_SQL = "CASE WHEN c.human_score IS NOT NULL THEN 'human' WHEN c.ai_status='scored' THEN 'ai' END";
+
 export async function latestCompletion(db: Queryable, taskId: string) {
-  return (await db.query('SELECT id,result,self_review,attachment_ids,ai_status,ai_score,ai_summary,scored_at,completed_by,created_at,ai_attempted_at,ai_attempts FROM task_completions WHERE task_id=$1 AND superseded_at IS NULL ORDER BY created_at DESC LIMIT 1', [taskId])).rows[0] || null;
+  return (await db.query(`SELECT c.id,c.result,c.self_review,c.attachment_ids,c.ai_status,c.ai_score,c.ai_summary,c.scored_at,c.completed_by,c.created_at,c.ai_attempted_at,c.ai_attempts,
+      c.human_score,c.human_scored_by,c.human_scored_at,c.human_note,u.display_name AS human_scored_by_name,
+      ${FINAL_SCORE_SQL} AS final_score, ${SCORE_SOURCE_SQL} AS score_source, c.created_at + interval '24 hours' AS score_due_at
+    FROM task_completions c LEFT JOIN users u ON u.id=c.human_scored_by
+    WHERE c.task_id=$1 AND c.superseded_at IS NULL ORDER BY c.created_at DESC LIMIT 1`, [taskId])).rows[0] || null;
 }
 
 export async function registerCompletionRoutes(app: FastifyInstance, db: Database, o: CompletionOptions) {
   const retryRate = new Map<string, number[]>();
   const canScore = (user:User, task:any) => task.owner_id === user.id || task.reviewer_id === user.id;
+  /** People who may give the human score: never the owner; the reviewer, the assigner, the owner's manager or an administrator. */
+  async function canHumanScore(user:User, task:any) {
+    if (task.owner_id === user.id) return false;
+    if (task.reviewer_id === user.id || (task.assigned_by || task.created_by) === user.id) return true;
+    if (o.isAdmin?.(user)) return true;
+    return (await db.query('SELECT 1 FROM users WHERE id=$1 AND manager_id=$2 AND org_id=$3', [task.owner_id, user.id, task.org_id])).rows.length > 0;
+  }
+  const windowOpen = (c:any) => Date.now() - new Date(c.created_at).getTime() < HUMAN_SCORE_WINDOW_MS;
   async function recordAttempt(tx:Queryable, task:any, actorId:string, action:string, details:object) {
     await tx.query('INSERT INTO audit_events(id,org_id,department_id,owner_id,actor_id,action,object_id,details) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',
       [randomUUID(),task.org_id,task.department_id,task.owner_id,actorId,action,task.id,JSON.stringify(details)]);
   }
-  async function runScore(completionId:string, task:any, c:{result:string;selfReview:string;attachments:string[]}, actorId:string, retry=false) {
-    if (!o.model) {
-      await db.query("UPDATE task_completions SET ai_status='unavailable' WHERE id=$1 AND ai_status<>'scored' AND superseded_at IS NULL",[completionId]);
-      return false;
-    }
+  async function runScore(completionId:string, task:any, c:{result:string;selfReview:string;attachments:string[]}, actorId:string, kind:'retry'|'auto') {
+    // Without a model nothing changes: the completion keeps waiting and the job picks it up once one is configured.
+    if (!o.model) return false;
     // Persistent claim: only one in-flight attempt, recoverable after a crashed process. A stale
     // provider response must not overwrite a newer attempt or a superseded completion.
     const attemptId=randomUUID();
     const claimed=await db.transaction(async tx=>{
       const r=await tx.query(`UPDATE task_completions SET ai_status='pending',ai_attempted_at=now(),ai_attempt_id=$2,ai_attempts=ai_attempts+1
-        WHERE id=$1 AND superseded_at IS NULL AND ai_status<>'scored'
+        WHERE id=$1 AND superseded_at IS NULL AND ai_status<>'scored' AND human_score IS NULL AND created_at<=now()-interval '24 hours'
         AND (ai_status<>'pending' OR ai_attempted_at IS NULL OR ai_attempted_at<now()-interval '2 minutes') RETURNING id`,[completionId,attemptId]);
       if(!r.rows.length)return false;
-      await recordAttempt(tx,task,actorId,retry?'task.completion_score_retry':'task.completion_score_started',{completionId,attemptId});
+      await recordAttempt(tx,task,actorId,kind==='retry'?'task.completion_score_retry':'task.completion_score_started',{completionId,attemptId});
       return true;
     });
     if(!claimed)return false;
     try {
       const score=await scoreCompletion(o.model,task,c,'zh');
       await db.transaction(async tx=>{
-        const saved=await tx.query("UPDATE task_completions SET ai_status='scored',ai_score=$2,ai_summary=$3,ai_model=$4,scored_at=now() WHERE id=$1 AND superseded_at IS NULL AND ai_attempt_id=$5 AND ai_status='pending' RETURNING id",[completionId,score.score,score.summary,o.model!.model,attemptId]);
+        const saved=await tx.query("UPDATE task_completions SET ai_status='scored',ai_score=$2,ai_summary=$3,ai_model=$4,scored_at=now() WHERE id=$1 AND superseded_at IS NULL AND ai_attempt_id=$5 AND ai_status='pending' AND human_score IS NULL RETURNING id",[completionId,score.score,score.summary,o.model!.model,attemptId]);
         if(saved.rows.length)await recordAttempt(tx,task,actorId,'task.completion_scored',{completionId,attemptId,score:score.score});
       });
     } catch {
@@ -148,8 +181,8 @@ export async function registerCompletionRoutes(app: FastifyInstance, db: Databas
       await pushInbox(tx, { orgId: task.org_id, recipients: taskFollowers(task), actorId: user.id, kind: 'completion', taskId, title: task.title, body: input.result });
       return { task: next, completion, names: atts.map((a: any) => a.name) };
     });
-    void runScore(completion.id, task, { result: input.result, selfReview: input.selfReview, attachments: names }, user.id).catch(()=>{ /* A database interruption is recovered through the pending-attempt lease. */ });
-    return reply.code(201).send({ task, completion: { ...completion, ai_status: o.model ? 'pending' : 'unavailable' } });
+    void names; // Completion counts immediately; scoring happens later (a person within 24 h, otherwise the AI job).
+    return reply.code(201).send({ task, completion: { ...completion, final_score: null, score_source: null, score_due_at: new Date(new Date(completion.created_at).getTime() + HUMAN_SCORE_WINDOW_MS).toISOString() } });
   });
 
   app.get<{ Params: { id: string } }>('/tasks/:id/completion', async req => {
@@ -158,7 +191,9 @@ export async function registerCompletionRoutes(app: FastifyInstance, db: Databas
     if (!visibleTask(user, task)) deny(404, 'NOT_FOUND', 'Task not found');
     const c = await latestCompletion(db, taskId);
     const locked = !!(task.board_status === 'done' && task.board_done_at && Date.now() - new Date(task.board_done_at).getTime() >= COMPLETION_LOCK_MS);
-    return { completion: c, locked, canRetryScore: !!o.model && canScore(user,task) && !!c && c.ai_status !== 'scored', lockAt: task.board_done_at ? new Date(new Date(task.board_done_at).getTime() + COMPLETION_LOCK_MS).toISOString() : null };
+    const unscored = !!c && c.final_score == null;
+    return { completion: c, locked, canHumanScore: unscored && task.board_status === 'done' && await canHumanScore(user, task),
+      canRetryScore: !!o.model && canScore(user,task) && unscored && !windowOpen(c), lockAt: task.board_done_at ? new Date(new Date(task.board_done_at).getTime() + COMPLETION_LOCK_MS).toISOString() : null };
   });
 
   app.post<{ Params: { id: string } }>('/tasks/:id/completion/rescore', async (req,reply) => {
@@ -169,7 +204,8 @@ export async function registerCompletionRoutes(app: FastifyInstance, db: Databas
     if(!canScore(user,task))deny(403,'FORBIDDEN','Only the owner or reviewer can retry this score');
     const c=await latestCompletion(db,taskId);if(!c)deny(404,'NOT_FOUND','Task not found');
     if(v.completionId && v.completionId!==c.id)deny(409,'VERSION_CONFLICT','Completion changed; reload before retrying');
-    if(c.ai_status==='scored')return {completion:c};
+    if(c.final_score!=null)return {completion:c};
+    if(windowOpen(c))deny(409,'SCORE_WINDOW_OPEN','A person can score this completion during the first 24 hours; AI scoring starts after that');
     if(!o.model)deny(503,'AI_NOT_CONFIGURED','AI scoring is not configured');
     if(c.ai_status==='pending' && c.ai_attempted_at && Date.now()-new Date(c.ai_attempted_at).getTime()<120000)return reply.code(202).send({completion:c});
     const now=Date.now(), recent=(retryRate.get(user.id)||[]).filter(at=>now-at<3600000);
@@ -177,20 +213,84 @@ export async function registerCompletionRoutes(app: FastifyInstance, db: Databas
     retryRate.set(user.id,[...recent,now]);
     if(retryRate.size>2000)retryRate.delete(retryRate.keys().next().value!);
     const names=c.attachment_ids?.length?(await db.query('SELECT name FROM task_attachments WHERE task_id=$1 AND id=ANY($2::text[])',[taskId,c.attachment_ids])).rows.map((r:any)=>r.name):[];
-    await runScore(c.id,task,{result:c.result,selfReview:c.self_review,attachments:names},user.id,true);
+    await runScore(c.id,task,{result:c.result,selfReview:c.self_review,attachments:names},user.id,'retry');
     return {completion:await latestCompletion(db,taskId)};
   });
+
+  /* Human score: a 0–10 score by the reviewer, assigner, the owner's manager or an administrator. It is the
+     final score; it can be given until the AI has scored (normally the first 24 hours) and never changes. */
+  app.post<{ Params: { id: string } }>('/tasks/:id/completion/score', async req => {
+    const user=actorOf(req), taskId=id.parse(req.params.id), v=humanScoreInput.parse(req.body);
+    await db.transaction(async tx=>{
+      const task=(await tx.query('SELECT * FROM tasks WHERE id=$1 FOR UPDATE',[taskId])).rows[0];
+      if(!visibleTask(user,task))deny(404,'NOT_FOUND','Task not found');
+      if(task.owner_id===user.id)deny(403,'SELF_SCORE_FORBIDDEN','Task owners cannot score their own completion');
+      if(!await canHumanScore(user,task))deny(403,'FORBIDDEN','Only the reviewer, the assigner, the owner’s manager or an administrator can score this completion');
+      const c=(await tx.query('SELECT id,ai_status,human_score FROM task_completions WHERE task_id=$1 AND superseded_at IS NULL ORDER BY created_at DESC LIMIT 1 FOR UPDATE',[taskId])).rows[0];
+      if(!c||task.board_status!=='done')deny(409,'NOT_COMPLETED','This task has no current completion to score');
+      if(c.id!==v.completionId)deny(409,'VERSION_CONFLICT','Completion changed; reload before retrying');
+      if(c.human_score!=null||c.ai_status==='scored')deny(409,'SCORE_FINAL','This completion already has a final score');
+      await tx.query('UPDATE task_completions SET human_score=$2,human_scored_by=$3,human_scored_at=now(),human_note=$4 WHERE id=$1',[c.id,v.score,user.id,v.note||null]);
+      await recordAttempt(tx,task,user.id,'task.completion_human_scored',{completionId:c.id,score:v.score});
+      await pushInbox(tx,{orgId:task.org_id,recipients:[task.owner_id],actorId:user.id,kind:'completion_scored',taskId,title:task.title,body:`${v.score}/10${v.note?' · '+v.note:''}`});
+    });
+    return {completion:await latestCompletion(db,taskId)};
+  });
+
+  /* Periodic scoring job. Completions without a final score 24 hours after completion are scored by the AI.
+     State lives in the database (claim lease + status), so it survives restarts and never scores twice. */
+  async function runAutoScores(limit=20) {
+    // An accepted review with a quality score, given after this completion, is a person's score too.
+    await db.query(`UPDATE task_completions c SET human_score=r.quality,human_scored_by=r.reviewer_id,human_scored_at=r.created_at
+      FROM (SELECT DISTINCT ON (task_id) task_id,quality,reviewer_id,created_at FROM reviews WHERE decision='accept' AND quality IS NOT NULL ORDER BY task_id,created_at DESC) r
+      WHERE r.task_id=c.task_id AND r.created_at>=c.created_at AND c.superseded_at IS NULL AND c.human_score IS NULL AND c.ai_status<>'scored'`);
+    if(!o.model)return 0;
+    const due=(await db.query(`SELECT c.id,c.result,c.self_review,c.attachment_ids,c.completed_by,t.id AS task_id
+      FROM task_completions c JOIN tasks t ON t.id=c.task_id
+      WHERE c.superseded_at IS NULL AND c.human_score IS NULL AND c.ai_status<>'scored' AND t.board_status='done'
+        AND c.created_at<=now()-interval '24 hours' AND c.ai_attempts<$1
+        AND (c.ai_status<>'pending' OR c.ai_attempted_at IS NULL OR c.ai_attempted_at<now()-interval '2 minutes')
+      ORDER BY c.created_at LIMIT $2`,[AUTO_SCORE_MAX_ATTEMPTS,limit])).rows;
+    let started=0;
+    for(const c of due){
+      const task=(await db.query('SELECT * FROM tasks WHERE id=$1',[c.task_id])).rows[0];
+      const names=c.attachment_ids?.length?(await db.query('SELECT name FROM task_attachments WHERE task_id=$1 AND id=ANY($2::text[])',[c.task_id,c.attachment_ids])).rows.map((r:any)=>r.name):[];
+      if(await runScore(c.id,task,{result:c.result,selfReview:c.self_review,attachments:names},c.completed_by,'auto'))started++;
+    }
+    return started;
+  }
+  app.post('/completions/auto-score/run', async req => {
+    const user=actorOf(req);
+    if(!o.isAdmin?.(user))deny(403,'FORBIDDEN','Administrator access is required');
+    return {started:await runAutoScores()};
+  });
+  if (o.intervalMs && o.intervalMs > 0) {
+    let running=false;
+    const tick=()=>{ if(running)return; running=true; runAutoScores().catch(()=>undefined).finally(()=>{running=false;}); };
+    const timer = setInterval(tick, o.intervalMs);
+    timer.unref?.();
+    app.addHook('onReady', async () => { setTimeout(tick, 5000).unref?.(); });
+    app.addHook('onClose', async () => clearInterval(timer));
+  }
 
   /* Team leaderboard: aggregated counts only (no task titles), for everyone in the same department. */
   app.get('/reports/leaderboard', async req => {
     const user = actorOf(req), since = new Date(); since.setDate(1); since.setHours(0, 0, 0, 0);
+    // Done counts as soon as the owner marks it complete. The final score is a person's score if given,
+    // otherwise the AI's; tasks accepted through evidence review (no completion record) use the review score.
     const rows = (await db.query(`SELECT u.id,u.display_name,u.title,u.avatar_version,
         count(t.id) FILTER (WHERE t.created_at>=$3 OR t.due_at>=$3)::int AS total,
-        count(t.id) FILTER (WHERE t.board_status='done' AND c.ai_status='scored' AND t.board_done_at>=$3)::int AS scored_done,
-        round(avg(c.ai_score) FILTER (WHERE c.ai_status='scored' AND t.board_done_at>=$3),1)::float AS avg_score,
+        count(t.id) FILTER (WHERE t.board_status='done' AND t.board_done_at>=$3)::int AS done,
+        count(t.id) FILTER (WHERE t.board_status='done' AND t.board_done_at>=$3 AND f.score IS NOT NULL)::int AS scored_done,
+        count(t.id) FILTER (WHERE t.board_status='done' AND t.board_done_at>=$3 AND f.source='human')::int AS human_scored,
+        count(t.id) FILTER (WHERE t.board_status='done' AND t.board_done_at>=$3 AND f.source='ai')::int AS ai_scored,
+        round(avg(f.score) FILTER (WHERE t.board_status='done' AND t.board_done_at>=$3),1)::float AS avg_score,
         count(t.id) FILTER (WHERE t.board_status<>'done' AND t.due_at<now())::int AS overdue
       FROM users u LEFT JOIN tasks t ON t.owner_id=u.id AND t.org_id=u.org_id
-      LEFT JOIN LATERAL (SELECT ai_status,ai_score FROM task_completions x WHERE x.task_id=t.id AND x.superseded_at IS NULL ORDER BY created_at DESC LIMIT 1) c ON true
+      LEFT JOIN LATERAL (SELECT x.id,x.ai_status,x.ai_score,x.human_score FROM task_completions x WHERE x.task_id=t.id AND x.superseded_at IS NULL ORDER BY x.created_at DESC LIMIT 1) c ON true
+      LEFT JOIN LATERAL (SELECT r.quality FROM reviews r WHERE r.task_id=t.id AND r.decision='accept' AND r.quality IS NOT NULL ORDER BY r.created_at DESC LIMIT 1) r ON c.id IS NULL
+      LEFT JOIN LATERAL (SELECT CASE WHEN c.id IS NOT NULL THEN ${FINAL_SCORE_SQL} ELSE r.quality END AS score,
+        CASE WHEN c.id IS NOT NULL THEN ${SCORE_SOURCE_SQL} WHEN r.quality IS NOT NULL THEN 'human' END AS source) f ON true
       WHERE u.org_id=$1 AND u.department_id=$2 AND u.active=true GROUP BY u.id ORDER BY u.display_name`, [user.org_id, user.department_id, since.toISOString()])).rows;
     return { period: since.toISOString().slice(0, 7), items: rows };
   });
@@ -263,4 +363,5 @@ export async function registerCompletionRoutes(app: FastifyInstance, db: Databas
     } catch { if (!fx) return { rate: o.fxFallback || 7.1, asOf: null, source: 'fallback', fetchedAt: Date.now() }; }
     return fx;
   });
+  return { runAutoScores };
 }

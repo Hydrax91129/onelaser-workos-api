@@ -11,12 +11,13 @@ async function fixture(model:any=null){
  const call=(who:string,method:any,url:string,payload?:any)=>app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who]}});
  const create=async()=>{const r=await call('m1','POST','/tasks',{title:'Synthetic recoverable task',description:'Local QA evidence',ownerId:'m2',criteria:['Evidence'],dueAt:'2026-11-12T10:00:00Z'});assert.equal(r.statusCode,201,r.body);return r.json();};
  const finish=async(t:any)=>{const r=await call('m2','POST',`/tasks/${t.id}/complete`,{expectedVersion:t.version,result:'Delivered the fictional report with a link to the result and checked all acceptance criteria.',selfReview:'Synthetic result verified by this fixture.'});assert.equal(r.statusCode,201,r.body);return r.json();};
- return {db,app,call,create,finish,async close(){await app.close();await db.close();}};
+ const age=async(taskId:string)=>{await db.query("UPDATE task_completions SET created_at=now()-interval '25 hours' WHERE task_id=$1 AND superseded_at IS NULL",[taskId]);};
+ return {db,app,call,create,finish,age,async close(){await app.close();await db.close();}};
 }
 const model={model:'fixture',json:async()=>({score:8.5,summary:'Synthetic scored result.'})};
 test('late scoring recovery keeps the locked result and board completion date immutable',async()=>{
  const f=await fixture();try{
-  const t=await f.create(),done=await f.finish(t);const old='2026-01-01T00:00:00Z';await f.db.query('UPDATE tasks SET board_done_at=$2 WHERE id=$1',[t.id,old]);
+  const t=await f.create(),done=await f.finish(t);await f.age(t.id);const old='2026-01-01T00:00:00Z';await f.db.query('UPDATE tasks SET board_done_at=$2 WHERE id=$1',[t.id,old]);
   const missing=await f.call('m2','POST',`/tasks/${t.id}/completion/rescore`,{completionId:done.completion.id});assert.equal(missing.statusCode,503,missing.body);assert.equal(missing.json().error.code,'AI_NOT_CONFIGURED');
   await f.app.close();const restored=await buildApp({db:f.db,completionModel:model,closeDatabase:false});
   const tok=(await issueSession(f.db,'m2')).accessToken;
@@ -28,7 +29,7 @@ test('late scoring recovery keeps the locked result and board completion date im
 });
 test('a visible colleague cannot trigger scoring; successful scores cannot be replaced',async()=>{
  let calls=0;const f=await fixture({...model,json:async()=>{calls++;return {score:8.5,summary:'Synthetic'};}});try{
-  const t=await f.create(),done=await f.finish(t);for(let i=0;i<100;i++){const c=await f.call('m2','GET',`/tasks/${t.id}/completion`);if(c.json().completion.ai_status==='scored')break;await new Promise(r=>setTimeout(r,10));}
+  const t=await f.create(),done=await f.finish(t);await f.age(t.id);assert.equal((await f.call('m2','POST',`/tasks/${t.id}/completion/rescore`,{completionId:done.completion.id})).json().completion.score_source,'ai');
   await f.db.query("UPDATE users SET role='manager' WHERE id='m3'");assert.equal((await f.call('m3','POST',`/tasks/${t.id}/completion/rescore`,{})).statusCode,403);
   assert.equal((await f.call('m4','POST',`/tasks/${t.id}/completion/rescore`,{})).statusCode,404);
   const ok=await f.call('m1','POST',`/tasks/${t.id}/completion/rescore`,{completionId:done.completion.id});assert.equal(ok.statusCode,200,ok.body);assert.equal(calls,1);
@@ -59,18 +60,34 @@ test('AI capabilities require the same complete, valid model configuration used 
 test('a stale in-flight attempt can recover once; its late response cannot overwrite the recovered score',async()=>{
  let release:(()=>void)|undefined,calls=0;const f=await fixture({model:'fixture',json:async()=>{calls++;if(calls===1){await new Promise<void>(r=>release=r);return {score:1,summary:'old response'};}return {score:9,summary:'recovered result'};}});
  try{
-  const t=await f.create(),done=await f.finish(t);
+  const t=await f.create(),done=await f.finish(t);await f.age(t.id);const first=f.call('m2','POST',`/tasks/${t.id}/completion/rescore`,{completionId:done.completion.id});
   for(let i=0;i<100&&!release;i++)await new Promise(r=>setTimeout(r,10));assert.ok(release);
   const active=await f.call('m2','POST',`/tasks/${t.id}/completion/rescore`,{completionId:done.completion.id});assert.equal(active.statusCode,202);assert.equal(calls,1);
   await f.db.query("UPDATE task_completions SET ai_attempted_at=now()-interval '3 minutes' WHERE id=$1",[done.completion.id]);
   const retries=await Promise.all([f.call('m2','POST',`/tasks/${t.id}/completion/rescore`,{completionId:done.completion.id}),f.call('m2','POST',`/tasks/${t.id}/completion/rescore`,{completionId:done.completion.id})]);assert.ok(retries.every(r=>r.statusCode===200||r.statusCode===202));assert.equal(calls,2);
-  release!();await new Promise(r=>setTimeout(r,30));
+  release!();await first;await new Promise(r=>setTimeout(r,30));
   const c=(await f.call('m2','GET',`/tasks/${t.id}/completion`)).json().completion;assert.equal(Number(c.ai_score),9);assert.equal(c.ai_summary,'recovered result');assert.equal(c.ai_attempts,2);
-  const audits=(await f.db.query("SELECT id FROM audit_events WHERE action='task.completion_score_retry' AND object_id=$1",[t.id])).rows;assert.equal(audits.length,1);
+  const audits=(await f.db.query("SELECT id FROM audit_events WHERE action='task.completion_score_retry' AND object_id=$1",[t.id])).rows;assert.equal(audits.length,2,'the first attempt and the one recovery');
  }finally{release?.();await f.close();}
 });
 
 test('retry cannot target a superseded completion',async()=>{const f=await fixture();try{
  const t=await f.create(),first=await f.finish(t);const second=await f.finish(first.task);assert.notEqual(first.completion.id,second.completion.id);
  assert.equal((await f.call('m2','POST',`/tasks/${t.id}/completion/rescore`,{completionId:first.completion.id})).statusCode,409);
+}finally{await f.close();}});
+
+test('without a scoring model completions still count and wait: the job changes nothing and nothing is marked failed',async()=>{const f=await fixture();try{
+ const t=await f.create(),done=await f.finish(t);assert.equal(done.completion.ai_status,'pending');await f.age(t.id);
+ const run=await f.call('m1','POST','/completions/auto-score/run',{});assert.equal(run.statusCode,200,run.body);assert.equal(run.json().started,0);
+ const c=(await f.call('m2','GET',`/tasks/${t.id}/completion`)).json();assert.equal(c.completion.ai_status,'pending');assert.equal(c.completion.ai_attempts,0);assert.equal(c.completion.final_score,null);
+ assert.equal((await f.call('m2','POST','/completions/auto-score/run',{})).statusCode,403,'only administrators can run the job by hand');
+ const lb=(await f.call('m2','GET','/reports/leaderboard')).json().items.find((x:any)=>x.id==='m2');assert.ok(lb.done>=1);
+ assert.equal((await f.call('m1','GET',`/tasks/${t.id}/completion`)).json().canHumanScore,true,'a person can still score while the AI is unavailable');
+}finally{await f.close();}});
+test('an accepted evidence review with a quality score counts as the human score; the AI is not asked',async()=>{let calls=0;const f=await fixture({...model,json:async()=>{calls++;return {score:2,summary:'x'};}});try{
+ const t=await f.create(),done=await f.finish(t);
+ const sub=await f.call('m2','POST',`/tasks/${t.id}/submissions`,{expectedVersion:done.task.version,title:'Fixture evidence',description:'Synthetic evidence verified in an isolated fixture.'});assert.equal(sub.statusCode,201,sub.body);
+ const cur=(await f.call('m2','GET',`/tasks/${t.id}`)).json();const rv=await f.call('m1','POST',`/tasks/${t.id}/reviews`,{expectedVersion:cur.version,submissionVersion:cur.submission_version,decision:'accept',quality:8,note:'Checked',verifiedCurrentSubmission:true});assert.equal(rv.statusCode,201,rv.body);
+ await f.age(t.id);await f.call('m1','POST','/completions/auto-score/run',{});assert.equal(calls,0);
+ const c=(await f.call('m2','GET',`/tasks/${t.id}/completion`)).json().completion;assert.equal(c.score_source,'human');assert.equal(Number(c.final_score),8);
 }finally{await f.close();}});
