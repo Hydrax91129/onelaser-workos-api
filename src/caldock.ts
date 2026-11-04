@@ -7,7 +7,7 @@ import { deny } from './errors.js';
 import { createCaldockGateway, type CaldockGateway, type CaldockProvider } from './caldock-oidc.js';
 import { caldockAudit, CALDOCK_PRICES, createCaldockOrder, recordVerifiedCaldockPayment } from './caldock-domain.js';
 import { ApiError } from './errors.js';
-import { stripeFromEnv, verifyStripeEvent, StripeRequestError, STRIPE_RECURRING, type CaldockStripe } from './caldock-stripe.js';
+import { isStaleTestSession, stripeFromEnv, verifyStripeEvent, StripeRequestError, STRIPE_RECURRING, type CaldockStripe } from './caldock-stripe.js';
 
 type Customer = {id:string;display_name:string;email:string|null;active:boolean;created_at:string};
 type Session = {user:Customer;csrf:string;token:string};
@@ -139,7 +139,7 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
         const order=(await tx.query('SELECT * FROM caldock_orders WHERE id=$1 AND customer_id=$2 FOR UPDATE',[id.parse(req.params.id),current.user.id])).rows[0];
         if(!order)deny(404,'NOT_FOUND','Order not found');
         if(order.status!=='pending_payment')deny(409,'INVALID_ORDER_STATE','This order is not awaiting payment');
-        if(order.stripe_checkout_session_id){
+        if(order.stripe_checkout_session_id&&!isStaleTestSession(stripe,order.stripe_checkout_session_id)){
           const existing=await viaStripe(()=>stripe.request('GET','/v1/checkout/sessions/'+encodeURIComponent(order.stripe_checkout_session_id)));
           if(existing.status==='open'&&typeof existing.url==='string')return {url:existing.url};
           if(existing.status==='complete')deny(409,'CALDOCK_PAYMENT_IN_PROGRESS','Payment for this order is being confirmed; reload in a moment');
@@ -169,7 +169,7 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
     routes.patch<{Params:{id:string}}>('/orders/:id',async req=>{
       const current=actor(req),input=z.object({action:z.enum(['cancel_pending','stop_renewal']),expectedVersion:z.number().int().positive()}).strict().parse(req.body);
       return db.transaction(async tx=>{const row=(await tx.query('SELECT * FROM caldock_orders WHERE id=$1 AND customer_id=$2 FOR UPDATE',[id.parse(req.params.id),current.user.id])).rows[0];if(!row)deny(404,'NOT_FOUND','Order not found');if(row.version!==input.expectedVersion)deny(409,'VERSION_CONFLICT','Order changed; reload before continuing');if(input.action==='cancel_pending'&&row.status!=='pending_payment'||input.action==='stop_renewal'&&!['paid','provisioning','active'].includes(row.status))deny(409,'INVALID_ORDER_STATE','This order cannot perform the requested action');
-        if(input.action==='cancel_pending'&&stripe&&row.stripe_checkout_session_id){
+        if(input.action==='cancel_pending'&&stripe&&row.stripe_checkout_session_id&&!isStaleTestSession(stripe,row.stripe_checkout_session_id)){
           // Close the hosted payment page first so a cancelled order cannot be paid afterwards.
           const session=await viaStripe(()=>stripe.request('GET','/v1/checkout/sessions/'+encodeURIComponent(row.stripe_checkout_session_id)));
           if(session.status==='complete')deny(409,'CALDOCK_PAYMENT_IN_PROGRESS','Payment for this order is being confirmed; reload in a moment');
