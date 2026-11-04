@@ -31,6 +31,13 @@ const TEMPLATES: Record<string, [string, string][]> = {
   campaign: [['策划', '#579bfc'], ['素材', '#a25ddc'], ['执行', '#00c875']],
   event: [['筹备', '#579bfc'], ['物料与运输', '#fdab3d'], ['现场与跟进', '#00c875']],
 };
+/** Completion standard of a project task, taken from the project: what to finish, in which project and
+ * stage, and what the task (or else the project) says it should achieve. */
+export function projectTaskCriteria(p: any, groupId: string | null | undefined, title: string, description?: string | null) {
+  const stage = (p.groups || []).find((g: any) => g.id === groupId)?.name;
+  const own = String(description || '').trim(), goal = (own && own !== `项目「${p.name}」的任务` ? own : '') || String(p.description || '').trim();
+  return [`完成项目「${p.name}」${stage ? `「${stage}」阶段` : ''}的任务：${title}`.slice(0, 500), ...(goal ? [`达到要求：${goal}`.slice(0, 500)] : [])];
+}
 const STATUS_TO_BOARD: Record<string, string> = { todo: 'not_started', working: 'working', stuck: 'hold', review: 'review', done: 'done', overdue: 'overdue', abandoned: 'abandoned' };
 const id = z.string().min(1).max(100).regex(/^[A-Za-z0-9_-]+$/);
 const color = z.string().regex(/^#[0-9a-fA-F]{6}$/);
@@ -128,7 +135,7 @@ export async function registerProjectRoutes(app: FastifyInstance, db: Database, 
       // Reviewer: the project owner, else whoever created the task, else the assignee's manager.
       const reviewerId = [p.owner_id, user.id, owner.manager_id].find(x => x && x !== owner.id) || owner.id;
       const reviewer = reviewerId === user.id ? user : (await tx.query('SELECT * FROM users WHERE id=$1', [reviewerId])).rows[0];
-      const row = await createAssignedTask(tx, reviewer, owner, { title: v.title, description: v.description || `项目「${p.name}」的任务`, criteria: ['按项目要求完成'], dueAt: v.dueAt, priority: v.priority, source: 'project' });
+      const row = await createAssignedTask(tx, reviewer, owner, { title: v.title, description: v.description || `项目「${p.name}」的任务`, criteria: projectTaskCriteria(p, v.groupId, v.title, v.description), dueAt: v.dueAt, priority: v.priority, source: 'project' });
       await tx.query('UPDATE tasks SET project_id=$2,project_group_id=$3,created_by=$4,updated_by=$4 WHERE id=$1', [row.id, p.id, v.groupId, user.id]);
       if (!(p.members || []).includes(owner.id)) await tx.query('UPDATE projects SET members=$2,updated_at=now() WHERE id=$1', [p.id, JSON.stringify([...(p.members || []), owner.id])]);
       return row;
@@ -159,8 +166,11 @@ export async function registerProjectRoutes(app: FastifyInstance, db: Database, 
         if (!u) deny(400, 'INVALID_OWNER', 'Choose an active colleague');
         owner = u.id; department = u.department_id;
       }
-      await tx.query(`UPDATE tasks SET board_status=$2,board_priority=$3,owner_id=$4,department_id=$5,project_group_id=$6,due_at=$7,title=$8,reviewer_id=CASE WHEN reviewer_id=$4 THEN $9 ELSE reviewer_id END,version=version+1,updated_at=now(),updated_by=$9 WHERE id=$1`,
-        [t.id, v.status ? STATUS_TO_BOARD[v.status] : t.board_status, v.priority ?? t.board_priority, owner, department, v.groupId ?? t.project_group_id, v.dueAt ?? t.due_at, v.title ?? t.title, user.id]);
+      // A renamed or moved task gets a new standard from the project, unless someone already wrote their own.
+      const before = projectTaskCriteria(p, t.project_group_id, t.title, t.description), auto = JSON.stringify(t.criteria) === JSON.stringify(before) || JSON.stringify(t.criteria) === JSON.stringify(['按项目要求完成']);
+      const criteria = auto ? projectTaskCriteria(p, v.groupId ?? t.project_group_id, v.title ?? t.title, t.description) : t.criteria;
+      await tx.query(`UPDATE tasks SET board_status=$2,board_priority=$3,owner_id=$4,department_id=$5,project_group_id=$6,due_at=$7,title=$8,reviewer_id=CASE WHEN reviewer_id=$4 THEN $9 ELSE reviewer_id END,criteria=$10,version=version+1,updated_at=now(),updated_by=$9 WHERE id=$1`,
+        [t.id, v.status ? STATUS_TO_BOARD[v.status] : t.board_status, v.priority ?? t.board_priority, owner, department, v.groupId ?? t.project_group_id, v.dueAt ?? t.due_at, v.title ?? t.title, user.id, JSON.stringify(criteria)]);
     });
     return (await projectTasks([pid])).find((t: any) => t.id === tid);
   });
