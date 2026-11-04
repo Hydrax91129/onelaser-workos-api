@@ -126,7 +126,7 @@ export async function registerAssignRoutes(app: FastifyInstance, db: Database, o
       FROM tasks t JOIN users o ON o.id=t.owner_id AND o.active=true
       LEFT JOIN users a ON a.id=COALESCE(t.assigned_by,t.created_by)
       WHERE COALESCE(t.source, CASE WHEN t.kr_id IS NOT NULL THEN 'okr' WHEN t.created_by<>t.owner_id THEN 'direct' ELSE 'self' END) IN ('direct','okr','project')
-        AND t.status<>'accepted' AND COALESCE(t.board_status,'')<>'done' LIMIT 2000`)).rows;
+        AND t.status<>'accepted' AND COALESCE(t.board_status,'')<>'done' AND t.archived_at IS NULL LIMIT 2000`)).rows;
     let sent = 0;
     for (const task of rows) {
       const due = new Date(task.due_at).getTime(), created = new Date(task.created_at).getTime();
@@ -172,8 +172,8 @@ export async function registerAssignRoutes(app: FastifyInstance, db: Database, o
     const cols = `tasks.id,tasks.title,tasks.owner_id,tasks.reviewer_id,tasks.due_at,tasks.status,tasks.board_status,tasks.created_at,tasks.kr_id,${TASK_SOURCE_COLUMNS},
       (SELECT u.display_name FROM users u WHERE u.id=tasks.owner_id) AS owner_name,(SELECT json_build_object('zh',u.name_zh,'en',u.name_en) FROM users u WHERE u.id=tasks.owner_id) AS owner_names,(SELECT max(x.created_at) FROM task_updates x WHERE x.task_id=tasks.id) AS last_update_at,
       (SELECT json_build_object('ai_status',c.ai_status,'ai_score',c.ai_score,'human_score',c.human_score,'final_score',COALESCE(c.human_score,CASE WHEN c.ai_status='scored' THEN c.ai_score END),'score_source',CASE WHEN c.human_score IS NOT NULL THEN 'human' WHEN c.ai_status='scored' THEN 'ai' END,'score_due_at',c.created_at+interval '24 hours') FROM task_completions c WHERE c.task_id=tasks.id AND c.superseded_at IS NULL ORDER BY c.created_at DESC LIMIT 1) AS completion`;
-    const toMe = (await db.query(`SELECT ${cols} FROM tasks WHERE org_id=$1 AND owner_id=$2 AND COALESCE(tasks.source, CASE WHEN tasks.kr_id IS NOT NULL THEN 'okr' WHEN tasks.created_by<>tasks.owner_id THEN 'direct' ELSE 'self' END)<>'self' ORDER BY (tasks.status='accepted' OR tasks.board_status='done'),tasks.due_at LIMIT 100`, [user.org_id, user.id])).rows;
-    const byMe = (await db.query(`SELECT ${cols} FROM tasks WHERE org_id=$1 AND COALESCE(tasks.assigned_by, CASE WHEN tasks.created_by<>tasks.owner_id THEN tasks.created_by END)=$2 ORDER BY (tasks.status='accepted' OR tasks.board_status='done'),tasks.due_at LIMIT 100`, [user.org_id, user.id])).rows;
+    const toMe = (await db.query(`SELECT ${cols} FROM tasks WHERE org_id=$1 AND owner_id=$2 AND tasks.archived_at IS NULL AND COALESCE(tasks.source, CASE WHEN tasks.kr_id IS NOT NULL THEN 'okr' WHEN tasks.created_by<>tasks.owner_id THEN 'direct' ELSE 'self' END) IN ('direct','project') ORDER BY (tasks.status='accepted' OR tasks.board_status='done'),tasks.due_at LIMIT 100`, [user.org_id, user.id])).rows;
+    const byMe = (await db.query(`SELECT ${cols} FROM tasks WHERE org_id=$1 AND tasks.archived_at IS NULL AND COALESCE(tasks.assigned_by, CASE WHEN tasks.created_by<>tasks.owner_id THEN tasks.created_by END)=$2 ORDER BY (tasks.status='accepted' OR tasks.board_status='done'),tasks.due_at LIMIT 100`, [user.org_id, user.id])).rows;
     return { toMe, byMe };
   });
 
@@ -184,7 +184,7 @@ export async function registerAssignRoutes(app: FastifyInstance, db: Database, o
   const nudgeText = (user: User, t: any) => { const due = new Date(t.due_at), late = due.getTime() < now(); return `${user.display_name} 催办：任务「${t.title}」${late ? '已逾期' : '截止'} ${due.getMonth() + 1}/${due.getDate()}，请尽快更新进展；如有阻碍请直接在任务里说明。`; };
   app.post<{ Params: { id: string } }>('/tasks/:id/nudge', async req => {
     const user = actorOf(req), taskId = z.string().min(1).max(100).parse(req.params.id);
-    const t = (await db.query('SELECT * FROM tasks WHERE id=$1 AND org_id=$2', [taskId, user.org_id])).rows[0];
+    const t = (await db.query('SELECT * FROM tasks WHERE id=$1 AND org_id=$2 AND archived_at IS NULL', [taskId, user.org_id])).rows[0];
     if (!t) deny(404, 'NOT_FOUND', 'Task not found');
     if (!canNudge(user, t)) deny(403, 'NUDGE_FORBIDDEN', 'Only the person who assigned or reviews this task can send a reminder', '只有下达或验收这个任务的人可以催办。');
     if (!isOpenTask(t)) deny(409, 'NUDGE_TASK_CLOSED', 'This task is already finished', '这个任务已经结束，不需要催办。');
@@ -193,7 +193,7 @@ export async function registerAssignRoutes(app: FastifyInstance, db: Database, o
   });
   app.post('/tasks/nudge-due', async req => {
     const user = actorOf(req), horizon = new Date(now() + 3 * DAY).toISOString();
-    const rows = (await db.query(`SELECT * FROM tasks WHERE org_id=$1 AND owner_id<>$2 AND (reviewer_id=$2 OR COALESCE(assigned_by,created_by)=$2) AND due_at<=$3 AND status<>'accepted' AND board_status NOT IN ('done','abandoned') ORDER BY due_at LIMIT 200`, [user.org_id, user.id, horizon])).rows;
+    const rows = (await db.query(`SELECT * FROM tasks WHERE org_id=$1 AND archived_at IS NULL AND owner_id<>$2 AND (reviewer_id=$2 OR COALESCE(assigned_by,created_by)=$2) AND due_at<=$3 AND status<>'accepted' AND board_status NOT IN ('done','abandoned') ORDER BY due_at LIMIT 200`, [user.org_id, user.id, horizon])).rows;
     let sent = 0;
     for (const t of rows) if (await deliver(t, 'manual', t.owner_id, null, nudgeText(user, t))) sent++;
     return { total: rows.length, sent, alreadyToday: rows.length - sent };
@@ -202,7 +202,7 @@ export async function registerAssignRoutes(app: FastifyInstance, db: Database, o
   app.get('/nudges', async req => {
     const user = actorOf(req);
     const rows = (await db.query(`SELECT n.*, t.title AS task_title, t.due_at, t.owner_id, (SELECT display_name FROM users WHERE id=t.owner_id) AS owner_name, (SELECT json_build_object('zh',name_zh,'en',name_en) FROM users WHERE id=t.owner_id) AS owner_names
-      FROM task_nudges n LEFT JOIN tasks t ON t.id=n.task_id WHERE n.org_id=$1 AND (n.user_id=$2 OR n.cc_user_id=$2) AND n.created_at>$3 ORDER BY n.created_at DESC LIMIT 50`,
+      FROM task_nudges n LEFT JOIN tasks t ON t.id=n.task_id WHERE n.org_id=$1 AND t.archived_at IS NULL AND (n.user_id=$2 OR n.cc_user_id=$2) AND n.created_at>$3 ORDER BY n.created_at DESC LIMIT 50`,
       [user.org_id, user.id, new Date(now() - 30 * DAY).toISOString()])).rows;
     return { items: rows.map((r: any) => ({ id: r.id, taskId: String(r.task_id).startsWith('okr:') ? null : r.task_id, okr: String(r.kind).startsWith('okr_'), taskTitle: r.task_title, kind: r.kind, message: r.message, createdAt: r.created_at, read: !!r.read_at || r.user_id !== user.id, role: r.user_id === user.id ? 'owner' : 'assigner', ownerId: r.owner_id, ownerName: r.owner_name, ownerNames: r.owner_names, dueAt: r.due_at, channels: r.channels })), unread: rows.filter((r: any) => r.user_id === user.id && !r.read_at).length };
   });

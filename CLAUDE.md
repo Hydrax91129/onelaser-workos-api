@@ -45,6 +45,7 @@
 6. 成本和利润只给有 `product_cost_detail` 权限的人和主管理员（部署配置 `WORKOS_EXECUTIVE_USER_IDS`）；在系统里勾选的管理员**不会**自动看到产品、成本、价格、库存、经销商数据，也要单独授权。功能权限（grants）只有主管理员能改，任何人都不能改自己的。薪资只给 HR 权限对应分区的人。后端新模块判断敏感数据时用 `isExecutive`，不要用 `isAdmin`。
 7. **工厂对接人**：`users.quality_factory` 非空（邀请时选“工厂对接人”，或管理员在成员列表里改）的账号只能用质量追踪，后端会拦截其他接口。
    面向全公司的流程（季度确认、全员提醒、统计人数等）要用 quality.ts 的 `factoryUserIds()` 把他们排除。
+8. **任务删除是软删除**：`tasks.archived_at` 非空表示已删除（批量删除/撤销在 task-board.ts 的 `/tasks/batch-archive`、`/tasks/batch-restore`）。任何模块读 tasks 做列表、统计、提醒、排行榜都要加 `archived_at IS NULL`；按 id 取单条任务用 `visibleTask()`，它已把已删除任务当作不存在。
 
 ## 4. 开发规则（所有改动都走 PR）
 

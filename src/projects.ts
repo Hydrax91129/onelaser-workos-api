@@ -50,7 +50,7 @@ export async function registerProjectRoutes(app: FastifyInstance, db: Database, 
   const requireEdit = (user: User, p: any) => { if (!canEdit(user, p)) deny(403, 'FORBIDDEN', 'Only project members can change this project'); };
   const projectTasks = async (pids: string[]) => pids.length ? (await db.query(`SELECT tasks.id,tasks.title,tasks.description,tasks.owner_id,tasks.reviewer_id,tasks.due_at,tasks.created_at,tasks.board_status,tasks.board_priority,tasks.status,tasks.version,tasks.project_id,tasks.project_group_id,
       (SELECT count(*)::int FROM task_updates u WHERE u.task_id=tasks.id) AS update_count,(SELECT max(u.created_at) FROM task_updates u WHERE u.task_id=tasks.id) AS last_update_at,tasks.updated_at,(SELECT json_build_object('ai_status',c.ai_status,'ai_score',c.ai_score,'human_score',c.human_score,'final_score',COALESCE(c.human_score,CASE WHEN c.ai_status='scored' THEN c.ai_score END),'score_source',CASE WHEN c.human_score IS NOT NULL THEN 'human' WHEN c.ai_status='scored' THEN 'ai' END,'score_due_at',c.created_at+interval '24 hours') FROM task_completions c WHERE c.task_id=tasks.id AND c.superseded_at IS NULL ORDER BY c.created_at DESC LIMIT 1) AS completion,${TASK_SOURCE_COLUMNS}
-      FROM tasks WHERE project_id=ANY($1::text[]) ORDER BY tasks.due_at,tasks.id`, [pids])).rows : [];
+      FROM tasks WHERE project_id=ANY($1::text[]) AND tasks.archived_at IS NULL ORDER BY tasks.due_at,tasks.id`, [pids])).rows : [];
   const updatesOf = async (pids: string[]) => pids.length ? (await db.query('SELECT * FROM project_updates WHERE project_id=ANY($1::text[]) ORDER BY created_at DESC LIMIT 500', [pids])).rows : [];
   // Project admin (owner_id, the creator by default) and company admins manage members and the admin role.
   const canManage = (user: User, p: any) => p.owner_id === user.id || o.isAdmin(user);
@@ -143,7 +143,7 @@ export async function registerProjectRoutes(app: FastifyInstance, db: Database, 
     const user = actorOf(req), v = taskPatch.parse(req.body), pid = id.parse(req.params.id), tid = z.string().min(1).max(100).parse(req.params.taskId);
     await db.transaction(async tx => {
       const p = await load(tx, user, pid, false, false);
-      const t = (await tx.query('SELECT * FROM tasks WHERE id=$1 AND project_id=$2 FOR UPDATE', [tid, p.id])).rows[0];
+      const t = (await tx.query('SELECT * FROM tasks WHERE id=$1 AND project_id=$2 AND archived_at IS NULL FOR UPDATE', [tid, p.id])).rows[0];
       // A task owner who was later removed from the project can still update their own task, nothing else.
       if (!t || (!canView(user, p) && t.owner_id !== user.id)) deny(404, 'NOT_FOUND', 'Task not found');
       if (!canEdit(user, p) && t.owner_id !== user.id) deny(403, 'FORBIDDEN', 'Only project members can change this task');

@@ -7,7 +7,8 @@ import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
 import { visibleTask, reviewerAllowed } from './domain.js';
 import { TASK_SOURCE_COLUMNS } from './assign.js';
-import { deny } from './errors.js';
+import { deny, ApiError } from './errors.js';
+import { message, type Language } from './i18n.js';
 
 export const boardSchema = `
 CREATE TABLE IF NOT EXISTS task_board_personal(user_id text PRIMARY KEY, org_id text NOT NULL, groups jsonb NOT NULL, updated_at timestamptz NOT NULL DEFAULT now());
@@ -28,6 +29,9 @@ CREATE TABLE IF NOT EXISTS task_board_views(user_id text PRIMARY KEY REFERENCES 
 CREATE TABLE IF NOT EXISTS task_updates(id text PRIMARY KEY,task_id text NOT NULL REFERENCES tasks(id),org_id text NOT NULL,actor_id text NOT NULL REFERENCES users(id),body text NOT NULL,created_at timestamptz NOT NULL DEFAULT now());
 CREATE INDEX IF NOT EXISTS task_updates_task ON task_updates(task_id,created_at,id);
 ALTER TABLE task_updates ADD COLUMN IF NOT EXISTS edited_at timestamptz;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS archived_at timestamptz;
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS archived_by text REFERENCES users(id);
+CREATE INDEX IF NOT EXISTS tasks_active_owner ON tasks(org_id,owner_id) WHERE archived_at IS NULL;
 `;
 const id=z.string().min(1).max(100).regex(/^[A-Za-z0-9_-]+$/);
 const color=z.string().regex(/^#[0-9a-fA-F]{6}$/);
@@ -107,9 +111,9 @@ export function registerTaskBoardRoutes(app:FastifyInstance,db:Database,o:{isAdm
    if(!allowed)deny(403,'TASK_HUB_FORBIDDEN','You can only open the Task hub of people who report to you','只能查看向你汇报的同事的任务。');
    target=(await db.query('SELECT * FROM users WHERE id=$1 AND org_id=$2',[asked,user.org_id])).rows[0];if(!target)deny(404,'NOT_FOUND','Member not found');readOnly=true;
   }
-  const tasks=(await db.query('SELECT tasks.*,CASE WHEN tasks.status=\'accepted\' THEN (SELECT r.created_at FROM reviews r WHERE r.task_id=tasks.id AND r.submission_version=tasks.submission_version AND r.decision=\'accept\' ORDER BY r.created_at DESC,r.id DESC LIMIT 1) ELSE NULL END AS accepted_at,(SELECT count(*)::int FROM task_updates u WHERE u.task_id=tasks.id AND u.org_id=tasks.org_id) AS update_count,(SELECT json_build_object(\'ai_status\',c.ai_status,\'ai_score\',c.ai_score,\'ai_summary\',c.ai_summary,\'human_score\',c.human_score,\'final_score\',COALESCE(c.human_score,CASE WHEN c.ai_status=\'scored\' THEN c.ai_score END),\'score_source\',CASE WHEN c.human_score IS NOT NULL THEN \'human\' WHEN c.ai_status=\'scored\' THEN \'ai\' END,\'created_at\',c.created_at,\'score_due_at\',c.created_at+interval \'24 hours\') FROM task_completions c WHERE c.task_id=tasks.id AND c.superseded_at IS NULL ORDER BY c.created_at DESC LIMIT 1) AS completion,(SELECT max(u.created_at) FROM task_updates u WHERE u.task_id=tasks.id) AS last_update_at,(SELECT count(*)::int FROM task_attachments a WHERE a.task_id=tasks.id) AS attachment_count,'+TASK_SOURCE_COLUMNS+' FROM tasks WHERE org_id=$1 AND owner_id=$2 ORDER BY created_at,id LIMIT 1000',[user.org_id,target.id])).rows;
+  const tasks=(await db.query('SELECT tasks.*,CASE WHEN tasks.status=\'accepted\' THEN (SELECT r.created_at FROM reviews r WHERE r.task_id=tasks.id AND r.submission_version=tasks.submission_version AND r.decision=\'accept\' ORDER BY r.created_at DESC,r.id DESC LIMIT 1) ELSE NULL END AS accepted_at,(SELECT count(*)::int FROM task_updates u WHERE u.task_id=tasks.id AND u.org_id=tasks.org_id) AS update_count,(SELECT json_build_object(\'ai_status\',c.ai_status,\'ai_score\',c.ai_score,\'ai_summary\',c.ai_summary,\'human_score\',c.human_score,\'final_score\',COALESCE(c.human_score,CASE WHEN c.ai_status=\'scored\' THEN c.ai_score END),\'score_source\',CASE WHEN c.human_score IS NOT NULL THEN \'human\' WHEN c.ai_status=\'scored\' THEN \'ai\' END,\'created_at\',c.created_at,\'score_due_at\',c.created_at+interval \'24 hours\') FROM task_completions c WHERE c.task_id=tasks.id AND c.superseded_at IS NULL ORDER BY c.created_at DESC LIMIT 1) AS completion,(SELECT max(u.created_at) FROM task_updates u WHERE u.task_id=tasks.id) AS last_update_at,(SELECT count(*)::int FROM task_attachments a WHERE a.task_id=tasks.id) AS attachment_count,'+TASK_SOURCE_COLUMNS+' FROM tasks WHERE org_id=$1 AND owner_id=$2 AND archived_at IS NULL ORDER BY created_at,id LIMIT 1000',[user.org_id,target.id])).rows;
   const ids=tasks.map((t:any)=>t.id);
-  const allChildren=ids.length?(await db.query('SELECT parent_task_id,board_status,board_done_at FROM tasks WHERE parent_task_id=ANY($1::text[])',[ids])).rows:[];
+  const allChildren=ids.length?(await db.query('SELECT parent_task_id,board_status,board_done_at FROM tasks WHERE parent_task_id=ANY($1::text[]) AND archived_at IS NULL',[ids])).rows:[];
   const groups=await personalGroups(db,target),known=new Set(groups.map((g:any)=>g.id)),first=groups[0]?.id||'todo';
   const now=Date.now(),items=tasks.map((t:any)=>{const g=effectiveGroup(t,allChildren,now);return {...t,effective_group_id:known.has(g)?g:first};});
   const view=(await db.query('SELECT data FROM task_board_views WHERE user_id=$1 AND org_id=$2',[user.id,user.org_id])).rows[0]?.data;
@@ -197,10 +201,11 @@ export function registerTaskBoardRoutes(app:FastifyInstance,db:Database,o:{isAdm
    reply.code(201);return {id:v.requestId,stored:true,notificationsSent:false};
   });
  });
- app.post<{Params:{id:string}}>('/tasks/:id/board',async req=>{
-  const user=actor(req.actor),v=patchInput.parse(req.body),taskId=id.parse(req.params.id);
-  return db.transaction(async tx=>{
+ /* One board edit (status, group, priority, due date, owner…) with every permission and lock rule. The single-task
+  * route and the bulk bar both use it, so a batch can never do more than editing the rows one by one. */
+ async function boardPatch(tx:Queryable,user:User,taskId:string,v:z.infer<typeof patchInput>){
    const task=(await tx.query('SELECT * FROM tasks WHERE id=$1 FOR UPDATE',[taskId])).rows[0];
+   if(!task||task.archived_at)deny(404,'NOT_FOUND','Task not found');
    // Overseers may move a task's due date even when the task is not theirs: anyone above the owner in the
    // reporting line, the admin of the task's project, and company administrators. Only the due date.
    const overseer=!!task&&task.org_id===user.org_id&&task.owner_id!==user.id&&(o.isAdmin?.(user)||(await reportsSet(tx,user.org_id,user.id)).has(task.owner_id)||(!!task.project_id&&(await tx.query('SELECT 1 FROM projects WHERE id=$1 AND owner_id=$2',[task.project_id,user.id])).rows.length>0));
@@ -213,7 +218,7 @@ export function registerTaskBoardRoutes(app:FastifyInstance,db:Database,o:{isAdm
    if(v.category&&!config.category.some((x:any)=>x.id===v.category))deny(400,'INVALID_BOARD_LABEL','Select an existing board label');
    const ownGroups=v.groupId?[...await personalGroups(tx,user),...(task.owner_id!==user.id?await personalGroups(tx,{...user,id:task.owner_id} as User):[])]:[];
    if(v.groupId&&((!config.groups.some((x:any)=>x.id===v.groupId)&&!ownGroups.some((x:any)=>x.id===v.groupId))||v.groupId==='completed'))deny(400,'INVALID_BOARD_GROUP','Completed is managed by the three-day completion rule');
-   if(v.groupId&&user.role!=='manager'&&(await tx.query('SELECT id FROM tasks WHERE parent_task_id=$1 AND owner_id<>$2 LIMIT 1',[taskId,user.id])).rows.length)deny(403,'FORBIDDEN','A manager must move a parent with other owners');
+   if(v.groupId&&user.role!=='manager'&&(await tx.query('SELECT id FROM tasks WHERE parent_task_id=$1 AND owner_id<>$2 AND archived_at IS NULL LIMIT 1',[taskId,user.id])).rows.length)deny(403,'FORBIDDEN','A manager must move a parent with other owners');
    if(v.groupId&&task.parent_task_id)deny(400,'INVALID_BOARD_GROUP','Move the parent task to move its subitems');
    // Tasks that come from an OKR, a project or a direct assignment keep their definition: the assignee updates
    // status and progress but cannot rewrite the title, due date, owner, reviewer or priority.
@@ -233,9 +238,89 @@ export function registerTaskBoardRoutes(app:FastifyInstance,db:Database,o:{isAdm
    const status=v.status??task.board_status,doneAt=status==='done'?(task.board_status==='done'&&task.board_done_at?task.board_done_at:new Date().toISOString()):null;
    const next=(await tx.query('UPDATE tasks SET title=$2,board_priority=$3,board_status=$4,board_category=$5,board_group_id=$6,board_notes=$7,due_at=$8,owner_id=$9,reviewer_id=$10,board_done_at=$11,updated_at=now(),updated_by=$12,version=version+1 WHERE id=$1 RETURNING *',[taskId,v.title??task.title,v.priority??task.board_priority,status,v.category??task.board_category,v.groupId??task.board_group_id,v.notes??task.board_notes,v.dueAt??task.due_at,owner,reviewer,doneAt,user.id])).rows[0];
    if(v.description!==undefined||v.criteria!==undefined){const d=(await tx.query('UPDATE tasks SET description=$2,criteria=$3 WHERE id=$1 RETURNING description,criteria',[taskId,v.description??task.description,JSON.stringify(v.criteria??task.criteria)])).rows[0];Object.assign(next,d);}
-   if(v.groupId)await tx.query('UPDATE tasks SET board_group_id=$2,version=version+1,updated_at=now(),updated_by=$3 WHERE parent_task_id=$1 AND org_id=$4 AND department_id=$5',[taskId,v.groupId,user.id,user.org_id,user.department_id]);
+   if(v.groupId)await tx.query('UPDATE tasks SET board_group_id=$2,version=version+1,updated_at=now(),updated_by=$3 WHERE parent_task_id=$1 AND org_id=$4 AND department_id=$5 AND archived_at IS NULL',[taskId,v.groupId,user.id,user.org_id,user.department_id]);
    await log(tx,user,'task.board.updated',taskId,{fields:Object.keys(v).filter(k=>k!=='expectedVersion'),version:next.version,acceptanceUnchanged:true},owner);return next;
+ }
+ app.post<{Params:{id:string}}>('/tasks/:id/board',async req=>{
+  const user=actor(req.actor),v=patchInput.parse(req.body),taskId=id.parse(req.params.id);
+  return db.transaction(tx=>boardPatch(tx,user,taskId,v));
+ });
+ /* Bulk bar: the same edit applied to up to 200 ticked rows. Each row is saved on its own with the single-row rules;
+  * a row that may not change (locked definition, version conflict, no right to reassign…) is reported, not fatal. */
+ app.post('/tasks/batch-board',async req=>{
+  const user=actor(req.actor),v=batchBoardInput.parse(req.body),lang=langOf(req);
+  const updated:string[]=[],skipped:Skipped[]=[];
+  for(const item of uniqueItems(v.items)){
+   try{const next=await db.transaction(tx=>boardPatch(tx,user,item.id,{expectedVersion:item.expectedVersion,...v.changes} as any));updated.push(next.id);}
+   catch(e){if(!(e instanceof ApiError))throw e;skipped.push(skip(item.id,e,lang));}
+  }
+  return {updated,skipped};
+ });
+ /* Delete = soft delete (archived_at). Archived tasks leave every list, report and leaderboard; undo restores them.
+  * Allowed: administrators, and whoever created or assigned the task (so your own tasks, not ones others gave you).
+  * A task generated from an OKR key result stays while that key result exists: delete the KR in the OKR instead. */
+ const definer=(t:any)=>t.assigned_by||t.created_by;
+ const okrKrAlive=async(tx:Queryable,t:any)=>!!t.kr_id&&(t.source==='okr'||!t.source)&&(await tx.query('SELECT 1 FROM key_results k JOIN objectives o ON o.id=k.objective_id WHERE k.id=$1 AND k.archived_at IS NULL AND o.archived_at IS NULL',[t.kr_id])).rows.length>0;
+ const archiveRefusal=async(tx:Queryable,user:User,t:any):Promise<ApiError|null>=>{
+  if(!t||t.org_id!==user.org_id||t.archived_at||!(visibleTask(user,t)||o.isAdmin?.(user)))return new ApiError(404,'NOT_FOUND','Task not found');
+  if(await okrKrAlive(tx,t))return new ApiError(409,'TASK_FROM_OKR','Tasks from an OKR are deleted by deleting their key result in the OKR');
+  if(!o.isAdmin?.(user)&&definer(t)!==user.id)return new ApiError(403,'TASK_ARCHIVE_FORBIDDEN','You can delete tasks you created; ask whoever assigned this task, or an administrator');
+  return null;
+ };
+ app.post('/tasks/batch-archive',async req=>{
+  const user=actor(req.actor),v=idsInput.parse(req.body),lang=langOf(req),ids=[...new Set(v.ids)];
+  return db.transaction(async tx=>{
+   const rows=new Map((await tx.query('SELECT * FROM tasks WHERE id=ANY($1::text[]) AND org_id=$2 FOR UPDATE',[ids,user.org_id])).rows.map((t:any)=>[t.id,t]));
+   const archived:string[]=[],skipped:Skipped[]=[],withChildren=new Map<string,string>();
+   for(const taskId of ids){
+    const t=rows.get(taskId),refusal=await archiveRefusal(tx,user,t);
+    if(refusal){skipped.push(skip(taskId,refusal,lang,t?.title));continue;}
+    // Subitems go with their parent, so each must be one this person could delete on its own.
+    const kids=(await tx.query('SELECT * FROM tasks WHERE parent_task_id=$1 AND archived_at IS NULL FOR UPDATE',[taskId])).rows;
+    let blocked=false;for(const k of kids)if(!ids.includes(k.id)&&await archiveRefusal(tx,user,k)){blocked=true;break;}
+    if(blocked){skipped.push(skip(taskId,new ApiError(403,'TASK_CHILD_FORBIDDEN','A subitem of this task is not yours to delete, so the task was kept'),lang,t.title));continue;}
+    archived.push(taskId);for(const k of kids)if(!ids.includes(k.id))withChildren.set(k.id,taskId);
+   }
+   const all=[...archived,...withChildren.keys()];
+   if(all.length){
+    await tx.query('UPDATE tasks SET archived_at=now(),archived_by=$2,version=version+1,updated_at=now(),updated_by=$2 WHERE id=ANY($1::text[])',[all,user.id]);
+    for(const taskId of all){const t=rows.get(taskId)||(await tx.query('SELECT owner_id,title FROM tasks WHERE id=$1',[taskId])).rows[0];await log(tx,user,'task.archived',taskId,{title:t.title,withParent:withChildren.get(taskId)||null},t.owner_id);}
+   }
+   return {archived:all,count:archived.length,skipped};
+  });
+ });
+ app.post('/tasks/batch-restore',async req=>{
+  const user=actor(req.actor),v=idsInput.parse(req.body),lang=langOf(req),ids=[...new Set(v.ids)];
+  return db.transaction(async tx=>{
+   const rows=new Map((await tx.query('SELECT * FROM tasks WHERE id=ANY($1::text[]) AND org_id=$2 FOR UPDATE',[ids,user.org_id])).rows.map((t:any)=>[t.id,t]));
+   const restored:string[]=[],skipped:Skipped[]=[];
+   for(const taskId of ids){
+    const t=rows.get(taskId);
+    if(!t||!(visibleTask(user,{...t,archived_at:null})||o.isAdmin?.(user))){skipped.push(skip(taskId,new ApiError(404,'NOT_FOUND','Task not found'),lang));continue;}
+    if(!t.archived_at){skipped.push(skip(taskId,new ApiError(409,'TASK_NOT_ARCHIVED','This task is not deleted'),lang,t.title));continue;}
+    if(!o.isAdmin?.(user)&&t.archived_by!==user.id&&definer(t)!==user.id){skipped.push(skip(taskId,new ApiError(403,'TASK_RESTORE_FORBIDDEN','Only the person who deleted this task, its creator or an administrator can restore it'),lang,t.title));continue;}
+    const parent=t.parent_task_id&&!ids.includes(t.parent_task_id)?(await tx.query('SELECT archived_at FROM tasks WHERE id=$1',[t.parent_task_id])).rows[0]:null;
+    if(parent?.archived_at){skipped.push(skip(taskId,new ApiError(409,'TASK_PARENT_ARCHIVED','Restore the parent task first'),lang,t.title));continue;}
+    restored.push(taskId);
+   }
+   // Subitems that were deleted together with a restored parent come back with it.
+   const kids=restored.length?(await tx.query('SELECT c.id FROM tasks c JOIN tasks p ON p.id=c.parent_task_id WHERE c.parent_task_id=ANY($1::text[]) AND c.archived_at IS NOT NULL AND c.archived_at=p.archived_at',[restored])).rows.map((r:any)=>r.id).filter((x:string)=>!restored.includes(x)):[];
+   const all=[...restored,...kids];
+   if(all.length){
+    await tx.query('UPDATE tasks SET archived_at=NULL,archived_by=NULL,version=version+1,updated_at=now(),updated_by=$2 WHERE id=ANY($1::text[])',[all,user.id]);
+    for(const taskId of all){const t=rows.get(taskId)||(await tx.query('SELECT owner_id,title FROM tasks WHERE id=$1',[taskId])).rows[0];await log(tx,user,'task.restored',taskId,{title:t.title},t.owner_id);}
+   }
+   return {restored:all,count:restored.length,skipped};
   });
  });
 }
+type Skipped={id:string;title?:string;code:string;message:string};
+const langOf=(req:any):Language=>req.language==='en'?'en':'zh';
+const skip=(taskId:string,e:ApiError,lang:Language,title?:string):Skipped=>({id:taskId,...(title?{title}:{}),code:e.code,message:e.zh&&lang!=='en'?e.zh:message(e.message,lang)});
+const uniqueItems=<T extends {id:string}>(items:T[])=>[...new Map(items.map(x=>[x.id,x])).values()];
+const idsInput=z.object({ids:z.array(id).min(1).max(200)}).strict();
+const batchBoardInput=z.object({
+ items:z.array(z.object({id,expectedVersion:z.number().int().positive()}).strict()).min(1).max(200),
+ changes:z.object({status:z.enum(['working','hold','review','done','not_started','overdue','abandoned']).optional(),groupId:id.optional(),priority:z.string().max(80).optional(),dueAt:z.string().datetime({offset:true}).optional(),ownerId:id.optional(),reviewerId:id.optional()}).strict().refine(c=>Object.keys(c).length>0)
+}).strict();
 async function log(tx:Queryable,user:User,action:string,object:string,details:unknown,owner=user.id){await tx.query('INSERT INTO audit_events(id,org_id,department_id,owner_id,actor_id,action,object_id,details) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[randomUUID(),user.org_id,user.department_id,owner,user.id,action,object,JSON.stringify(details)]);}

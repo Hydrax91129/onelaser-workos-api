@@ -191,7 +191,7 @@ export async function registerOrgRoutes(app: FastifyInstance, db: Database, o: O
     const tasks = (await db.query(`SELECT t.id,t.title,t.owner_id,t.status,t.due_at,t.board_status,
         (SELECT r.created_at FROM reviews r WHERE r.task_id=t.id AND r.submission_version=t.submission_version AND r.decision='accept' ORDER BY r.created_at DESC,r.id DESC LIMIT 1) AS accepted_at,
         (SELECT r.quality FROM reviews r WHERE r.task_id=t.id AND r.submission_version=t.submission_version AND r.decision='accept' ORDER BY r.created_at DESC,r.id DESC LIMIT 1) AS quality
-      FROM tasks t WHERE t.org_id=$1 AND t.owner_id=ANY($2::text[])`, [user.org_id, ids])).rows;
+      FROM tasks t WHERE t.org_id=$1 AND t.owner_id=ANY($2::text[]) AND t.archived_at IS NULL`, [user.org_id, ids])).rows;
     const now = Date.now();
     const statsFor = (list: any[]) => {
       const accepted = list.filter(t => t.status === 'accepted'), open = list.filter(t => t.status !== 'accepted');

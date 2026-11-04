@@ -197,7 +197,7 @@ export async function buildApp(options:AppOptions) {
   registerTaskBoardRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
   app.get('/tasks',async req=>{
     const user=actor(req),[where,params]=scope(user);await applyAutoStatus(db,user.org_id);
-    return {items:(await db.query(`SELECT tasks.*,CASE WHEN tasks.status='accepted' THEN (SELECT r.created_at FROM reviews r WHERE r.task_id=tasks.id AND r.submission_version=tasks.submission_version AND r.decision='accept' ORDER BY r.created_at DESC,r.id DESC LIMIT 1) ELSE NULL END AS accepted_at,(SELECT json_build_object('ai_status',c.ai_status,'ai_score',c.ai_score,'human_score',c.human_score,'final_score',COALESCE(c.human_score,CASE WHEN c.ai_status='scored' THEN c.ai_score END),'score_source',CASE WHEN c.human_score IS NOT NULL THEN 'human' WHEN c.ai_status='scored' THEN 'ai' END,'score_due_at',c.created_at+interval '24 hours') FROM task_completions c WHERE c.task_id=tasks.id AND c.superseded_at IS NULL ORDER BY c.created_at DESC LIMIT 1) AS completion,${TASK_SOURCE_COLUMNS} FROM tasks WHERE ${where} ORDER BY created_at,id LIMIT 100`,[...params])).rows,limit:100};
+    return {items:(await db.query(`SELECT tasks.*,CASE WHEN tasks.status='accepted' THEN (SELECT r.created_at FROM reviews r WHERE r.task_id=tasks.id AND r.submission_version=tasks.submission_version AND r.decision='accept' ORDER BY r.created_at DESC,r.id DESC LIMIT 1) ELSE NULL END AS accepted_at,(SELECT json_build_object('ai_status',c.ai_status,'ai_score',c.ai_score,'human_score',c.human_score,'final_score',COALESCE(c.human_score,CASE WHEN c.ai_status='scored' THEN c.ai_score END),'score_source',CASE WHEN c.human_score IS NOT NULL THEN 'human' WHEN c.ai_status='scored' THEN 'ai' END,'score_due_at',c.created_at+interval '24 hours') FROM task_completions c WHERE c.task_id=tasks.id AND c.superseded_at IS NULL ORDER BY c.created_at DESC LIMIT 1) AS completion,${TASK_SOURCE_COLUMNS} FROM tasks WHERE ${where} AND archived_at IS NULL ORDER BY created_at,id LIMIT 100`,[...params])).rows,limit:100};
   });
   app.get<{Params:{id:string}}>('/tasks/:id',async req=>taskDetail(db,await loadTask(db,actor(req),identifier.parse(req.params.id))));
   app.post('/tasks',async(req,reply)=>{
@@ -267,7 +267,7 @@ export async function buildApp(options:AppOptions) {
   app.get('/key-results',async req=>{
     const user=actor(req),rows=(await db.query('SELECT k.*,o.org_id,o.department_id,o.owner_id,o.level FROM key_results k JOIN objectives o ON o.id=k.objective_id WHERE o.org_id=$1 AND k.archived_at IS NULL AND o.archived_at IS NULL ORDER BY k.created_at,k.id',[user.org_id])).rows;
     const extra=await okrListOwners(db,user,integrations.executiveUserIds||[]);const krs=await attachOkrImportMetadata(db,'key_result',rows.filter(o=>visibleObjective(user,o)||(o.owner_id&&extra.has(o.owner_id))).map(kr=>({...kr,progress:krProgress(kr)})));
-    const krScores=await scoresFor(db,krs.map((k:any)=>k.id),'kr_scores');for(const k of krs as any[])k.scores=krScores.get(k.id)||{};const krTasks=new Map((await db.query('SELECT DISTINCT ON (t.kr_id) t.kr_id,t.id,t.owner_id FROM tasks t WHERE t.org_id=$1 AND t.kr_id=ANY($2::text[]) ORDER BY t.kr_id,t.created_at',[user.org_id,krs.map((k:any)=>k.id)])).rows.map((r:any)=>[r.kr_id,r])) as Map<string,any>;for(const k of krs as any[]){const t=krTasks.get(k.id);k.task_id=t&&t.owner_id===k.owner_id?t.id:null;}
+    const krScores=await scoresFor(db,krs.map((k:any)=>k.id),'kr_scores');for(const k of krs as any[])k.scores=krScores.get(k.id)||{};const krTasks=new Map((await db.query('SELECT DISTINCT ON (t.kr_id) t.kr_id,t.id,t.owner_id FROM tasks t WHERE t.org_id=$1 AND t.kr_id=ANY($2::text[]) AND t.archived_at IS NULL ORDER BY t.kr_id,t.created_at',[user.org_id,krs.map((k:any)=>k.id)])).rows.map((r:any)=>[r.kr_id,r])) as Map<string,any>;for(const k of krs as any[]){const t=krTasks.get(k.id);k.task_id=t&&t.owner_id===k.owner_id?t.id:null;}
     return {items:krs};
   });
   app.post<{Params:{id:string}}>('/key-results/:id/measurements',async(req,reply)=>{
@@ -284,7 +284,7 @@ export async function buildApp(options:AppOptions) {
     });return reply.code(201).send(result);
   });
   app.get('/notifications/preview',async req=>{
-    const user=actor(req),[where,params]=scope(user),tasks=(await db.query(`SELECT id,title,status,owner_id,due_at FROM tasks WHERE ${where} AND status<>$${params.length+1} ORDER BY due_at LIMIT 100`,[...params,'accepted'])).rows;
+    const user=actor(req),[where,params]=scope(user),tasks=(await db.query(`SELECT id,title,status,owner_id,due_at FROM tasks WHERE ${where} AND archived_at IS NULL AND status<>$${params.length+1} ORDER BY due_at LIMIT 100`,[...params,'accepted'])).rows;
     return {status:'draft',sent:false,recipient:user.id,items:tasks};
   });
   app.get('/audit',async req=>{const u=actor(req),[where,params]=Array.isArray(u.visibleOwnerIds)?['org_id=$1 AND owner_id=ANY($2::text[])',[u.org_id,u.visibleOwnerIds]] as const:u.role==='manager'?['org_id=$1 AND department_id=$2',[u.org_id,u.department_id]] as const:['org_id=$1 AND owner_id=$2',[u.org_id,u.id]] as const;return {items:(await db.query(`SELECT * FROM audit_events WHERE ${where} ORDER BY created_at DESC,id LIMIT 100`,[...params])).rows,limit:100};});

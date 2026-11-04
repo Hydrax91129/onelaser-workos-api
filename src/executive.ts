@@ -7,12 +7,12 @@ export async function executiveSummary(db: Queryable, orgId: string, teamMode='d
     count(*) FILTER (WHERE status='accepted')::int AS accepted,
     count(*) FILTER (WHERE status='submitted')::int AS waiting,
     count(*) FILTER (WHERE status<>'accepted' AND due_at<now())::int AS overdue`;
-  const totals=(await db.query(`SELECT ${counts} FROM tasks WHERE org_id=$1`,[orgId])).rows[0];
+  const totals=(await db.query(`SELECT ${counts} FROM tasks WHERE org_id=$1 AND archived_at IS NULL`,[orgId])).rows[0];
   let departments=(await db.query(`SELECT d.id,d.name,
     (SELECT count(*)::int FROM users u WHERE u.org_id=d.org_id AND u.department_id=d.id AND u.active=true) AS members,
     COALESCE(t.total,0)::int AS total,COALESCE(t.accepted,0)::int AS accepted,
     COALESCE(t.waiting,0)::int AS waiting,COALESCE(t.overdue,0)::int AS overdue
-    FROM departments d LEFT JOIN (SELECT department_id,${counts} FROM tasks WHERE org_id=$1 GROUP BY department_id) t ON t.department_id=d.id
+    FROM departments d LEFT JOIN (SELECT department_id,${counts} FROM tasks WHERE org_id=$1 AND archived_at IS NULL GROUP BY department_id) t ON t.department_id=d.id
     WHERE d.org_id=$1 ORDER BY d.name,d.id`,[orgId])).rows;
   if(teamMode==='company')departments=(await db.query(`WITH members AS (
     SELECT u.id,u.active,COALESCE(e.external_department_id,u.department_id) AS dept,
@@ -23,7 +23,7 @@ export async function executiveSummary(db: Queryable, orgId: string, teamMode='d
     SELECT m.dept,count(*)::int AS total,count(*) FILTER (WHERE t.status='accepted')::int AS accepted,
     count(*) FILTER (WHERE t.status='submitted')::int AS waiting,
     count(*) FILTER (WHERE t.status<>'accepted' AND t.due_at<now())::int AS overdue
-    FROM tasks t JOIN members m ON m.id=t.owner_id WHERE t.org_id=$1 GROUP BY m.dept
+    FROM tasks t JOIN members m ON m.id=t.owner_id WHERE t.org_id=$1 AND t.archived_at IS NULL GROUP BY m.dept
   ) SELECT m.dept AS id,min(m.name) AS name,count(*) FILTER (WHERE m.active=true)::int AS members,
     COALESCE(t.total,0)::int AS total,COALESCE(t.accepted,0)::int AS accepted,
     COALESCE(t.waiting,0)::int AS waiting,COALESCE(t.overdue,0)::int AS overdue
@@ -44,7 +44,7 @@ export async function executiveSummary(db: Queryable, orgId: string, teamMode='d
     (t.due_at<now()) AS overdue FROM tasks t JOIN users u ON u.id=t.owner_id AND u.org_id=t.org_id
     JOIN departments d ON d.id=t.department_id AND d.org_id=t.org_id
     LEFT JOIN external_identities e ON e.user_id=u.id AND e.corp_id=u.org_id AND e.provider='dingtalk'
-    WHERE t.org_id=$1 AND t.status<>'accepted' AND (t.due_at<now() OR t.status IN ('submitted','revision'))
+    WHERE t.org_id=$1 AND t.archived_at IS NULL AND t.status<>'accepted' AND (t.due_at<now() OR t.status IN ('submitted','revision'))
     ORDER BY (t.due_at<now()) DESC,t.due_at,t.id LIMIT 50`,[orgId,teamMode])).rows;
   return {generatedAt:new Date().toISOString(),totals,departments,goals,
     companyProgress:company.length?Math.round(company.reduce((sum,g)=>sum+g.progress,0)/company.length):null,
