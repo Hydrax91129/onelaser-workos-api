@@ -193,6 +193,7 @@ export async function registerMemberRoutes(app: FastifyInstance, db: Database, o
     const user = requireAdmin(req), input = inviteInput.parse(req.body);
     limit('invite:' + user.id, 30, 3600_000);
     if (input.grants?.includes('product_cost_detail') && !input.grants.includes('products')) deny(400, 'GRANT_DEPENDENCY', 'Cost details require product area access');
+    if (input.grants?.length && !o.executiveUserIds.includes(user.id)) deny(403, 'GRANTS_EXECUTIVE_ONLY', 'Only the company owner can change feature access');
     if (input.factory) { input.role = 'employee'; input.grants = []; }
     const token = randomBytes(32).toString('base64url');
     const created = await db.transaction(async tx => {

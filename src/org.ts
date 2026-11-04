@@ -165,6 +165,9 @@ export async function registerOrgRoutes(app: FastifyInstance, db: Database, o: O
         }
       }
       if (input.isAdmin === false && member.id === user.id && !o.executiveUserIds.includes(user.id)) deny(400, 'ADMIN_SELF_REMOVAL', 'You cannot remove your own administrator access');
+      // Feature grants open sensitive ERP data (costs, prices, stock, dealers). Only deployment-configured
+      // executives may change them, so an in-app admin cannot widen anyone's access, including their own.
+      if (input.grants !== undefined && !o.executiveUserIds.includes(user.id)) deny(403, 'GRANTS_EXECUTIVE_ONLY', 'Only the company owner can change feature access');
       const role = input.role ?? member.role, override = input.role ?? member.role_override;
       const grants = input.grants ? [...new Set(input.grants)] : member.grants;
       if (input.grants?.includes('product_cost_detail') && !input.grants.includes('products')) deny(400, 'GRANT_DEPENDENCY', 'Cost details require product area access');
