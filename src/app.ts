@@ -183,7 +183,7 @@ export async function buildApp(options:AppOptions) {
   app.get('/executive/summary',async req=>{const user=actor(req);if(!isExecutive(user))deny(403,'FORBIDDEN','Executive access is required');return db.transaction(tx=>executiveSummary(tx,user.org_id,integrations.teamMode));});
   registerSupportRoutes(app,db,options.support,integrations.executiveUserIds);
   await registerOkrPublish(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
-  await registerCaldockRoutes(app,db,{...options.caldock,secureCookies:environment==='production'||options.caldock?.secureCookies===true});
+  await registerCaldockRoutes(app,db,{mailer,...options.caldock,secureCookies:environment==='production'||options.caldock?.secureCookies===true});
   await registerCaldockStudio(app,db,{publicUrl:options.caldock?.publicUrl||integrations.appPublicUrl,...options.studio,
     dingtalk:integrations.dingtalk&&integrations.corpId&&integrations.appPublicUrl&&(integrations.allowedDepartmentIds?.length||integrations.teamMode==='company'&&integrations.additionalUserIds?.length)?{
       corpId:integrations.corpId,allowedDepartmentIds:integrations.allowedDepartmentIds||[],

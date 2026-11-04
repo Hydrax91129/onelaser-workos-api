@@ -102,4 +102,11 @@ CREATE TABLE IF NOT EXISTS caldock_audit (
  id text PRIMARY KEY, actor_id text REFERENCES caldock_users(id), action text NOT NULL,
  object_id text NOT NULL, details jsonb NOT NULL DEFAULT '{}', created_at timestamptz NOT NULL DEFAULT now()
 );
+-- Second-tier referrals (additive and repeatable). The parent is fixed when a partner joins; only two tiers ever exist.
+ALTER TABLE caldock_affiliates ADD COLUMN IF NOT EXISTS parent_id text REFERENCES caldock_affiliates(user_id);
+CREATE INDEX IF NOT EXISTS caldock_affiliate_parent ON caldock_affiliates(parent_id);
+ALTER TABLE caldock_settings ADD COLUMN IF NOT EXISTS second_tier_bps integer NOT NULL DEFAULT 500 CHECK(second_tier_bps BETWEEN 0 AND 10000);
+ALTER TABLE caldock_orders ADD COLUMN IF NOT EXISTS second_affiliate_id text REFERENCES caldock_affiliates(user_id);
+ALTER TABLE caldock_orders ADD COLUMN IF NOT EXISTS second_tier_bps integer NOT NULL DEFAULT 0 CHECK(second_tier_bps BETWEEN 0 AND 10000);
+ALTER TABLE caldock_commissions ADD COLUMN IF NOT EXISTS tier integer NOT NULL DEFAULT 1 CHECK(tier IN (1,2));
 `;
