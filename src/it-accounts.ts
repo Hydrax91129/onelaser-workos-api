@@ -20,6 +20,7 @@ import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
 import { ApiError, deny } from './errors.js';
 import { pushInbox } from './inbox.js';
+import { factoryUserIds, type QualityOptions } from './quality.js';
 
 export const itSchema = `
 CREATE TABLE IF NOT EXISTS it_accounts(id text PRIMARY KEY, org_id text NOT NULL, service text NOT NULL, category text NOT NULL DEFAULT 'saas', login text NOT NULL DEFAULT '',
@@ -174,7 +175,9 @@ export function parseCsv(input: string) {
 const cell = (v: unknown) => { let s = v === null || v === undefined ? '' : String(v); if (/^[=+\-@]/.test(s)) s = "'" + s; return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
 const unformula = (s: string) => /^'[=+\-@]/.test(s) ? s.slice(1) : s;
 
-export async function registerItRoutes(app: FastifyInstance, db: Database, o: ItOptions & { executiveIds?: string[]; now?: () => number; intervalMs?: number }) {
+export async function registerItRoutes(app: FastifyInstance, db: Database, o: ItOptions & { executiveIds?: string[]; quality?: QualityOptions; now?: () => number; intervalMs?: number }) {
+  /* Factory accounts (outside staff, quality tracking only) take no part in the quarterly account check. */
+  const factoryIds = (tx: Queryable, orgId: string) => factoryUserIds(tx, o.quality || {}, orgId);
   const now = o.now || Date.now;
   const itIds = new Set(o.userIds || []), execIds = new Set(o.executiveIds || []);
   const isIt = (u: User) => itIds.has(u.id);
@@ -418,13 +421,14 @@ export async function registerItRoutes(app: FastifyInstance, db: Database, o: It
   /* ---------- quarterly check ---------- */
   const startChecks = async (tx: Queryable, orgId: string, quarter: string) => {
     const started = (await tx.query(`INSERT INTO it_checks(org_id,quarter,user_id,started_on) SELECT org_id,$2,id,$3 FROM users
-      WHERE org_id=$1 AND active=true AND disabled_at IS NULL ON CONFLICT DO NOTHING RETURNING user_id`, [orgId, quarter, today()])).rows.map((r: any) => r.user_id as string);
+      WHERE org_id=$1 AND active=true AND disabled_at IS NULL AND NOT (id=ANY($4::text[])) ON CONFLICT DO NOTHING RETURNING user_id`, [orgId, quarter, today(), [...await factoryIds(tx, orgId)]])).rows.map((r: any) => r.user_id as string);
     if (started.length) await pushInbox(tx, { orgId, recipients: started, actorId: 'system', kind: 'it_reminder', title: `请确认你的账号与设备（${quarter}）`, body: 'IT 资产与账号 → 我的账号' });
     return started.length;
   };
   const checkRound = async (tx: Queryable, orgId: string, quarter: string) => {
     const names = await people(tx, orgId);
-    const rows = (await tx.query('SELECT * FROM it_checks WHERE org_id=$1 AND quarter=$2', [orgId, quarter])).rows;
+    const skip = await factoryIds(tx, orgId);
+    const rows = (await tx.query('SELECT * FROM it_checks WHERE org_id=$1 AND quarter=$2', [orgId, quarter])).rows.filter((r: any) => !skip.has(r.user_id));
     const items = rows.map((r: any) => ({ userId: r.user_id, name: nameOf(names.get(r.user_id)), departmentId: names.get(r.user_id)?.department_id || '', status: r.status,
       startedOn: ymd(r.started_on), confirmedAt: r.confirmed_at, overdueDays: r.status === 'pending' ? Math.max(0, -daysTo(ymd(r.started_on)!)) : 0 }))
       .sort((a: any, b: any) => (a.status === b.status ? 0 : a.status === 'pending' ? -1 : 1) || a.name.localeCompare(b.name));
@@ -550,7 +554,8 @@ export async function registerItRoutes(app: FastifyInstance, db: Database, o: It
       }
       if (dayOfQuarter <= 7 && !(await db.query('SELECT 1 FROM it_checks WHERE org_id=$1 AND quarter=$2 LIMIT 1', [orgId, quarter])).rows.length)
         sent += await db.transaction(tx => startChecks(tx, orgId, quarter));
-      const pending = (await db.query("SELECT user_id,started_on FROM it_checks WHERE org_id=$1 AND quarter=$2 AND status='pending'", [orgId, quarter])).rows;
+      const skip = await factoryIds(db, orgId);
+      const pending = (await db.query("SELECT user_id,started_on FROM it_checks WHERE org_id=$1 AND quarter=$2 AND status='pending'", [orgId, quarter])).rows.filter((r: any) => !skip.has(r.user_id));
       for (const p of pending) {
         const age = -daysTo(ymd(p.started_on)!), step = age >= 14 ? 14 : age >= 7 ? 7 : 0;
         if (!step || !(await once(`check:${orgId}:${quarter}:${p.user_id}:${step}`))) continue;

@@ -73,6 +73,16 @@ export async function qualityFactoryOf(db: Queryable, o: QualityOptions, u: User
   for (const [factory, depts] of Object.entries(map)) if (depts.includes(u.department_id) || (ext && depts.includes(ext))) return factory;
   return null;
 }
+/* Everyone in a mapped factory department (quality leads excepted): outside staff that company-wide rounds such as the
+ * IT quarterly account check skip. Same department matching as qualityFactoryOf. */
+export async function factoryUserIds(db: Queryable, o: QualityOptions, orgId: string): Promise<Set<string>> {
+  const depts = Object.values(o.factoryDepartments || {}).flat();
+  if (!depts.length) return new Set();
+  const rows = (await db.query(`SELECT u.id FROM users u LEFT JOIN departments d ON d.org_id=u.org_id AND d.id=u.department_id
+    WHERE u.org_id=$1 AND (u.department_id=ANY($2::text[]) OR d.external_id=ANY($2::text[]))`, [orgId, depts])).rows;
+  const leads = new Set(o.leadIds || []);
+  return new Set(rows.map((r: any) => r.id as string).filter(id => !leads.has(id)));
+}
 /* Factory accounts are outside staff: besides the quality pages they may only manage their own session and
  * profile, and send bug reports / ideas. Everything else in CraftOS (tasks, OKRs, people, products, prices, stock, support…) is refused. */
 const FACTORY_PATHS = [/^\/me(?:\/(?:profile|avatar|password))?$/, /^\/auth\/(?:session|csrf)$/, /^\/quality(?:\/.*)?$/, /^\/inbox(?:\/read)?$/, /^\/translate$/];

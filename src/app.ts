@@ -305,7 +305,7 @@ export async function buildApp(options:AppOptions) {
   await registerRmaRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),now:options.clock});
   await registerHrRoutes(app,db,{...options.hr,now:options.clock,intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0)});
   await registerQualityRoutes(app,db,{...options.quality,notify,intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0),isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),now:options.clock});
-  await registerItRoutes(app,db,{...options.it,executiveIds:integrations.executiveUserIds||[],now:options.clock,intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0)});
+  await registerItRoutes(app,db,{...options.it,quality:options.quality,executiveIds:integrations.executiveUserIds||[],now:options.clock,intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0)});
   await registerInboxRoutes(app,db);
   await registerProductRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
   await registerFeedbackRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),mailer,to:process.env.FEEDBACK_EMAIL,appUrl:integrations.appPublicUrl});
