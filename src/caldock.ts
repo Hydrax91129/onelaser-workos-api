@@ -8,11 +8,12 @@ import { createCaldockGateway, type CaldockGateway, type CaldockProvider } from 
 import { recordCaldockRenewalCommission, caldockAudit, caldockOrderAmounts, caldockStockStatus, CALDOCK_SALE_PRICES, createCaldockOrder, recordVerifiedCaldockPayment } from './caldock-domain.js';
 import { ApiError } from './errors.js';
 import { mailerFromEnv, type Mailer } from './members.js';
+import { orderWebhookFromEnv, type OrderWebhook } from './caldock-notify.js';
 import { isStaleTestSession, stripeFromEnv, verifyStripeEvent, StripeRequestError, STRIPE_RECURRING, type CaldockStripe } from './caldock-stripe.js';
 
 type Customer = {id:string;display_name:string;email:string|null;active:boolean;created_at:string};
 type Session = {user:Customer;csrf:string;token:string};
-export type CaldockOptions = {publicUrl?:string;siteUrl?:string;liveStock?:boolean;mailer?:Mailer|null;orderNotifyEmails?:string[];marketingUrl?:string;secureCookies?:boolean;adminUserIds?:string[];providers?:Partial<Record<CaldockProvider,CaldockGateway>>;stripe?:CaldockStripe};
+export type CaldockOptions = {publicUrl?:string;siteUrl?:string;liveStock?:boolean;mailer?:Mailer|null;orderNotifyEmails?:string[];orderWebhook?:OrderWebhook|null;marketingUrl?:string;secureCookies?:boolean;adminUserIds?:string[];providers?:Partial<Record<CaldockProvider,CaldockGateway>>;stripe?:CaldockStripe};
 const id=z.string().uuid(),providerName=z.enum(['google','apple']);
 const status=z.enum(['pending_payment','paid','provisioning','active','cancelled','refunded']);
 const interval=z.enum(['week','month','quarter','half','year']);
@@ -37,7 +38,7 @@ export function caldockOptionsFromEnv(env:NodeJS.ProcessEnv):CaldockOptions {
   // A Stripe misconfiguration disables CalDock payments only; it must never stop the shared Work OS service.
   try{stripe=stripeFromEnv(env);}catch(error){console.error('CalDock payments disabled: '+(error as Error).message);}
   // Its own mail settings: the shared ones would also switch on Work OS email sign-in and invites.
-  return {stripe,liveStock:true,mailer:mailerFromEnv({RESEND_API_KEY:env.CALDOCK_RESEND_API_KEY,EMAIL_FROM:env.CALDOCK_EMAIL_FROM}),orderNotifyEmails:(env.CALDOCK_ORDER_NOTIFY_EMAILS||'').split(',').map(x=>x.trim()).filter(Boolean),publicUrl:env.APP_PUBLIC_URL||env.RENDER_EXTERNAL_URL||'http://localhost:4173',siteUrl:'https://wodemac.com',secureCookies:env.NODE_ENV==='production',marketingUrl:env.CALDOCK_MARKETING_URL||'https://yonge6.github.io/mac-mini-rental/',adminUserIds:(env.CALDOCK_ADMIN_USER_IDS||'').split(',').map(x=>x.trim()).filter(Boolean),providers};
+  return {stripe,liveStock:true,mailer:mailerFromEnv({RESEND_API_KEY:env.CALDOCK_RESEND_API_KEY,EMAIL_FROM:env.CALDOCK_EMAIL_FROM}),orderNotifyEmails:(env.CALDOCK_ORDER_NOTIFY_EMAILS||'').split(',').map(x=>x.trim()).filter(Boolean),orderWebhook:orderWebhookFromEnv(env),publicUrl:env.APP_PUBLIC_URL||env.RENDER_EXTERNAL_URL||'http://localhost:4173',siteUrl:'https://wodemac.com',secureCookies:env.NODE_ENV==='production',marketingUrl:env.CALDOCK_MARKETING_URL||'https://yonge6.github.io/mac-mini-rental/',adminUserIds:(env.CALDOCK_ADMIN_USER_IDS||'').split(',').map(x=>x.trim()).filter(Boolean),providers};
 }
 export async function registerCaldockRoutes(app:FastifyInstance,db:Database,options:CaldockOptions={}) {
   const publicUrl=new URL(options.publicUrl||'http://localhost:4173');
@@ -232,6 +233,15 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
       if(failed)deny(502,'CALDOCK_ORDER_MAIL_FAILED','The test email could not be delivered');
       return {sent:recipients.length};
     });
+    routes.post('/admin/order-webhook-test',async req=>{
+      const current=admin(req),webhook=options.orderWebhook;
+      if(!webhook)deny(503,'CALDOCK_ORDER_WEBHOOK_UNCONFIGURED','The order webhook is not configured');
+      let failed=false;
+      try{await webhook({event:'caldock.order.test',test:true,orderRef:'TEST',plan:'测试通知',quantity:1,amount:'$0.00',stockLeft:null,adminUrl:`${market.origin}/?view=admin`});}catch{failed=true;}
+      await caldockAudit(db,current.user.id,'notify.order_webhook_test','1',{failed});
+      if(failed)deny(502,'CALDOCK_ORDER_WEBHOOK_FAILED','The order webhook could not be reached');
+      return {sent:true};
+    });
     const stockView=async(tx:Queryable=db)=>{const row=(await tx.query('SELECT stock_rented_before,version FROM caldock_settings WHERE id=1')).rows[0];return {...await caldockStockStatus(tx),rentedBefore:row.stock_rented_before,version:row.version};};
     routes.get('/admin/stock',async req=>{admin(req);return stockView();});
     routes.patch('/admin/stock',async req=>{const current=admin(req),input=z.object({total:z.number().int().min(0).max(100000),rentedBefore:z.number().int().min(0).max(100000),expectedVersion:z.number().int().positive()}).strict().parse(req.body);if(input.rentedBefore>input.total)deny(400,'CALDOCK_STOCK_INVALID','Rented Macs cannot exceed the total');return db.transaction(async tx=>{const row=(await tx.query('UPDATE caldock_settings SET stock_total=$1,stock_rented_before=$2,version=version+1,updated_at=now() WHERE id=1 AND version=$3 RETURNING id',[input.total,input.rentedBefore,input.expectedVersion])).rows[0];if(!row)deny(409,'VERSION_CONFLICT','Settings changed; reload before continuing');await caldockAudit(tx,current.user.id,'stock.updated','1',{total:input.total,rentedBefore:input.rentedBefore});return stockView(tx);});});
@@ -260,8 +270,21 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
       return {received:true};
     });
   });
-  // Runs after the payment is committed: a mail failure is audited and never fails the webhook.
+  // Runs after the payment is committed: a notification failure is audited and never fails the Stripe webhook.
   async function notifyNewOrder(orderId:string) {
+    await Promise.all([mailNewOrder(orderId),pingOrderWebhook(orderId)]);
+  }
+  async function pingOrderWebhook(orderId:string) {
+    const webhook=options.orderWebhook;
+    if(!webhook)return;
+    try{
+      const order=(await db.query('SELECT id,interval,quantity,amount_cents FROM caldock_orders WHERE id=$1',[orderId])).rows[0];
+      const stock=await caldockStockStatus(db);
+      const plan=({week:'周付',month:'月付',quarter:'季付',half:'半年付',year:'年付'} as Record<string,string>)[order.interval]||order.interval;
+      await webhook({event:'caldock.order.paid',test:stripe?.mode==='test',orderRef:order.id.slice(0,8).toUpperCase(),plan,quantity:order.quantity,amount:'$'+(order.amount_cents/100).toLocaleString('en-US',{minimumFractionDigits:2}),stockLeft:stock.left,adminUrl:`${market.origin}/?view=admin`});
+    }catch{await caldockAudit(db,null,'notify.order_webhook_failed',orderId,{}).catch(()=>{});}
+  }
+  async function mailNewOrder(orderId:string) {
     const mailer=options.mailer,recipients=options.orderNotifyEmails||[];
     if(!recipients.length)return;
     if(!mailer){await caldockAudit(db,null,'notify.order_mail_unavailable',orderId,{});return;}

@@ -1,3 +1,4 @@
+import { createOrderWebhook, orderWebhookFromEnv } from '../src/caldock-notify.js';
 import {before,after,test} from 'node:test';
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
@@ -255,6 +256,53 @@ test('order mail uses its own settings and an admin can send a test',async()=>{
     const down=await test(mailApp,owner);assert.equal(down.statusCode,502);assert.equal(down.json().error.code,'CALDOCK_ORDER_MAIL_FAILED');
     const off=await test(plainApp,await signIn(plainApp,'stripe-owner'));assert.equal(off.statusCode,503);assert.equal(off.json().error.code,'CALDOCK_ORDER_MAIL_UNCONFIGURED');
   }finally{await mailApp.close();await plainApp.close();}
+});
+
+test('a paid order pings the webhook once, without customer details, and a failed ping keeps the payment',async()=>{
+  const pings:any[]=[];let failing=false;
+  const hookApp=await buildApp({db,environment:'production',closeDatabase:false,mailer:null,caldock:{publicUrl:origin,providers:gateways,adminUserIds:[adminId],stripe,liveStock:true,orderWebhook:async p=>{if(failing)throw new Error('down');pings.push(p);}}});
+  const plainApp=await buildApp({db,environment:'production',closeDatabase:false,mailer:null,caldock:{publicUrl:origin,providers:gateways,adminUserIds:[adminId],stripe}});
+  const signIn=async(target:typeof hookApp,code:string)=>{
+    const start=await target.inject('/caldock/auth/google/start?next=account&lang=zh&interval=month');
+    const state=new URL(start.headers.location!).searchParams.get('state')!,flow=cookieList(start).map(c=>c.split(';')[0]).join('; ');
+    const back=await target.inject({url:`/caldock/auth/google/callback?state=${state}&code=${code}`,headers:{cookie:flow}});
+    const cookie=cookieList(back).find(c=>c.startsWith('__Host-caldock_session='))!.split(';')[0];
+    return {cookie,csrf:(await target.inject({url:'/caldock/me',headers:{cookie}})).json().csrfToken};
+  };
+  const order=async(code:string)=>{const who=await signIn(hookApp,code);return (await hookApp.inject({method:'POST',url:'/caldock/orders',payload:{interval:'month',requestKey:randomUUID()},headers:{cookie:who.cookie,origin,'x-csrf-token':who.csrf}})).json().id as string;};
+  const pay=(event:Record<string,unknown>)=>{const payload=JSON.stringify({livemode:false,...event});return hookApp.inject({method:'POST',url:'/caldock/stripe/webhook',payload,headers:{'content-type':'application/json','stripe-signature':signStripePayload(payload,webhookSecret)}});};
+  const ping=(target:typeof hookApp,who:{cookie:string;csrf:string})=>target.inject({method:'POST',url:'/caldock/admin/order-webhook-test',payload:{},headers:{cookie:who.cookie,origin,'x-csrf-token':who.csrf}});
+  try{
+    const id=await order('hook-1'),event=completed(id,'cs_hook_1',16900);
+    assert.equal((await pay(event)).statusCode,200);
+    assert.equal(pings.length,1);assert.equal(pings[0].event,'caldock.order.paid');assert.equal(pings[0].orderRef,id.slice(0,8).toUpperCase());assert.equal(pings[0].amount,'$169.00');assert.equal(pings[0].plan,'月付');
+    assert.doesNotMatch(JSON.stringify(pings[0]),/hook-1|@example/);
+    assert.equal((await pay({...event,id:'evt_'+randomUUID()})).statusCode,200);assert.equal(pings.length,1); // a redelivered payment pings nobody
+    failing=true;
+    const second=await order('hook-2');
+    assert.equal((await pay(completed(second,'cs_hook_2',16900))).statusCode,200);
+    assert.equal((await db.query('SELECT status FROM caldock_orders WHERE id=$1',[second])).rows[0].status,'paid');
+    assert.equal((await db.query("SELECT count(*)::int AS n FROM caldock_audit WHERE action='notify.order_webhook_failed' AND object_id=$1",[second])).rows[0].n,1);
+    assert.equal((await ping(hookApp,await signIn(hookApp,'hook-customer'))).statusCode,403);
+    const owner=await signIn(hookApp,'stripe-owner');
+    const down=await ping(hookApp,owner);assert.equal(down.statusCode,502);assert.equal(down.json().error.code,'CALDOCK_ORDER_WEBHOOK_FAILED');
+    failing=false;
+    assert.equal((await ping(hookApp,owner)).statusCode,200);assert.equal(pings.at(-1).event,'caldock.order.test');assert.equal(pings.at(-1).test,true);
+    const off=await ping(plainApp,await signIn(plainApp,'stripe-owner'));assert.equal(off.statusCode,503);assert.equal(off.json().error.code,'CALDOCK_ORDER_WEBHOOK_UNCONFIGURED');
+  }finally{await db.query("UPDATE caldock_orders SET paid_at='2026-01-01' WHERE paid_at IS NOT NULL");await hookApp.close();await plainApp.close();}
+});
+
+test('the order webhook sends a bearer POST, retries once and rejects a bad URL',async()=>{
+  const calls:any[]=[];let answers=[500,200];
+  const send=createOrderWebhook('https://hooks.example.test/run','s3cret',(async(url:any,init:any)=>{calls.push({url:String(url),init});return new Response('',{status:answers.shift()??500});}) as typeof fetch);
+  const payload={event:'caldock.order.test',test:true,orderRef:'TEST',plan:'x',quantity:1,amount:'$0.00',stockLeft:null,adminUrl:'https://wodemac.com/?view=admin'} as const;
+  await send(payload);
+  assert.equal(calls.length,2);assert.equal(calls[0].url,'https://hooks.example.test/run');assert.equal(calls[0].init.headers.Authorization,'Bearer s3cret');assert.equal(calls[0].init.redirect,'error');
+  answers=[500,500];await assert.rejects(send(payload));
+  assert.throws(()=>createOrderWebhook('http://hooks.example.test/run','s3cret'));
+  assert.equal(orderWebhookFromEnv({CALDOCK_ORDER_WEBHOOK_URL:'http://bad.example.test',CALDOCK_ORDER_WEBHOOK_SECRET:'s'}),null);
+  assert.equal(orderWebhookFromEnv({GROK_BOT_WEBHOOK_URL:'https://hooks.example.test',GROK_BOT_WEBHOOK_SECRET:'s'}),null);
+  assert.equal(typeof orderWebhookFromEnv({CALDOCK_ORDER_WEBHOOK_URL:'https://hooks.example.test/run',CALDOCK_ORDER_WEBHOOK_SECRET:'s'}),'function');
 });
 
 test('only the seller earns: the plan rate once on the first order, nothing on renewals or to whoever referred the seller',async()=>{
