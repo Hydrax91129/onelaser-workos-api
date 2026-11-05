@@ -70,6 +70,10 @@
   只负责收文件和检查类型、大小，存储和权限仍由各模块自己的接口负责。新功能不要再自己写一套上传。
 - 版本号：在 dist/changelog.js 的 RELEASES 最前面加一条，号码 = 当前最新版本 + 0.1，date 要晚于上一版。
 - 只用虚构的示例数据写测试和种子数据。
+- **发布前预览**：后端仓库 `npm run preview`（tools/preview-local.ts）在 http://localhost:4174 起一个完整的 WorkOS，前端取自旁边的
+  `../onelaser-workos/dist`，数据库在内存里、每次启动重置，填好虚构的人员、人事档案（三个地区，含一位已离职）、产品、经销商价和库存。
+  登录：owner@workos.test（主管理员）、hr@workos.test（中国 / 海外 HR）、staff@workos.test（普通员工），密码 workos-preview。
+  改了页面的 PR，合并前先用它跑一遍、截图给用户确认；新模块要用的示例数据也加在这个文件里。
 
 ## 5. 上线规则（全自动，任何会话都不手动部署）
 
