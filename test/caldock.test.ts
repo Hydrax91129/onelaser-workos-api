@@ -40,7 +40,7 @@ async function login(code:string,provider:CaldockProvider='google',ref?:string,b
  return {cookie:session.split(';')[0],csrf:me.json().csrfToken,...me.json()};
 }
 test('capabilities report server prices and no live payment; missing providers fail closed',async()=>{
- const cap=(await app.inject('/caldock/capabilities')).json();assert.equal(cap.prices.month,19900);assert.equal(cap.prices.quarter,53700);assert.equal(cap.prices.year,166800);assert.equal(cap.payments,false);assert.equal(cap.referrals.automaticPayouts,false);
+ const cap=(await app.inject('/caldock/capabilities')).json();assert.equal(cap.prices.month,16900);assert.equal(cap.prices.half,91260);assert.equal(cap.prices.quarter,48165);assert.equal(cap.prices.week,undefined);assert.equal(cap.prices.year,172380);assert.equal(cap.payments,false);assert.equal(cap.referrals.automaticPayouts,false);
  const empty=await buildApp({db,environment:'production',closeDatabase:false,caldock:{publicUrl:origin}});
  try{assert.equal((await empty.inject('/caldock/auth/google/start')).statusCode,503);assert.equal((await empty.inject('/caldock/me')).statusCode,401);assert.equal((await empty.inject('/caldock/admin/orders')).statusCode,401);}finally{await empty.close();}
  const config=caldockOptionsFromEnv({NODE_ENV:'production',CALDOCK_GOOGLE_CLIENT_ID:'incomplete'});assert.equal(config.providers?.google,undefined);assert.deepEqual(config.adminUserIds,[]);
@@ -81,13 +81,13 @@ test('writes require exact Origin and CSRF; profile cannot assign admin or email
  assert.equal((await send(buyer,'PATCH','/profile',{displayName:'Buyer',role:'admin'})).statusCode,400);
  assert.equal((await send(buyer,'PATCH','/profile',{displayName:'Buyer',email:'owner@example.test'})).statusCode,400);
  assert.equal((await send(buyer,'GET','/admin/orders')).statusCode,403);
- assert.equal((await send(buyer,'PATCH','/admin/settings',{commissionBps:1000,commissionMode:'first_order',expectedVersion:1})).statusCode,403);
+ assert.equal((await send(buyer,'PATCH','/admin/settings',{monthCommissionBps:1000,quarterCommissionBps:1000,halfCommissionBps:1000,yearCommissionBps:1000,commissionMode:'first_order',expectedVersion:1})).statusCode,403);
 });
 test('server owns order prices and customer identity; retries return one order',async()=>{
  const key=randomUUID();const payload={interval:'year',requestKey:key};
  assert.equal((await send(buyer,'POST','/orders',{...payload,amountCents:1})).statusCode,400);
  assert.equal((await send(buyer,'POST','/orders',{...payload,customerId:owner.user.id})).statusCode,400);
- const created=await send(buyer,'POST','/orders',payload);assert.equal(created.statusCode,201,created.body);const row=created.json();assert.equal(row.amount_cents,166800);assert.equal(row.customer_id,buyer.user.id);assert.equal(row.status,'pending_payment');
+ const created=await send(buyer,'POST','/orders',payload);assert.equal(created.statusCode,201,created.body);const row=created.json();assert.equal(row.amount_cents,172380);assert.equal(row.customer_id,buyer.user.id);assert.equal(row.status,'pending_payment');
  const retry=await send(buyer,'POST','/orders',payload);assert.equal(retry.json().id,row.id);
  assert.equal((await send(buyer,'POST','/orders',{interval:'month',requestKey:key})).statusCode,409);
  assert.equal((await send(buyer,'POST','/orders',{interval:'month',requestKey:randomUUID()})).statusCode,409);
@@ -102,17 +102,17 @@ test('referral binds only a new customer, does not overwrite prior attribution, 
  const before=(await send(affiliate,'GET','/affiliate')).json();assert.equal(before.stats.registrations,1);assert.equal(before.stats.pendingCents,0);
  await login('other','google',data.affiliate.code);assert.equal((await send(affiliate,'GET','/affiliate')).json().stats.registrations,1);
  const raw=await send(affiliate,'GET','/affiliate');assert.doesNotMatch(raw.body,/referred-buyer@example.test/);
- const settings=(await send(owner,'GET','/admin/settings')).json();const saved=await send(owner,'PATCH','/admin/settings',{commissionBps:1000,commissionMode:'first_order',expectedVersion:settings.version});assert.equal(saved.statusCode,200,saved.body);
- order=(await send(buyer,'POST','/orders',{interval:'month',requestKey:randomUUID()})).json();assert.equal(order.amount_cents,19900);assert.equal(order.affiliate_id,affiliate.user.id);assert.equal(order.commission_bps,1000);
- await send(owner,'PATCH','/admin/settings',{commissionBps:2000,commissionMode:'each_order',expectedVersion:saved.json().version});
+ const settings=(await send(owner,'GET','/admin/settings')).json();const saved=await send(owner,'PATCH','/admin/settings',{monthCommissionBps:1000,quarterCommissionBps:1000,halfCommissionBps:1000,yearCommissionBps:1000,commissionMode:'first_order',expectedVersion:settings.version});assert.equal(saved.statusCode,200,saved.body);
+ order=(await send(buyer,'POST','/orders',{interval:'month',requestKey:randomUUID()})).json();assert.equal(order.amount_cents,16900);assert.equal(order.affiliate_id,affiliate.user.id);assert.equal(order.commission_bps,1000);
+ await send(owner,'PATCH','/admin/settings',{monthCommissionBps:2000,quarterCommissionBps:2000,halfCommissionBps:2000,yearCommissionBps:2000,commissionMode:'each_order',expectedVersion:saved.json().version});
  assert.equal((await send(affiliate,'GET','/affiliate')).json().commissions.length,0);
 });
 test('only a trusted verified payment event accrues snapshotted commission and is idempotent',async()=>{
  assert.equal((await send(buyer,'POST','/payments/events',{orderId:order.id,status:'paid'})).statusCode,404);
  await assert.rejects(recordVerifiedCaldockPayment(db,{eventId:'wrong_amount',orderId:order.id,type:'paid',amountCents:1,currency:'USD'}));
- const event={eventId:'verified_event_1',orderId:order.id,type:'paid' as const,amountCents:19900,currency:'USD'};
+ const event={eventId:'verified_event_1',orderId:order.id,type:'paid' as const,amountCents:16900,currency:'USD'};
  assert.equal((await recordVerifiedCaldockPayment(db,event)).duplicate,false);assert.equal((await recordVerifiedCaldockPayment(db,event)).duplicate,true);
- const ledger=(await send(affiliate,'GET','/affiliate')).json();assert.equal(ledger.commissions.length,1);commission=ledger.commissions[0];assert.equal(commission.amount_cents,1990);assert.equal(commission.rate_bps,1000);assert.equal(commission.status,'pending');
+ const ledger=(await send(affiliate,'GET','/affiliate')).json();assert.equal(ledger.commissions.length,1);commission=ledger.commissions[0];assert.equal(commission.amount_cents,1690);assert.equal(commission.rate_bps,1000);assert.equal(commission.status,'pending');
  assert.equal((await send(buyer,'GET','/orders/'+order.id)).json().status,'paid');
 });
 test('admin fulfillment uses valid transitions, optimistic versions and delivery-based billing',async()=>{
@@ -129,7 +129,7 @@ test('manual commission recording requires approval and reference; refund voids 
  assert.equal((await send(owner,'PATCH','/admin/commissions/'+commission.id,{status:'approved',expectedStatus:'pending'})).statusCode,200);
  assert.equal((await send(owner,'PATCH','/admin/commissions/'+commission.id,{status:'settled',expectedStatus:'approved'})).statusCode,400);
  const settled=await send(owner,'PATCH','/admin/commissions/'+commission.id,{status:'settled',expectedStatus:'approved',reference:'Offline transfer receipt EXAMPLE-1'});assert.equal(settled.statusCode,200,settled.body);
- await recordVerifiedCaldockPayment(db,{eventId:'verified_refund_1',orderId:order.id,type:'refunded',amountCents:19900,currency:'USD'});
+ await recordVerifiedCaldockPayment(db,{eventId:'verified_refund_1',orderId:order.id,type:'refunded',amountCents:16900,currency:'USD'});
  const data=(await send(affiliate,'GET','/affiliate')).json();assert.equal(data.commissions[0].status,'void');assert.ok(data.commissions[0].settled_at);assert.equal(data.stats.pendingCents,0);assert.equal(data.stats.settledCents,0);
  assert.ok((await db.query('SELECT * FROM caldock_audit WHERE object_id=$1',[commission.id])).rows.length>=2);
 });
@@ -142,20 +142,20 @@ test('billing migration is repeatable and leaves legacy order snapshots unchange
  assert.equal((await send(legacy,'GET','/orders/'+row.id)).json().amount_cents,179900);
  assert.match((await db.query("SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint WHERE conrelid='caldock_orders'::regclass AND conname='caldock_orders_interval_check'")).rows[0].definition,/quarter/);
 });
-test('quarterly login, authoritative upfront price, referral commission and three-month delivery agree',async()=>{
+test('half-yearly login, authoritative upfront price, referral commission and six-month delivery agree',async()=>{
  const code=(await send(affiliate,'GET','/affiliate')).json().affiliate.code;
- const customer=await login('quarterly-customer','google',code,'quarter');
+ const customer=await login('half-yearly-customer','google',code,'half');
  const key=randomUUID();
- assert.equal((await send(customer,'POST','/orders',{interval:'quarter',requestKey:key,amountCents:16900})).statusCode,400);
- const created=await send(customer,'POST','/orders',{interval:'quarter',requestKey:key});assert.equal(created.statusCode,201,created.body);
- const row=created.json();assert.equal(row.amount_cents,53700);assert.equal(row.interval,'quarter');
- assert.equal((await send(customer,'POST','/orders',{interval:'quarter',requestKey:key})).json().id,row.id);
- await recordVerifiedCaldockPayment(db,{eventId:'quarterly-verified-paid',orderId:row.id,type:'paid',amountCents:53700,currency:'USD'});
- const ledger=(await db.query('SELECT amount_cents FROM caldock_commissions WHERE order_id=$1',[row.id])).rows[0];assert.equal(ledger.amount_cents,10740);
+ assert.equal((await send(customer,'POST','/orders',{interval:'half',requestKey:key,amountCents:16900})).statusCode,400);
+ const created=await send(customer,'POST','/orders',{interval:'half',requestKey:key});assert.equal(created.statusCode,201,created.body);
+ const row=created.json();assert.equal(row.amount_cents,91260);assert.equal(row.interval,'half');
+ assert.equal((await send(customer,'POST','/orders',{interval:'half',requestKey:key})).json().id,row.id);
+ await recordVerifiedCaldockPayment(db,{eventId:'half-yearly-verified-paid',orderId:row.id,type:'paid',amountCents:91260,currency:'USD'});
+ const ledger=(await db.query('SELECT amount_cents FROM caldock_commissions WHERE order_id=$1',[row.id])).rows[0];assert.equal(ledger.amount_cents,18252);
  const paid=(await send(customer,'GET','/orders/'+row.id)).json();
  const provisioning=(await send(owner,'PATCH','/admin/orders/'+row.id,{status:'provisioning',expectedVersion:paid.version})).json();
  const delivered=await send(owner,'PATCH','/admin/orders/'+row.id,{status:'active',expectedVersion:provisioning.version});assert.equal(delivered.statusCode,200,delivered.body);
- assert.equal((await db.query("SELECT billing_ends_at=delivered_at+interval '3 months' AS correct_term FROM caldock_orders WHERE id=$1",[row.id])).rows[0].correct_term,true);
+ assert.equal((await db.query("SELECT billing_ends_at=paid_at+interval '6 months' AS correct_term FROM caldock_orders WHERE id=$1",[row.id])).rows[0].correct_term,true);
 });
 test('logout revokes the server session and clears the cookie',async()=>{
  assert.equal((await send(other,'DELETE','/session')).statusCode,200);assert.equal((await send(other,'GET','/me')).statusCode,401);
