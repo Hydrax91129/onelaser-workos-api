@@ -8,9 +8,11 @@
  *   owner@workos.test    company owner: sees everything, including the US HR region and costs
  *   hr@workos.test       HR for China and other countries
  *   staff@workos.test    a regular employee
- * Password for all three: workos-preview
+ * Password for all three: workos-preview, or PREVIEW_PASSWORD when set (the hosted test site sets its own).
  *
- * To preview a pull request: check out its branch in ../onelaser-workos (and here, for backend changes), then run this. */
+ * To preview a pull request: check out its branch in ../onelaser-workos (and here, for backend changes), then run this.
+ * Hosted test site: Dockerfile.preview builds this with the frontend commit in deploy/preview-frontend-revision.txt;
+ * a separate Render service deploys the claude/preview branch. It never shares a database with craftos.app. */
 import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve } from 'node:path';
@@ -19,9 +21,14 @@ import { buildApp } from '../src/app.js';
 import { createDatabase, schema, seedDemo } from '../src/db.js';
 import { hashPassword } from '../src/members.js';
 
-const PORT = Number(process.env.PORT || 4174), ORIGIN = `http://localhost:${PORT}`;
+const PORT = Number(process.env.PORT || 4174), HOST = process.env.HOST || '127.0.0.1';
+const ORIGIN = (process.env.RENDER_EXTERNAL_URL || process.env.PREVIEW_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
 const DIST = resolve(process.env.FRONTEND_DIST || resolve(import.meta.dirname, '..', '..', 'onelaser-workos', 'dist'));
-const PASSWORD = 'workos-preview', ORG = 'demo';
+const FRONTEND_COMMIT = (await readFile(process.env.PREVIEW_FRONTEND_COMMIT_FILE || '/nonexistent', 'utf8').catch(() => 'local')).trim();
+// A strip on every page so nobody mistakes the test site for craftos.app.
+const BANNER = `<div style="position:fixed;left:50%;bottom:10px;transform:translateX(-50%);z-index:9999;background:#a15c00;color:#fff;font:600 12px system-ui;padding:5px 12px;border-radius:999px;box-shadow:0 4px 14px #0003;pointer-events:none">测试站 · 虚构数据，每次部署都会重置 · Test site, fictional data · ${FRONTEND_COMMIT.slice(0, 7)}</div>`;
+const PASSWORD = process.env.PREVIEW_PASSWORD || 'workos-preview', ORG = 'demo';
+if (process.env.RENDER && !process.env.PREVIEW_PASSWORD) throw new Error('Set PREVIEW_PASSWORD on the hosted test site; the default password is public.');
 
 const db = await createDatabase();
 await db.exec(schema);
@@ -88,7 +95,9 @@ const app = await buildApp({
 const TYPES: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.otf': 'font/otf', '.woff2': 'font/woff2', '.png': 'image/png', '.json': 'application/json', '.webp': 'image/webp', '.ico': 'image/x-icon' };
 createServer(async (req, res) => {
   try {
-    const url = new URL(req.url || '/', ORIGIN), method = req.method || 'GET';
+    const url = new URL(req.url || '/', 'http://preview.local'), method = req.method || 'GET';
+    res.setHeader('x-robots-tag', 'noindex, nofollow');
+    if (url.pathname === '/healthz') { res.writeHead(200, { 'content-type': 'text/plain' }); return res.end('ok'); }
     if (url.pathname.startsWith('/api/')) {
       const chunks: Buffer[] = []; for await (const c of req) chunks.push(c as Buffer);
       const headers = { ...req.headers }; delete headers['content-length']; delete headers.host;
@@ -97,16 +106,17 @@ createServer(async (req, res) => {
       res.writeHead(r.statusCode, out); return res.end(r.rawPayload);
     }
     if (url.pathname === '/runtime-config.js') { res.writeHead(200, { 'content-type': 'text/javascript', 'cache-control': 'no-store' }); return res.end("'use strict';window.WORKOS_CONFIG=Object.freeze({mode:'live',apiBase:'/api'});"); }
-    if (url.pathname === '/build-info.json') { res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); return res.end(JSON.stringify({ frontendCommit: 'preview', preview: true })); }
+    if (url.pathname === '/build-info.json') { res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); return res.end(JSON.stringify({ frontendCommit: FRONTEND_COMMIT, preview: true })); }
     let file = normalize(join(DIST, decodeURIComponent(url.pathname)));
     if (!file.startsWith(DIST)) { res.writeHead(403); return res.end(); }
     if ((await stat(file).catch(() => null))?.isDirectory()) file = join(file, 'index.html');
-    const body = await readFile(file).catch(() => null);
+    let body = await readFile(file).catch(() => null);
     if (!body) { res.writeHead(404); return res.end('Not found'); }
+    if (file.endsWith('index.html')) body = Buffer.from(body.toString('utf8').replace('</body>', BANNER + '</body>'));
     res.writeHead(200, { 'content-type': TYPES[extname(file)] || 'application/octet-stream', 'cache-control': 'no-store' }); res.end(body);
   } catch (error) { console.error(error); res.writeHead(500); res.end('Preview server error'); }
-}).listen(PORT, '127.0.0.1', () => {
+}).listen(PORT, HOST, () => {
   console.log(`WorkOS preview (fictional test data, resets on every start): ${ORIGIN}/`);
   console.log(`Frontend from ${DIST}`);
-  console.log(`Sign in: owner@workos.test · hr@workos.test · staff@workos.test — password ${PASSWORD}`);
+  console.log(`Sign in: owner@workos.test · hr@workos.test · staff@workos.test — password ${process.env.PREVIEW_PASSWORD ? '(PREVIEW_PASSWORD)' : PASSWORD}`);
 });

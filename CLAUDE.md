@@ -74,6 +74,10 @@
   `../onelaser-workos/dist`，数据库在内存里、每次启动重置，填好虚构的人员、人事档案（三个地区，含一位已离职）、产品、经销商价和库存。
   登录：owner@workos.test（主管理员）、hr@workos.test（中国 / 海外 HR）、staff@workos.test（普通员工），密码 workos-preview。
   改了页面的 PR，合并前先用它跑一遍、截图给用户确认；新模块要用的示例数据也加在这个文件里。
+- **测试站**：用户在 Render 上另建的服务（和正式服务 onelaser-workos-migration、正式数据库完全分开），用 `Dockerfile.preview`
+  构建 `claude/preview` 分支：只有内存里的虚构数据，登录密码是那个服务上的 `PREVIEW_PASSWORD`（不写进仓库），页面底部有“测试站”标记。
+  给用户预览时：把后端 PR 的提交推到 `claude/preview`，要预览的前端提交写进 `deploy/preview-frontend-revision.txt`。
+  `claude/preview` 永远不合进 `main`；第 5 节对正式服务的规则不变。
 
 ## 5. 上线规则（全自动，任何会话都不手动部署）
 
