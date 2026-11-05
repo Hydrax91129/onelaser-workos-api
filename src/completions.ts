@@ -55,7 +55,7 @@ CREATE INDEX IF NOT EXISTS task_attachment_task_idx ON task_attachments(task_id,
 const ALLOWED_MIME = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'application/pdf', 'text/plain', 'text/csv',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   'application/vnd.openxmlformats-officedocument.presentationml.presentation', 'video/mp4', 'application/zip']);
-const MAX_ATTACHMENT = 8 * 1024 * 1024;
+const MAX_ATTACHMENT = 8 * 1024 * 1024, MAX_TASK_ATTACHMENTS = 500;
 const id = z.string().trim().min(1).max(128);
 const completeInput = z.object({
   result: z.string().trim().min(2, 'Describe the result').max(20000),
@@ -305,7 +305,7 @@ export async function registerCompletionRoutes(app: FastifyInstance, db: Databas
     const data = Buffer.from(v.dataBase64, 'base64');
     if (!data.length || data.length > MAX_ATTACHMENT) deny(400, 'ATTACHMENT_TOO_LARGE', 'Files must be 8 MB or smaller');
     const count = (await db.query('SELECT count(*)::int n FROM task_attachments WHERE task_id=$1', [taskId])).rows[0].n;
-    if (count >= 50) deny(400, 'ATTACHMENT_LIMIT', 'A task can have at most 50 attachments');
+    if (count >= MAX_TASK_ATTACHMENTS) deny(400, 'ATTACHMENT_LIMIT', 'A task can have at most 500 attachments');
     const name = v.name.replace(/[\\/\u0000-\u001f]/g, '_');
     const row = (await db.query('INSERT INTO task_attachments(id,org_id,task_id,uploader_id,name,mime,size,data) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id,name,mime,size,uploader_id,created_at', [randomUUID(), task.org_id, taskId, user.id, name, v.mime, data.length, data])).rows[0];
     return reply.code(201).send(row);
