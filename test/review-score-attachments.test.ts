@@ -50,6 +50,19 @@ test('a submission carries its uploaded files and the detail lists them',async()
   assert.equal(img.statusCode,200);assert.equal(img.headers['content-type'],'image/png');
 });
 
+test('a submission takes up to 100 images and 10 other files; a new version keeps the earlier one',async()=>{
+  const task=await newTask(),images=[];
+  for(let i=0;i<101;i++)images.push((await upload(task.id,'m2',`图-${i}.png`)).id);
+  const tooMany=await call('m2','POST',`/tasks/${task.id}/submissions`,{expectedVersion:task.version,description:'Too many images in one go',attachmentIds:images});
+  assert.equal(tooMany.statusCode,400,tooMany.body);assert.equal(tooMany.json().error.code,'ATTACHMENT_LIMIT');
+  const first=await call('m2','POST',`/tasks/${task.id}/submissions`,{expectedVersion:task.version,description:'All the product images',attachmentIds:images.slice(0,100)});
+  assert.equal(first.statusCode,201,first.body);
+  const second=await call('m2','POST',`/tasks/${task.id}/submissions`,{expectedVersion:first.json().taskVersion,description:'One more image',attachmentIds:[images[100]]});
+  assert.equal(second.statusCode,201,second.body);
+  const detail=(await call('m1','GET',`/tasks/${task.id}`)).json();
+  assert.deepEqual(detail.submissions.map((s:any)=>s.attachments.length),[100,1]);
+});
+
 test('a submission cannot claim files uploaded by someone else or to another task',async()=>{
   const task=await newTask(),other=await newTask(),theirs=await upload(task.id,'m1','manager.png'),elsewhere=await upload(other.id,'m2','other.png');
   for(const id of [theirs.id,elsewhere.id]){
