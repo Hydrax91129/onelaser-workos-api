@@ -13,6 +13,8 @@
   各模块是独立文件，挂在 `window.WorkOSXxx` 上，由 live-app 的 `render()` 调用 `configure()` 注入 api、state、lang 等。
 - 后端 `Hydrax91129/onelaser-workos-api`：Fastify + TypeScript，PostgreSQL（本地测试用 PGlite），参数校验用 zod。
   每个模块一个文件，导出 `xxxSchema`（建表 SQL，汇总到 `src/db.ts` 的 `schema`）和 `registerXxxRoutes`（在 `src/app.ts` 注册）。
+- AI（翻译、OKR 起草、成果评分）：设了 `ANTHROPIC_API_KEY` 就用 Claude（`ANTHROPIC_MODEL`，默认 `claude-haiku-5-5`，completions.ts 的 `claudeModel`）；
+  没设时沿用 xAI（`AI_PROVIDER_API_KEY` / `XAI_API_KEY` 和 `AI_*_MODEL_ID`）。Wiki 助手和 Grok Bot 仍走 xAI。
 - 上线：后端仓库 `deploy/frontend-revision.txt` 写死前端的 commit，Docker 构建时拉取这个版本的前端。线上服务在 Render（onelaser-workos-migration）。
 
 ## 2. 模块地图（谁负责什么数据）
