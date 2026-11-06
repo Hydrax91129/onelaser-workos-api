@@ -56,6 +56,14 @@ test('template: every visible column in spec order, hidden key row, dropdowns, n
    assert.ok(csv[1].includes('whOv0'));assert.equal(JSON.stringify(csv).includes('1000'),false,'no landed cost value');
    assert.equal(csv[1].includes('fdaAccession'),who==='m2','FDA number is 产品与供应链');
   }
+  // SKU 管理 and 定价管理 download their own templates: prices only in the pricing one, which keeps the identifying columns.
+  const sku=readCsv((await call('m1','GET','/products/library/template?format=csv&scope=sku')).body)[1];
+  for(const k of ['msrp','map','whOv0','landed'])assert.equal(sku.includes(k),false,`SKU template has ${k}`);
+  for(const k of ['sku','family','nameZh','status','hsCode','supplier'])assert.ok(sku.includes(k),k);
+  const pricing=readCsv((await call('m1','GET','/products/library/template?format=csv&scope=pricing')).body)[1];
+  for(const k of ['sku','family','nameZh','nameEn','msrp','map','whOv0','landed'])assert.ok(pricing.includes(k),k);
+  for(const k of ['status','hsCode','supplier','netWeight'])assert.equal(pricing.includes(k),false,`pricing template has ${k}`);
+  assert.equal((await call('m6','GET','/products/library/template?format=csv&scope=pricing')).statusCode,200,'全员 still see MSRP / MAP');
   // Only main admins upload
   assert.equal((await preview(call,'x.csv',writeCsv([['SKU'],['sku'],['ODL-A1']]),'m5')).statusCode,403);
  }finally{await app.close();}
