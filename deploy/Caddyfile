@@ -36,6 +36,13 @@ http://:{$PORT:10000} {
         X-Frame-Options DENY
         Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self' https://login.dingtalk.com"
     }
+    # Project files open in the WorkOS preview window (PDF, images): only the app itself
+    # may frame them, and the file response runs no script. Everything else stays DENY.
+    @project_file path /api/projects/files/*
+    header @project_file {
+        X-Frame-Options SAMEORIGIN
+        Content-Security-Policy "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; object-src 'self'; frame-ancestors 'self'"
+    }
     # Enable only after the approved origin is switched. Keep the destination
     # literal: neither an incoming Host nor arbitrary environment text is a URL.
     @old_render_origin {
