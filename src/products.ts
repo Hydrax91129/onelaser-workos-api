@@ -87,7 +87,7 @@ export const CHANNELS = ['shopify', 'amazon', 'ebay', 'dealer'] as const;
 export const PRICE_TARGETS = ['msrp', 'actual', ...CHANNELS] as const;
 /** Besides PRICE_TARGETS the product library records MAP ('map'), the promotion floor ('promo_floor') and per-tier
  *  wholesale overrides ('wh0', 'wh1', …) as channel prices of the same SKU. */
-export type PriceTarget = typeof PRICE_TARGETS[number] | 'map' | 'promo_floor' | `wh${number}`;
+export type PriceTarget = typeof PRICE_TARGETS[number] | 'map' | 'promo_floor' | 'promo_major' | 'promo_minor' | 'clearance' | `wh${number}`;
 const isWholesale = (t: string) => t === 'dealer' || /^wh\d+$/.test(t);
 export function priceCheck(rules: typeof DEFAULT_PRICING_RULES, cat: any, pr: any, target: PriceTarget, price: number | null) {
   const landed = pr?.landed_usd == null ? null : Number(pr.landed_usd);
