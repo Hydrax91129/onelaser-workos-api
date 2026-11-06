@@ -96,6 +96,19 @@ for (const [sku, name, type, status, msrp, dealer, qty] of products) {
   await db.query('INSERT INTO wms_items(org_id,sku,name,type) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING', [ORG, sku, name, type]);
   if (qty) await db.query("INSERT INTO wms_stock(org_id,sku,location,qty) VALUES($1,$2,'us',$3) ON CONFLICT DO NOTHING", [ORG, sku, qty]);
 }
+/* Smart supply chain sample: factory stock, 90 days of US goods out (daily sold), received dates of the stock on hand. */
+await db.query("INSERT INTO wms_stock(org_id,sku,location,qty) VALUES($1,'DEMO-AF-200','us',60) ON CONFLICT (org_id,sku,location) DO UPDATE SET qty=60", [ORG]);
+for (const [sku, loc, qty] of [['DEMO-F2-60W', 'dg', 50], ['DEMO-F2-100W', 'dg', 20], ['DEMO-F2-100W', 'jn', 10], ['DEMO-RA-1', 'dg', 120]] as const)
+  await db.query('INSERT INTO wms_stock(org_id,sku,location,qty) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING', [ORG, sku, loc, qty]);
+const perTenDays: Record<string, number> = { 'DEMO-F2-60W': 5, 'DEMO-F2-100W': 3, 'DEMO-RA-1': 12, 'DEMO-LENS-2': 4 }; // units sold per 10 days
+for (const [sku, per10] of Object.entries(perTenDays)) for (let d = 1; d <= 90; d++) {
+  const q = Math.floor(d * per10 / 10) - Math.floor((d - 1) * per10 / 10);
+  if (q) await db.query(`INSERT INTO wms_movements(id,org_id,type,sku,location,qty,reason,reference,status,created_by,created_at) VALUES($1,$2,'out',$3,'us',$4,'销售发货（示例）',$5,'done','m6',now() - make_interval(days => $6))`,
+    [randomBytes(8).toString('hex'), ORG, sku, -q, `SO-DEMO-${sku.slice(5)}-${d}`, d]);
+}
+for (const [sku, ago, qty] of [['DEMO-F2-60W', 35, 14], ['DEMO-F2-100W', 50, 4], ['DEMO-RA-1', 20, 40], ['DEMO-LENS-2', 75, 120], ['DEMO-AF-200', 200, 60]] as const)
+  await db.query(`INSERT INTO supply_lots(id,org_id,sku,received_on,qty,ref,import_id) VALUES($1,$2,$3,(now() - make_interval(days => $4))::date,$5,'DEMO','demo-lots')`, [randomBytes(8).toString('hex'), ORG, sku, ago, qty]);
+await db.query(`INSERT INTO supply_lot_imports(id,org_id,as_of,rows,created_by) VALUES('demo-lots',$1,now()::date,5,'m1')`, [ORG]);
 
 // Sample AI for the test site: "AI 拆任务" splits the text at sentence breaks and hands the pieces round the members,
 // so the draft-and-confirm flow can be tried without an AI account. Other AI features stay off here.
@@ -123,6 +136,18 @@ const app = await buildApp({
     await call('POST', `/projects/${proj.id}/tasks`, { title, ownerId: owner, groupId: g.id, dueAt: day(d) });
   await call('POST', `/projects/${proj.id}/files`, { name: '活动方案（示例）.pdf', category: 'brief', dataBase64: Buffer.from('%PDF-1.4\n% fictional sample\n').toString('base64') });
   await call('POST', `/projects/${proj.id}/updates`, { health: 'on_track', body: '方案在评审，素材开始制作（示例）。' });
+  // Inbound shipments (fictional vessels and containers): at sea, late, in customs and booked.
+  const ships = [
+    { vessel: 'DEMO OCEAN', voyage: '052E', blNo: 'DEMOBL0001', containers: 'DMOU1234567', forwarder: 'Demo Logistics', originPort: '盐田 Yantian', destPort: 'Long Beach', etd: day(-28).slice(0, 10), eta: day(12).slice(0, 10), lines: [{ sku: 'DEMO-F2-60W', qty: 20, cartons: 20, from: 'dg' }, { sku: 'DEMO-LENS-2', qty: 50, cartons: 2, from: 'new' }], state: 'at_sea' },
+    { vessel: 'DEMO STAR', voyage: '118W', blNo: 'DEMOBL0002', containers: 'DMOU7654321', forwarder: 'Demo Logistics', originPort: '青岛 Qingdao', destPort: 'Los Angeles', etd: day(-33).slice(0, 10), eta: day(-3).slice(0, 10), lines: [{ sku: 'DEMO-F2-100W', qty: 10, cartons: 10, from: 'jn' }], state: 'at_sea' },
+    { vessel: 'DEMO WAVE', voyage: '009E', blNo: 'DEMOBL0003', containers: 'DMOU2468135, DMOU1357924', forwarder: 'Demo Freight', originPort: '盐田 Yantian', destPort: 'Long Beach', etd: day(-41).slice(0, 10), eta: day(-2).slice(0, 10), lines: [{ sku: 'DEMO-F2-100W', qty: 6, cartons: 6, from: 'dg' }, { sku: 'DEMO-F2-60W', qty: 10, cartons: 10, from: 'dg' }], state: 'customs' },
+    { vessel: 'DEMO BAY', voyage: '210E', blNo: '', containers: '', forwarder: 'Demo Freight', originPort: '盐田 Yantian', destPort: 'Long Beach', etd: day(9).slice(0, 10), eta: day(49).slice(0, 10), lines: [{ sku: 'DEMO-RA-1', qty: 100, cartons: 5, from: 'dg' }], state: 'booked' },
+  ];
+  for (const { state, ...s } of ships) {
+    const id = (await call('POST', '/supply/shipments', s)).json().id;
+    if (state !== 'booked') await call('POST', `/supply/shipments/${id}/depart`, {});
+    if (state === 'customs') await call('PATCH', `/supply/shipments/${id}`, { status: 'customs' });
+  }
 }
 
 const TYPES: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.otf': 'font/otf', '.woff2': 'font/woff2', '.png': 'image/png', '.json': 'application/json', '.webp': 'image/webp', '.ico': 'image/x-icon' };

@@ -26,6 +26,7 @@
 | 消息红点 | inbox.ts | inbox.js | inbox_items（其他模块只调用 `pushInbox()`，不要自建通知表） |
 | PIM 与定价 | products.ts, product-spec.ts（产品资料库字段模型）, product-library.ts, product-worksheet.ts（定价工作表）, product-import.ts（标准模板、上传预览、确认、撤销）, xlsx.ts | products.js, product-library.js | product_catalog（SKU 主数据、MSRP；产品族 family、大货/退货 goods_type、退货 SKU refb_sku，其余规格字段在 attrs）、product_pricing（成本输入；供应商在 attrs）、pricing_rules（公司计价规则；价格参数在 worksheet 列，仓库里不放真实数值）、product_channel_prices（各渠道价格及审批；MAP=map、官网促销底价=promo_floor、批发档手动价=wh0…）、product_files（产品主图和文件栏位）、product_imports / product_import_previews（批量更新记录与预览，只有主管理员能上传和确认） |
 | WMS 库存 | wms.ts | wms.js | WMS 库位与出入库流水 |
+| 智能供应链 | supply.ts | supply-chain.js | supply_shipments / supply_shipment_lines（船次、柜号、ETA、货物明细）、supply_lots（期初库龄批次）、supply_settings（补货参数：海运 40 天、安全库存 30 天、超 60 天存放过长、可售超 120 天库存过多）。DS 和库龄只从 WMS 流水实时计算；开船、入库写 WMS 调拨，入库须仓库操作人员逐行填实收数量，差异走 WMS 待确认盘点 |
 | 退货维修 RMA | rma.ts | rma.js | rma_cases（翻新机入库走 WMS） |
 | 经销商下单 portal | dealer.ts, dealer-admin.ts | dealers.js | dealer_accounts、dealer_orders（价格读 product_channel_prices 的 dealer 渠道，发货走 WMS 出库） |
 | 客服 | support.ts, shopify.ts | company-support.js | 工单、客服回复 |
@@ -42,7 +43,7 @@
 2. **价格只有一个来源**：MSRP 在 product_catalog；各渠道价格（经销商、Amazon 等）在 product_channel_prices；
    公司计价规则在 pricing_rules（零售 17%、批发 7%、MSRP 30/40/50%、批发按 MSRP 打 25%/30%，单笔超 $5 万再加 2 点、超 $10 万再加 5 点）。
    **待对齐**：经销商渠道价目前是人工填写，应改为按 pricing_rules 的批发规则自动建议、再走价格审批。
-3. **库存只有一份**：数量变化一律写 WMS 出入库流水（经销商发货、RMA 翻新入库都是这样），其他模块只读。
+3. **库存只有一份**：数量变化一律写 WMS 出入库流水（经销商发货、RMA 翻新入库、船次开船和到货入库都是这样），其他模块只读。
 4. **人和权限只有一份**：用 users 和 grants 判断权限，不要另建账号体系（CalDock 和经销商是外部客户，例外）。
    汇报线：每个人有一个第一领导 `users.manager_id`，可选一个第二领导 `users.second_manager_id`（虚线汇报）。**两位领导对这个人的权限完全相同**
    （查看、验收、OKR 领导评分、审批、调整截止时间、HR 下属范围，也包括 TA 下面的团队）：判断"谁是领导/谁能看"时两条线都要算，
