@@ -5,17 +5,19 @@ import type { Database, Queryable } from './db.js';
 import { hash, sameSecret, readCookie } from './auth.js';
 import { deny } from './errors.js';
 import { createCaldockGateway, type CaldockGateway, type CaldockProvider } from './caldock-oidc.js';
-import { applyCaldockOffer, recordCaldockRenewalCommission, caldockAudit, caldockOfferStatus, caldockStockStatus, CALDOCK_OFFER, CALDOCK_PRICES, createCaldockOrder, recordVerifiedCaldockPayment } from './caldock-domain.js';
+import { recordCaldockRenewalCommission, caldockAudit, caldockOrderAmounts, caldockStockStatus, CALDOCK_SALE_PRICES, createCaldockOrder, recordVerifiedCaldockPayment } from './caldock-domain.js';
 import { ApiError } from './errors.js';
 import { mailerFromEnv, type Mailer } from './members.js';
+import { orderWebhookFromEnv, type OrderWebhook } from './caldock-notify.js';
 import { isStaleTestSession, stripeFromEnv, verifyStripeEvent, StripeRequestError, STRIPE_RECURRING, type CaldockStripe } from './caldock-stripe.js';
 
 type Customer = {id:string;display_name:string;email:string|null;active:boolean;created_at:string};
 type Session = {user:Customer;csrf:string;token:string};
-export type CaldockOptions = {publicUrl?:string;siteUrl?:string;firstPeriodOffer?:boolean;liveStock?:boolean;mailer?:Mailer|null;orderNotifyEmails?:string[];marketingUrl?:string;secureCookies?:boolean;adminUserIds?:string[];providers?:Partial<Record<CaldockProvider,CaldockGateway>>;stripe?:CaldockStripe};
+export type CaldockOptions = {publicUrl?:string;siteUrl?:string;liveStock?:boolean;mailer?:Mailer|null;orderNotifyEmails?:string[];orderWebhook?:OrderWebhook|null;marketingUrl?:string;secureCookies?:boolean;adminUserIds?:string[];providers?:Partial<Record<CaldockProvider,CaldockGateway>>;stripe?:CaldockStripe};
 const id=z.string().uuid(),providerName=z.enum(['google','apple']);
 const status=z.enum(['pending_payment','paid','provisioning','active','cancelled','refunded']);
 const interval=z.enum(['week','month','quarter','half','year']);
+const saleInterval=z.enum(['month','quarter','half','year']);
 const nextView=z.enum(['account','orders','affiliate','checkout','admin','studio']);
 const token=()=>randomBytes(32).toString('base64url');
 export const caldockCookieName=(secure:boolean,kind='session')=>(secure?'__Host-':'')+'caldock_'+kind;
@@ -36,7 +38,7 @@ export function caldockOptionsFromEnv(env:NodeJS.ProcessEnv):CaldockOptions {
   // A Stripe misconfiguration disables CalDock payments only; it must never stop the shared Work OS service.
   try{stripe=stripeFromEnv(env);}catch(error){console.error('CalDock payments disabled: '+(error as Error).message);}
   // Its own mail settings: the shared ones would also switch on Work OS email sign-in and invites.
-  return {stripe,firstPeriodOffer:true,liveStock:true,mailer:mailerFromEnv({RESEND_API_KEY:env.CALDOCK_RESEND_API_KEY,EMAIL_FROM:env.CALDOCK_EMAIL_FROM}),orderNotifyEmails:(env.CALDOCK_ORDER_NOTIFY_EMAILS||'').split(',').map(x=>x.trim()).filter(Boolean),publicUrl:env.APP_PUBLIC_URL||env.RENDER_EXTERNAL_URL||'http://localhost:4173',siteUrl:'https://wodemac.com',secureCookies:env.NODE_ENV==='production',marketingUrl:env.CALDOCK_MARKETING_URL||'https://yonge6.github.io/mac-mini-rental/',adminUserIds:(env.CALDOCK_ADMIN_USER_IDS||'').split(',').map(x=>x.trim()).filter(Boolean),providers};
+  return {stripe,liveStock:true,mailer:mailerFromEnv({RESEND_API_KEY:env.CALDOCK_RESEND_API_KEY,EMAIL_FROM:env.CALDOCK_EMAIL_FROM}),orderNotifyEmails:(env.CALDOCK_ORDER_NOTIFY_EMAILS||'').split(',').map(x=>x.trim()).filter(Boolean),orderWebhook:orderWebhookFromEnv(env),publicUrl:env.APP_PUBLIC_URL||env.RENDER_EXTERNAL_URL||'http://localhost:4173',siteUrl:'https://wodemac.com',secureCookies:env.NODE_ENV==='production',marketingUrl:env.CALDOCK_MARKETING_URL||'https://yonge6.github.io/mac-mini-rental/',adminUserIds:(env.CALDOCK_ADMIN_USER_IDS||'').split(',').map(x=>x.trim()).filter(Boolean),providers};
 }
 export async function registerCaldockRoutes(app:FastifyInstance,db:Database,options:CaldockOptions={}) {
   const publicUrl=new URL(options.publicUrl||'http://localhost:4173');
@@ -47,7 +49,7 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
   const market=new URL(options.siteUrl||options.marketingUrl||'https://yonge6.github.io/mac-mini-rental/');
   if(!['http:','https:'].includes(market.protocol)||market.username||market.password)throw new Error('Invalid CalDock marketing URL');
   const stripe=options.stripe;
-  const requireStock=async()=>{if(options.liveStock&&(await caldockStockStatus(db)).left===0)deny(409,'CALDOCK_SOLD_OUT','All Macs are rented right now');};
+  const requireStock=async(quantity=1)=>{if(!options.liveStock)return;const {left}=await caldockStockStatus(db);if(left===0)deny(409,'CALDOCK_SOLD_OUT','All Macs are rented right now');if(left<quantity)deny(409,'CALDOCK_NOT_ENOUGH_STOCK','Fewer Macs are available than this order needs');};
   const viaStripe=async<T>(call:()=>Promise<T>):Promise<T>=>{try{return await call();}catch(error){if(error instanceof StripeRequestError)deny(502,'CALDOCK_PAYMENT_PROVIDER_ERROR','The payment provider could not complete the request; try again');throw error;}};
   const stopStripeRenewal=async(subscriptionId:string|null)=>{if(stripe&&subscriptionId)await viaStripe(()=>stripe.request('POST','/v1/subscriptions/'+encodeURIComponent(subscriptionId),{cancel_at_period_end:'true'},'caldock-stop-'+subscriptionId));};
   const sessions=new WeakMap<FastifyRequest,Session>();
@@ -93,7 +95,7 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
         if(typeof supplied!=='string'||!sameSecret(supplied,csrf_token))deny(403,'CALDOCK_CSRF_INVALID','Request origin or security token is invalid');
       }
     });
-    routes.get('/capabilities',async req=>({service:'caldock',offer:options.firstPeriodOffer?await caldockOfferStatus(db):null,stock:options.liveStock?await caldockStockStatus(db):null,accountApp:originFor(req)+appPath(req),providers:{google:!!providers.google,apple:!!providers.apple},payments:!!stripe,paymentMode:stripe?.mode??null,currency:'USD',prices:CALDOCK_PRICES,auth:{session:'httpOnlyCookie',csrf:true},referrals:{attributionDays:30,automaticPayouts:false}}));
+    routes.get('/capabilities',async req=>({service:'caldock',stock:options.liveStock?await caldockStockStatus(db):null,accountApp:originFor(req)+appPath(req),providers:{google:!!providers.google,apple:!!providers.apple},payments:!!stripe,paymentMode:stripe?.mode??null,currency:'USD',prices:CALDOCK_SALE_PRICES,auth:{session:'httpOnlyCookie',csrf:true},referrals:{attributionDays:30,automaticPayouts:false}}));
     routes.post('/referral-visits',async(req,reply)=>{checkOrigin(req);limit(req);const input=z.object({code:z.string().regex(/^[A-Z0-9]{12}$/)}).strict().parse(req.body);await referral(req,reply,input.code);return {recorded:true};});
     for(const provider of ['google','apple'] as const){
       routes.get(`/auth/${provider}/start`,async(req,reply)=>{
@@ -139,7 +141,7 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
     routes.patch('/profile',async req=>{const current=actor(req),input=z.object({displayName:z.string().trim().min(1).max(100)}).strict().parse(req.body);return (await db.query('UPDATE caldock_users SET display_name=$2 WHERE id=$1 RETURNING id,display_name,email',[current.user.id,input.displayName])).rows[0];});
     routes.get('/orders',async req=>({items:(await db.query('SELECT * FROM caldock_orders WHERE customer_id=$1 ORDER BY created_at DESC LIMIT 100',[actor(req).user.id])).rows}));
     routes.get<{Params:{id:string}}>('/orders/:id',async req=>{const row=(await db.query('SELECT * FROM caldock_orders WHERE id=$1 AND customer_id=$2',[id.parse(req.params.id),actor(req).user.id])).rows[0];if(!row)deny(404,'NOT_FOUND','Order not found');return row;});
-    routes.post('/orders',async(req,reply)=>{const input=z.object({interval,requestKey:id}).strict().parse(req.body);await requireStock();return reply.code(201).send(await createCaldockOrder(db,actor(req).user.id,input.interval,input.requestKey));});
+    routes.post('/orders',async(req,reply)=>{const input=z.object({interval:saleInterval,quantity:z.number().int().min(1).max(100).default(1),requestKey:id}).strict().parse(req.body);await requireStock(input.quantity);return reply.code(201).send(await createCaldockOrder(db,actor(req).user.id,input.interval,input.quantity,input.requestKey));});
     routes.post<{Params:{id:string}}>('/orders/:id/checkout',async req=>{
       const current=actor(req),input=z.object({lang:z.enum(['zh','en']).default('zh')}).strict().parse(req.body||{});
       if(!stripe)deny(503,'CALDOCK_PAYMENTS_UNAVAILABLE','Online payment is not available yet');
@@ -154,32 +156,35 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
           if(existing.status==='open'&&typeof existing.url==='string')return {url:existing.url};
           if(existing.status==='complete')deny(409,'CALDOCK_PAYMENT_IN_PROGRESS','Payment for this order is being confirmed; reload in a moment');
         }
-        if(options.firstPeriodOffer)order=await applyCaldockOffer(tx,order);
+        await requireStock(order.quantity);
+        // No payment page is open any more, so an unpaid order takes today's price with no leftover discount.
+        const amounts=caldockOrderAmounts(order.interval,order.quantity);
+        order=(await tx.query('UPDATE caldock_orders SET amount_cents=$2,list_amount_cents=$3,offer_day=NULL,offer_hold_until=NULL WHERE id=$1 RETURNING *',[order.id,amounts.total,amounts.subtotal])).rows[0];
         const back=(view:string,result:string)=>{const u=new URL(appPath(req),originFor(req));u.searchParams.set('view',view);u.searchParams.set('lang',input.lang);u.searchParams.set('interval',order.interval);u.searchParams.set('checkout',result);return u.toString();};
         const names={week:['Weekly','周付'],month:['Monthly','月付'],quarter:['Quarterly','季付'],half:['Half-yearly','半年付'],year:['Yearly','年付']}[order.interval as 'week'|'month'|'quarter'|'half'|'year'];
         const recurring=STRIPE_RECURRING[order.interval as 'week'|'month'|'quarter'|'half'|'year'];
         const params:Record<string,string>={
           mode:'subscription',client_reference_id:order.id,locale:input.lang==='en'?'en':'zh',
           success_url:back('orders','success'),cancel_url:back('checkout','cancelled'),
-          'line_items[0][quantity]':'1','line_items[0][price_data][currency]':'usd',
+          'line_items[0][quantity]':String(order.quantity),'line_items[0][price_data][currency]':'usd',
           // Server-owned price snapshot from the order, never a client amount.
-          'line_items[0][price_data][unit_amount]':String(order.list_amount_cents??order.amount_cents),
+          'line_items[0][price_data][unit_amount]':String(amounts.unit),
           'line_items[0][price_data][recurring][interval]':recurring.interval,
           'line_items[0][price_data][recurring][interval_count]':recurring.interval_count,
           'line_items[0][price_data][product_data][name]':`wodeMac Dedicated Mac mini · ${names[0]} / 独享 Mac mini · ${names[1]}`,
           'metadata[caldock_order_id]':order.id,'subscription_data[metadata][caldock_order_id]':order.id,
         };
         if(current.user.email)params.customer_email=current.user.email;
-        if(order.offer_day){
-          // duration=once: Stripe discounts the first invoice and renews at the list price.
-          await stripe.request('POST','/v1/coupons',{id:CALDOCK_OFFER.couponId,percent_off:String(CALDOCK_OFFER.percentOff),duration:'once',name:'First period '+CALDOCK_OFFER.percentOff+'% off'}).catch(error=>{if(!(error instanceof StripeRequestError)||error.code!=='resource_already_exists')deny(502,'CALDOCK_PAYMENT_PROVIDER_ERROR','The payment provider could not complete the request; try again');});
-          params['discounts[0][coupon]']=CALDOCK_OFFER.couponId;
-          params.expires_at=String(Math.floor(Date.now()/1000)+CALDOCK_OFFER.sessionMinutes*60);
+        if(amounts.bulkOff){
+          // A fixed amount, so the total Stripe charges equals the order total to the cent. duration=once: renewals are at the full price.
+          const couponId='caldock-bulk-'+amounts.bulkOff;
+          await stripe.request('POST','/v1/coupons',{id:couponId,amount_off:String(amounts.bulkOff),currency:'usd',duration:'once',name:'Yearly order of 5 or more: 2.5% off the first year'}).catch(error=>{if(!(error instanceof StripeRequestError)||error.code!=='resource_already_exists')deny(502,'CALDOCK_PAYMENT_PROVIDER_ERROR','The payment provider could not complete the request; try again');});
+          params['discounts[0][coupon]']=couponId;
         }
         const session=await viaStripe(()=>stripe.request('POST','/v1/checkout/sessions',params,'caldock-checkout-'+order.id+'-'+(order.stripe_checkout_session_id||'first')));
         if(typeof session.id!=='string'||typeof session.url!=='string')deny(502,'CALDOCK_PAYMENT_PROVIDER_ERROR','The payment provider could not complete the request; try again');
         await tx.query('UPDATE caldock_orders SET stripe_checkout_session_id=$2 WHERE id=$1',[order.id,session.id]);
-        await caldockAudit(tx,current.user.id,'payment.checkout_started',order.id,{session:session.id,mode:stripe.mode,amountCents:order.amount_cents,offerDay:order.offer_day});
+        await caldockAudit(tx,current.user.id,'payment.checkout_started',order.id,{session:session.id,mode:stripe.mode,amountCents:order.amount_cents,quantity:order.quantity});
         return {url:session.url};
       });
     });
@@ -195,26 +200,25 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
         if(input.action==='stop_renewal')await stopStripeRenewal(row.stripe_subscription_id);
         const updated=(await tx.query("UPDATE caldock_orders SET status=CASE WHEN $2='cancel_pending' THEN 'cancelled' ELSE status END,renewal_enabled=false,version=version+1 WHERE id=$1 RETURNING *",[row.id,input.action])).rows[0];await caldockAudit(tx,current.user.id,'order.'+input.action,row.id);return updated;});
     });
-    routes.post('/affiliate',async req=>{const current=actor(req);await db.query('INSERT INTO caldock_affiliates(user_id,code,parent_id) VALUES($1,$2,(SELECT r.affiliate_id FROM caldock_referrals r JOIN caldock_affiliates a ON a.user_id=r.affiliate_id WHERE r.customer_id=$1 AND a.active=true AND r.affiliate_id<>$1)) ON CONFLICT(user_id) DO NOTHING',[current.user.id,randomBytes(6).toString('hex').toUpperCase()]);return {joined:true};});
+    routes.post('/affiliate',async req=>{const current=actor(req);await db.query('INSERT INTO caldock_affiliates(user_id,code) VALUES($1,$2) ON CONFLICT(user_id) DO NOTHING',[current.user.id,randomBytes(6).toString('hex').toUpperCase()]);return {joined:true};});
     routes.get('/affiliate',async req=>{
       const current=actor(req),affiliate=(await db.query('SELECT * FROM caldock_affiliates WHERE user_id=$1',[current.user.id])).rows[0];
-      const settings=(await db.query('SELECT commission_bps,commission_mode,second_tier_bps FROM caldock_settings WHERE id=1')).rows[0];
-      if(!affiliate)return {affiliate:null,settings,commissions:[],team:[],stats:{registrations:0,orders:0,pendingCents:0,settledCents:0,secondTierCents:0}};
+      const settings=(await db.query('SELECT month_commission_bps,quarter_commission_bps,half_commission_bps,year_commission_bps,commission_mode FROM caldock_settings WHERE id=1')).rows[0];
+      if(!affiliate)return {affiliate:null,settings,commissions:[],stats:{registrations:0,orders:0,pendingCents:0,settledCents:0}};
       const link=new URL(market);link.searchParams.set('ref',affiliate.code);
       const counts=(await db.query('SELECT (SELECT count(*)::int FROM caldock_referrals WHERE affiliate_id=$1) AS registrations,(SELECT count(*)::int FROM caldock_orders WHERE affiliate_id=$1) AS orders',[current.user.id])).rows[0];
       const commissions=(await db.query('SELECT c.*,o.interval FROM caldock_commissions c JOIN caldock_orders o ON o.id=c.order_id WHERE c.affiliate_id=$1 ORDER BY c.created_at DESC LIMIT 100',[current.user.id])).rows;
-      const sums=(await db.query("SELECT COALESCE(sum(amount_cents) FILTER(WHERE status IN ('pending','approved')),0)::bigint AS pending,COALESCE(sum(amount_cents) FILTER(WHERE status='settled'),0)::bigint AS settled,COALESCE(sum(amount_cents) FILTER(WHERE tier=2 AND status<>'void'),0)::bigint AS second_tier FROM caldock_commissions WHERE affiliate_id=$1",[current.user.id])).rows[0];
+      const sums=(await db.query("SELECT COALESCE(sum(amount_cents) FILTER(WHERE status IN ('pending','approved')),0)::bigint AS pending,COALESCE(sum(amount_cents) FILTER(WHERE status='settled'),0)::bigint AS settled FROM caldock_commissions WHERE affiliate_id=$1",[current.user.id])).rows[0];
       // Partners see who is below them only as a masked name, never an email.
-      const team=(await db.query("SELECT a.user_id,u.display_name,a.created_at,(SELECT count(*)::int FROM caldock_orders o WHERE o.affiliate_id=a.user_id AND o.paid_at IS NOT NULL) AS orders,(SELECT COALESCE(sum(c.amount_cents),0)::bigint FROM caldock_commissions c JOIN caldock_orders o ON o.id=c.order_id WHERE c.affiliate_id=$1 AND c.tier=2 AND c.status<>'void' AND o.affiliate_id=a.user_id) AS earned FROM caldock_affiliates a JOIN caldock_users u ON u.id=a.user_id WHERE a.parent_id=$1 ORDER BY a.created_at DESC LIMIT 100",[current.user.id])).rows.map((row:any)=>({id:row.user_id,name:[...String(row.display_name)][0]+'***',joinedAt:row.created_at,orders:row.orders,earnedCents:Number(row.earned)}));
-      return {affiliate:{...affiliate,url:link.toString()},settings,commissions,team,stats:{...counts,pendingCents:Number(sums.pending),settledCents:Number(sums.settled),secondTierCents:Number(sums.second_tier)}};
+      return {affiliate:{...affiliate,url:link.toString()},settings,commissions,stats:{...counts,pendingCents:Number(sums.pending),settledCents:Number(sums.settled)}};
     });
     routes.get('/admin/summary',async req=>{admin(req);return (await db.query("SELECT count(*)::int AS total_orders,count(*) FILTER(WHERE status IN ('paid','provisioning'))::int AS awaiting_delivery,count(*) FILTER(WHERE status='active')::int AS active_macs,COALESCE(sum(amount_cents) FILTER(WHERE status IN ('paid','provisioning','active')),0)::bigint AS paid_cents,(SELECT count(*)::int FROM caldock_users) AS customers,(SELECT COALESCE(sum(amount_cents),0)::bigint FROM caldock_commissions WHERE status IN ('pending','approved')) AS pending_commission_cents FROM caldock_orders")).rows[0];});
     routes.get('/admin/orders',async req=>{admin(req);const q=z.object({status:status.optional(),search:z.string().max(100).default(''),page:z.coerce.number().int().min(0).max(100000).default(0)}).strict().parse(req.query);const where="WHERE ($1::text IS NULL OR o.status=$1) AND ($2='' OR o.id ILIKE $3 OR u.email ILIKE $3 OR u.display_name ILIKE $3)";const params=[q.status||null,q.search,'%'+q.search+'%'];return {items:(await db.query(`SELECT o.*,u.email,u.display_name,a.code AS referral_code FROM caldock_orders o JOIN caldock_users u ON u.id=o.customer_id LEFT JOIN caldock_affiliates a ON a.user_id=o.affiliate_id ${where} ORDER BY o.created_at DESC,o.id LIMIT 50 OFFSET $4`,[...params,q.page*50])).rows,total:Number((await db.query(`SELECT count(*) FROM caldock_orders o JOIN caldock_users u ON u.id=o.customer_id ${where}`,params)).rows[0].count)};});
     routes.patch<{Params:{id:string}}>('/admin/orders/:id',async req=>{
       const current=admin(req),input=z.object({status:z.enum(['provisioning','active']),expectedVersion:z.number().int().positive(),deliveryNote:z.string().trim().max(1000).default('')}).strict().parse(req.body);
-      return db.transaction(async tx=>{const order=(await tx.query('SELECT * FROM caldock_orders WHERE id=$1 FOR UPDATE',[id.parse(req.params.id)])).rows[0];if(!order)deny(404,'NOT_FOUND','Order not found');if(order.version!==input.expectedVersion)deny(409,'VERSION_CONFLICT','Order changed; reload before continuing');if(!(order.status==='paid'&&input.status==='provisioning'||order.status==='provisioning'&&input.status==='active'))deny(409,'INVALID_ORDER_STATE','Only verified paid orders can be provisioned and delivered');const row=(await tx.query("UPDATE caldock_orders SET status=$2,version=version+1,delivery_note=$3,delivered_at=CASE WHEN $2='active' THEN now() ELSE delivered_at END,billing_ends_at=CASE WHEN $2='active' THEN now()+CASE WHEN interval='year' THEN interval '1 year' WHEN interval='quarter' THEN interval '3 months' WHEN interval='half' THEN interval '6 months' WHEN interval='week' THEN interval '7 days' ELSE interval '1 month' END ELSE billing_ends_at END WHERE id=$1 RETURNING *",[order.id,input.status,input.deliveryNote])).rows[0];
-        if(input.status==='active'&&stripe&&row.stripe_subscription_id){
-          // Billing starts on delivery: push the next automatic charge to the end of the delivered period.
+      return db.transaction(async tx=>{const order=(await tx.query('SELECT * FROM caldock_orders WHERE id=$1 FOR UPDATE',[id.parse(req.params.id)])).rows[0];if(!order)deny(404,'NOT_FOUND','Order not found');if(order.version!==input.expectedVersion)deny(409,'VERSION_CONFLICT','Order changed; reload before continuing');if(!(order.status==='paid'&&input.status==='provisioning'||order.status==='provisioning'&&input.status==='active'))deny(409,'INVALID_ORDER_STATE','Only verified paid orders can be provisioned and delivered');const row=(await tx.query("UPDATE caldock_orders SET status=$2,version=version+1,delivery_note=$3,delivered_at=CASE WHEN $2='active' THEN now() ELSE delivered_at END,billing_ends_at=CASE WHEN $2='active' THEN (CASE WHEN billed_from_payment THEN paid_at ELSE now() END)+CASE WHEN interval='year' THEN interval '1 year' WHEN interval='quarter' THEN interval '3 months' WHEN interval='half' THEN interval '6 months' WHEN interval='week' THEN interval '7 days' ELSE interval '1 month' END ELSE billing_ends_at END WHERE id=$1 RETURNING *",[order.id,input.status,input.deliveryNote])).rows[0];
+        if(input.status==='active'&&stripe&&row.stripe_subscription_id&&!row.billed_from_payment){
+          // Older orders bill from delivery: push the next automatic charge to the end of the delivered period.
           const next=Math.floor(new Date(row.billing_ends_at).getTime()/1000);
           await viaStripe(()=>stripe.request('POST','/v1/subscriptions/'+encodeURIComponent(row.stripe_subscription_id),{trial_end:String(next),proration_behavior:'none'},'caldock-deliver-'+order.id));
         }
@@ -229,10 +233,22 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
       if(failed)deny(502,'CALDOCK_ORDER_MAIL_FAILED','The test email could not be delivered');
       return {sent:recipients.length};
     });
+    routes.post('/admin/order-webhook-test',async req=>{
+      const current=admin(req),webhook=options.orderWebhook;
+      if(!webhook)deny(503,'CALDOCK_ORDER_WEBHOOK_UNCONFIGURED','The order webhook is not configured');
+      let failed=false;
+      try{await webhook({event:'caldock.order.test',test:true,orderRef:'TEST',plan:'测试通知',quantity:1,amount:'$0.00',stockLeft:null,adminUrl:`${market.origin}/?view=admin`});}catch{failed=true;}
+      await caldockAudit(db,current.user.id,'notify.order_webhook_test','1',{failed});
+      if(failed)deny(502,'CALDOCK_ORDER_WEBHOOK_FAILED','The order webhook could not be reached');
+      return {sent:true};
+    });
+    const stockView=async(tx:Queryable=db)=>{const row=(await tx.query('SELECT stock_rented_before,version FROM caldock_settings WHERE id=1')).rows[0];return {...await caldockStockStatus(tx),rentedBefore:row.stock_rented_before,version:row.version};};
+    routes.get('/admin/stock',async req=>{admin(req);return stockView();});
+    routes.patch('/admin/stock',async req=>{const current=admin(req),input=z.object({total:z.number().int().min(0).max(100000),rentedBefore:z.number().int().min(0).max(100000),expectedVersion:z.number().int().positive()}).strict().parse(req.body);if(input.rentedBefore>input.total)deny(400,'CALDOCK_STOCK_INVALID','Rented Macs cannot exceed the total');return db.transaction(async tx=>{const row=(await tx.query('UPDATE caldock_settings SET stock_total=$1,stock_rented_before=$2,version=version+1,updated_at=now() WHERE id=1 AND version=$3 RETURNING id',[input.total,input.rentedBefore,input.expectedVersion])).rows[0];if(!row)deny(409,'VERSION_CONFLICT','Settings changed; reload before continuing');await caldockAudit(tx,current.user.id,'stock.updated','1',{total:input.total,rentedBefore:input.rentedBefore});return stockView(tx);});});
     routes.get('/admin/settings',async req=>{admin(req);return (await db.query('SELECT * FROM caldock_settings WHERE id=1')).rows[0];});
     routes.get('/admin/customers',async req=>{admin(req);return {items:(await db.query('SELECT u.id,u.display_name,u.email,u.active,u.created_at,(SELECT count(*)::int FROM caldock_orders o WHERE o.customer_id=u.id) AS orders FROM caldock_users u ORDER BY u.created_at DESC LIMIT 100')).rows};});
-    routes.patch('/admin/settings',async req=>{const current=admin(req),input=z.object({commissionBps:z.number().int().min(0).max(10000),secondTierBps:z.number().int().min(0).max(10000).optional(),commissionMode:z.enum(['first_order','each_order']),expectedVersion:z.number().int().positive()}).strict().parse(req.body);return db.transaction(async tx=>{const row=(await tx.query('UPDATE caldock_settings SET commission_bps=$1,commission_mode=$2,second_tier_bps=COALESCE($4,second_tier_bps),version=version+1,updated_at=now() WHERE id=1 AND version=$3 RETURNING *',[input.commissionBps,input.commissionMode,input.expectedVersion,input.secondTierBps??null])).rows[0];if(!row)deny(409,'VERSION_CONFLICT','Settings changed; reload before continuing');await caldockAudit(tx,current.user.id,'affiliate.settings','1',{commissionBps:input.commissionBps,secondTierBps:row.second_tier_bps,commissionMode:input.commissionMode});return row;});});
-    routes.get('/admin/affiliates',async req=>{admin(req);return {items:(await db.query('SELECT a.*,u.display_name,u.email,p.display_name AS parent_name,(SELECT count(*)::int FROM caldock_affiliates c WHERE c.parent_id=a.user_id) AS team,(SELECT count(*)::int FROM caldock_referrals r WHERE r.affiliate_id=a.user_id) AS registrations,(SELECT count(*)::int FROM caldock_orders o WHERE o.affiliate_id=a.user_id) AS orders FROM caldock_affiliates a JOIN caldock_users u ON u.id=a.user_id LEFT JOIN caldock_users p ON p.id=a.parent_id ORDER BY a.created_at DESC LIMIT 100')).rows};});
+    routes.patch('/admin/settings',async req=>{const current=admin(req),input=z.object({monthCommissionBps:z.number().int().min(0).max(10000),quarterCommissionBps:z.number().int().min(0).max(10000),halfCommissionBps:z.number().int().min(0).max(10000),yearCommissionBps:z.number().int().min(0).max(10000),commissionMode:z.enum(['first_order','each_order']),expectedVersion:z.number().int().positive()}).strict().parse(req.body);return db.transaction(async tx=>{const row=(await tx.query('UPDATE caldock_settings SET month_commission_bps=$1,half_commission_bps=$2,year_commission_bps=$3,commission_mode=$4,quarter_commission_bps=$6,version=version+1,updated_at=now() WHERE id=1 AND version=$5 RETURNING *',[input.monthCommissionBps,input.halfCommissionBps,input.yearCommissionBps,input.commissionMode,input.expectedVersion,input.quarterCommissionBps])).rows[0];if(!row)deny(409,'VERSION_CONFLICT','Settings changed; reload before continuing');await caldockAudit(tx,current.user.id,'affiliate.settings','1',{monthCommissionBps:input.monthCommissionBps,quarterCommissionBps:input.quarterCommissionBps,halfCommissionBps:input.halfCommissionBps,yearCommissionBps:input.yearCommissionBps,commissionMode:input.commissionMode});return row;});});
+    routes.get('/admin/affiliates',async req=>{admin(req);return {items:(await db.query('SELECT a.*,u.display_name,u.email,(SELECT count(*)::int FROM caldock_referrals r WHERE r.affiliate_id=a.user_id) AS registrations,(SELECT count(*)::int FROM caldock_orders o WHERE o.affiliate_id=a.user_id) AS orders FROM caldock_affiliates a JOIN caldock_users u ON u.id=a.user_id ORDER BY a.created_at DESC LIMIT 100')).rows};});
     routes.get('/admin/commissions',async req=>{admin(req);return {items:(await db.query('SELECT c.*,u.display_name,u.email FROM caldock_commissions c JOIN caldock_users u ON u.id=c.affiliate_id ORDER BY c.created_at DESC LIMIT 200')).rows};});
     routes.patch<{Params:{id:string}}>('/admin/commissions/:id',async req=>{
       const current=admin(req),input=z.object({status:z.enum(['approved','settled']),expectedStatus:z.enum(['pending','approved']),reference:z.string().trim().max(200).optional()}).strict().parse(req.body);
@@ -254,8 +270,21 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
       return {received:true};
     });
   });
-  // Runs after the payment is committed: a mail failure is audited and never fails the webhook.
+  // Runs after the payment is committed: a notification failure is audited and never fails the Stripe webhook.
   async function notifyNewOrder(orderId:string) {
+    await Promise.all([mailNewOrder(orderId),pingOrderWebhook(orderId)]);
+  }
+  async function pingOrderWebhook(orderId:string) {
+    const webhook=options.orderWebhook;
+    if(!webhook)return;
+    try{
+      const order=(await db.query('SELECT id,interval,quantity,amount_cents FROM caldock_orders WHERE id=$1',[orderId])).rows[0];
+      const stock=await caldockStockStatus(db);
+      const plan=({week:'周付',month:'月付',quarter:'季付',half:'半年付',year:'年付'} as Record<string,string>)[order.interval]||order.interval;
+      await webhook({event:'caldock.order.paid',test:stripe?.mode==='test',orderRef:order.id.slice(0,8).toUpperCase(),plan,quantity:order.quantity,amount:'$'+(order.amount_cents/100).toLocaleString('en-US',{minimumFractionDigits:2}),stockLeft:stock.left,adminUrl:`${market.origin}/?view=admin`});
+    }catch{await caldockAudit(db,null,'notify.order_webhook_failed',orderId,{}).catch(()=>{});}
+  }
+  async function mailNewOrder(orderId:string) {
     const mailer=options.mailer,recipients=options.orderNotifyEmails||[];
     if(!recipients.length)return;
     if(!mailer){await caldockAudit(db,null,'notify.order_mail_unavailable',orderId,{});return;}
@@ -263,9 +292,9 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
       const order=(await db.query('SELECT o.*,u.display_name,u.email FROM caldock_orders o JOIN caldock_users u ON u.id=o.customer_id WHERE o.id=$1',[orderId])).rows[0];
       const stock=await caldockStockStatus(db),amount='$'+(order.amount_cents/100).toLocaleString('en-US',{minimumFractionDigits:2});
       const plan=({week:'周付',month:'月付',quarter:'季付',half:'半年付',year:'年付'} as Record<string,string>)[order.interval]||order.interval,short=order.id.slice(0,8).toUpperCase();
-      const lines=[`订单号：#${short}`,`方案：${plan}`,`实付：${amount}${order.offer_day?'（限时 8 折）':''}`,`客户：${order.display_name}${order.email?' <'+order.email+'>':''}`,`库存：共 ${stock.total} 台，已租出 ${stock.rented} 台，剩余 ${stock.left} 台`,`交付后台：${market.origin}/?view=admin`];
+      const lines=[`订单号：#${short}`,`方案：${plan}`,`数量：${order.quantity} 台`,`实付：${amount}`,`客户：${order.display_name}${order.email?' <'+order.email+'>':''}`,`库存：共 ${stock.total} 台，已租出 ${stock.rented} 台，剩余 ${stock.left} 台`,`交付后台：${market.origin}/?view=admin`];
       const esc=(s:string)=>s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
-      const subject=`${stripe?.mode==='test'?'[测试] ':''}wodeMac 新订单 #${short} · ${plan} ${amount}`;
+      const subject=`${stripe?.mode==='test'?'[测试] ':''}wodeMac 新订单 #${short} · ${plan} ${order.quantity} 台 ${amount}`;
       const sent=await Promise.allSettled(recipients.map(to=>mailer({to,subject,text:lines.join('\n'),html:lines.map(l=>`<p>${esc(l)}</p>`).join('')})));
       const failed=sent.filter(r=>r.status==='rejected').length;
       if(failed)await caldockAudit(db,null,'notify.order_mail_failed',orderId,{failed});

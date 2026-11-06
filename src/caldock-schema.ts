@@ -109,4 +109,18 @@ ALTER TABLE caldock_settings ADD COLUMN IF NOT EXISTS second_tier_bps integer NO
 ALTER TABLE caldock_orders ADD COLUMN IF NOT EXISTS second_affiliate_id text REFERENCES caldock_affiliates(user_id);
 ALTER TABLE caldock_orders ADD COLUMN IF NOT EXISTS second_tier_bps integer NOT NULL DEFAULT 0 CHECK(second_tier_bps BETWEEN 0 AND 10000);
 ALTER TABLE caldock_commissions ADD COLUMN IF NOT EXISTS tier integer NOT NULL DEFAULT 1 CHECK(tier IN (1,2));
+-- One tier and first order only for new orders. Existing orders stay false and keep the terms they were created under.
+ALTER TABLE caldock_orders ADD COLUMN IF NOT EXISTS first_order_only boolean NOT NULL DEFAULT false;
+-- New orders are billed from payment. Existing orders stay false and keep billing from delivery.
+ALTER TABLE caldock_orders ADD COLUMN IF NOT EXISTS billed_from_payment boolean NOT NULL DEFAULT false;
+-- Stock shown on the site. Admins change these two numbers; orders paid online are counted on top of the second.
+ALTER TABLE caldock_settings ADD COLUMN IF NOT EXISTS stock_total integer NOT NULL DEFAULT 100 CHECK(stock_total BETWEEN 0 AND 100000);
+ALTER TABLE caldock_settings ADD COLUMN IF NOT EXISTS stock_rented_before integer NOT NULL DEFAULT 68 CHECK(stock_rented_before BETWEEN 0 AND 100000);
+-- Number of Macs on one order.
+ALTER TABLE caldock_orders ADD COLUMN IF NOT EXISTS quantity integer NOT NULL DEFAULT 1 CHECK(quantity BETWEEN 1 AND 100);
+-- The commission rate depends on the plan. The older single commission_bps setting is no longer read.
+ALTER TABLE caldock_settings ADD COLUMN IF NOT EXISTS month_commission_bps integer NOT NULL DEFAULT 500 CHECK(month_commission_bps BETWEEN 0 AND 10000);
+ALTER TABLE caldock_settings ADD COLUMN IF NOT EXISTS quarter_commission_bps integer NOT NULL DEFAULT 750 CHECK(quarter_commission_bps BETWEEN 0 AND 10000);
+ALTER TABLE caldock_settings ADD COLUMN IF NOT EXISTS half_commission_bps integer NOT NULL DEFAULT 1000 CHECK(half_commission_bps BETWEEN 0 AND 10000);
+ALTER TABLE caldock_settings ADD COLUMN IF NOT EXISTS year_commission_bps integer NOT NULL DEFAULT 1500 CHECK(year_commission_bps BETWEEN 0 AND 10000);
 `;
