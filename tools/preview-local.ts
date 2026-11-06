@@ -30,7 +30,12 @@ const BANNER = `<div style="position:fixed;left:50%;bottom:10px;transform:transl
 const PASSWORD = process.env.PREVIEW_PASSWORD || 'workos-preview', ORG = 'demo';
 if (process.env.RENDER && !process.env.PREVIEW_PASSWORD) throw new Error('Set PREVIEW_PASSWORD on the hosted test site; the default password is public.');
 
-const db = await createDatabase();
+// In memory by default. The hosted test site sets PREVIEW_DATABASE_URL to its own throwaway Postgres (PGlite needs more
+// memory than Render's free instance has); that database is wiped and reseeded on every start, so never point it at real data.
+const PREVIEW_DB = process.env.PREVIEW_DATABASE_URL?.trim();
+if (PREVIEW_DB && PREVIEW_DB === process.env.DATABASE_URL?.trim()) throw new Error('PREVIEW_DATABASE_URL must be a separate, throwaway database');
+const db = await createDatabase(PREVIEW_DB ? { connectionString: PREVIEW_DB } : {});
+if (PREVIEW_DB) await db.exec('DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;');
 await db.exec(schema);
 await seedDemo(db);
 const pw = await hashPassword(PASSWORD);
