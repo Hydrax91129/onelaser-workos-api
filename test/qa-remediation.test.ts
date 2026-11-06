@@ -9,7 +9,7 @@ async function fixture(model:any=null){
  const app=await buildApp({db,completionModel:model,integrations:{executiveUserIds:['m1']},closeDatabase:false});
  const tokens:Record<string,string>={};for(const id of ['m1','m2','m3','m4'])tokens[id]=(await issueSession(db,id)).accessToken;
  const call=(who:string,method:any,url:string,payload?:any)=>app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who]}});
- const create=async()=>{const r=await call('m1','POST','/tasks',{title:'Synthetic recoverable task',description:'Local QA evidence',ownerId:'m2',criteria:['Evidence'],dueAt:'2026-11-12T10:00:00Z'});assert.equal(r.statusCode,201,r.body);return r.json();};
+ const create=async()=>{const r=await call('m2','POST','/tasks',{title:'Synthetic recoverable task',description:'Local QA evidence',ownerId:'m2',criteria:['Evidence'],dueAt:'2026-11-12T10:00:00Z'});assert.equal(r.statusCode,201,r.body);return r.json();};
  const finish=async(t:any)=>{const r=await call('m2','POST',`/tasks/${t.id}/complete`,{expectedVersion:t.version,result:'Delivered the fictional report with a link to the result and checked all acceptance criteria.',selfReview:'Synthetic result verified by this fixture.'});assert.equal(r.statusCode,201,r.body);return r.json();};
  const age=async(taskId:string)=>{await db.query("UPDATE task_completions SET created_at=now()-interval '25 hours' WHERE task_id=$1 AND superseded_at IS NULL",[taskId]);};
  return {db,app,call,create,finish,age,async close(){await app.close();await db.close();}};

@@ -12,7 +12,7 @@ before(async()=>{db=await createDatabase();await db.exec(schema);await seedDemo(
   for(const userId of ['m1','m2','m3','m4'])tokens[userId]=(await app.inject({method:'POST',url:'/auth/dev-login',payload:{userId,secret}})).json().accessToken;});
 after(async()=>{await app.close();});
 const call=(who:string,method:'GET'|'POST',url:string,payload?:any)=>app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who]}});
-async function create(owner='m2'){const r=await call('m1','POST','/tasks',{title:'Completion fixture task',description:'Internal fictional fixture',ownerId:owner,criteria:['Provide evidence'],dueAt:'2026-11-10T12:00:00Z'});assert.equal(r.statusCode,201,r.body);return r.json();}
+async function create(owner='m2'){const r=await call(owner,'POST','/tasks',{title:'Completion fixture task',description:'Internal fictional fixture',ownerId:owner,criteria:['Provide evidence'],dueAt:'2026-11-10T12:00:00Z'});assert.equal(r.statusCode,201,r.body);return r.json();}
 // Pretend the completion happened `hours` ago (the 24-hour human scoring window is measured from created_at).
 const age=async(taskId:string,hours=25)=>{await db.query(`UPDATE task_completions SET created_at=now()-($2::int*interval '1 hour') WHERE task_id=$1 AND superseded_at IS NULL`,[taskId,hours]);};
 const runJob=async()=>{const r=await call('m4','POST','/completions/auto-score/run',{});assert.equal(r.statusCode,200,r.body);return r.json().started;};

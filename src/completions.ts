@@ -10,6 +10,13 @@
  *    given, otherwise the AI's. Final scores are immutable; the AI never overwrites a person's score.
  *  - Within 3 days the owner may reopen and resubmit (which starts a new 24-hour window); after 3 days
  *    the task moves to Completed and the completion is locked.
+ *
+ * Review rule (product decision, 2026-11-05) — one path to "done" for work someone else gave you:
+ *  - A task given by someone else (`needsReview`) cannot be marked done here. The owner submits a deliverable
+ *    version; when the reviewer accepts it (with a 0–10 score) the task is done and counts, using that score.
+ *  - If the reviewer neither accepts nor returns the current version within 3 days, the periodic job accepts it
+ *    automatically and the AI scores it (`auto_accepted_at`).
+ *  - Tasks you created for yourself keep the rule above: marking done counts at once, scored later.
  */
 import { pushInbox, taskFollowers } from './inbox.js';
 import { randomUUID, createHash } from 'node:crypto';
@@ -21,6 +28,10 @@ import { deny } from './errors.js';
 import { visibleTask } from './domain.js';
 
 export const COMPLETION_LOCK_MS = 3 * 86400000;
+/** A submitted version no reviewer has accepted or returned within this window is accepted automatically. */
+export const REVIEW_TIMEOUT_MS = 3 * 86400000;
+/** Work someone else gave the owner: it is done only when the reviewer accepts it (or the review times out). */
+export const needsReview = (t: any) => !!t && t.reviewer_id !== t.owner_id && (t.assigned_by || t.created_by) !== t.owner_id;
 /** A person may score a completion within this window; after it the AI scores unscored completions. */
 export const HUMAN_SCORE_WINDOW_MS = 24 * 3600000;
 /** Automatic AI attempts per completion before the job leaves it for a manual retry. */
@@ -41,6 +52,7 @@ ALTER TABLE task_completions ADD COLUMN IF NOT EXISTS human_score numeric(3,1);
 ALTER TABLE task_completions ADD COLUMN IF NOT EXISTS human_scored_by text REFERENCES users(id);
 ALTER TABLE task_completions ADD COLUMN IF NOT EXISTS human_scored_at timestamptz;
 ALTER TABLE task_completions ADD COLUMN IF NOT EXISTS human_note text;
+ALTER TABLE task_completions ADD COLUMN IF NOT EXISTS auto_accepted_at timestamptz;
 ALTER TABLE task_completions DROP CONSTRAINT IF EXISTS task_completions_human_score_0_10;
 ALTER TABLE task_completions ADD CONSTRAINT task_completions_human_score_0_10 CHECK(human_score IS NULL OR human_score BETWEEN 0 AND 10);
 CREATE INDEX IF NOT EXISTS task_completion_unscored_idx ON task_completions(created_at) WHERE superseded_at IS NULL AND human_score IS NULL AND ai_status<>'scored';
@@ -113,8 +125,8 @@ export const SCORE_SOURCE_SQL = "CASE WHEN c.human_score IS NOT NULL THEN 'human
 
 export async function latestCompletion(db: Queryable, taskId: string) {
   return (await db.query(`SELECT c.id,c.result,c.self_review,c.attachment_ids,c.ai_status,c.ai_score,c.ai_summary,c.scored_at,c.completed_by,c.created_at,c.ai_attempted_at,c.ai_attempts,
-      c.human_score,c.human_scored_by,c.human_scored_at,c.human_note,u.display_name AS human_scored_by_name,
-      ${FINAL_SCORE_SQL} AS final_score, ${SCORE_SOURCE_SQL} AS score_source, c.created_at + interval '24 hours' AS score_due_at
+      c.human_score,c.human_scored_by,c.human_scored_at,c.human_note,c.auto_accepted_at,u.display_name AS human_scored_by_name,
+      ${FINAL_SCORE_SQL} AS final_score, ${SCORE_SOURCE_SQL} AS score_source, CASE WHEN c.auto_accepted_at IS NOT NULL THEN c.created_at ELSE c.created_at + interval '24 hours' END AS score_due_at
     FROM task_completions c LEFT JOIN users u ON u.id=c.human_scored_by
     WHERE c.task_id=$1 AND c.superseded_at IS NULL ORDER BY c.created_at DESC LIMIT 1`, [taskId])).rows[0] || null;
 }
@@ -129,7 +141,7 @@ export async function registerCompletionRoutes(app: FastifyInstance, db: Databas
     if (o.isAdmin?.(user)) return true;
     return (await db.query('SELECT 1 FROM users WHERE id=$1 AND manager_id=$2 AND org_id=$3', [task.owner_id, user.id, task.org_id])).rows.length > 0;
   }
-  const windowOpen = (c:any) => Date.now() - new Date(c.created_at).getTime() < HUMAN_SCORE_WINDOW_MS;
+  const windowOpen = (c:any) => !c.auto_accepted_at && Date.now() - new Date(c.created_at).getTime() < HUMAN_SCORE_WINDOW_MS;
   async function recordAttempt(tx:Queryable, task:any, actorId:string, action:string, details:object) {
     await tx.query('INSERT INTO audit_events(id,org_id,department_id,owner_id,actor_id,action,object_id,details) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',
       [randomUUID(),task.org_id,task.department_id,task.owner_id,actorId,action,task.id,JSON.stringify(details)]);
@@ -142,7 +154,7 @@ export async function registerCompletionRoutes(app: FastifyInstance, db: Databas
     const attemptId=randomUUID();
     const claimed=await db.transaction(async tx=>{
       const r=await tx.query(`UPDATE task_completions SET ai_status='pending',ai_attempted_at=now(),ai_attempt_id=$2,ai_attempts=ai_attempts+1
-        WHERE id=$1 AND superseded_at IS NULL AND ai_status<>'scored' AND human_score IS NULL AND created_at<=now()-interval '24 hours'
+        WHERE id=$1 AND superseded_at IS NULL AND ai_status<>'scored' AND human_score IS NULL AND (created_at<=now()-interval '24 hours' OR auto_accepted_at IS NOT NULL)
         AND (ai_status<>'pending' OR ai_attempted_at IS NULL OR ai_attempted_at<now()-interval '2 minutes') RETURNING id`,[completionId,attemptId]);
       if(!r.rows.length)return false;
       await recordAttempt(tx,task,actorId,kind==='retry'?'task.completion_score_retry':'task.completion_score_started',{completionId,attemptId});
@@ -155,7 +167,8 @@ export async function registerCompletionRoutes(app: FastifyInstance, db: Databas
         const saved=await tx.query("UPDATE task_completions SET ai_status='scored',ai_score=$2,ai_summary=$3,ai_model=$4,scored_at=now() WHERE id=$1 AND superseded_at IS NULL AND ai_attempt_id=$5 AND ai_status='pending' AND human_score IS NULL RETURNING id",[completionId,score.score,score.summary,o.model!.model,attemptId]);
         if(saved.rows.length)await recordAttempt(tx,task,actorId,'task.completion_scored',{completionId,attemptId,score:score.score});
       });
-    } catch {
+    } catch (e:any) {
+      app.log.warn({ err: e?.message, status: e?.status, detail: e?.detail }, 'completion ai score failed');
       await db.transaction(async tx=>{
         const failed=await tx.query("UPDATE task_completions SET ai_status='failed' WHERE id=$1 AND superseded_at IS NULL AND ai_attempt_id=$2 AND ai_status='pending' RETURNING id",[completionId,attemptId]);
         if(failed.rows.length)await recordAttempt(tx,task,actorId,'task.completion_score_failed',{completionId,attemptId});
@@ -170,6 +183,7 @@ export async function registerCompletionRoutes(app: FastifyInstance, db: Databas
       const task = (await tx.query('SELECT * FROM tasks WHERE id=$1 FOR UPDATE', [taskId])).rows[0];
       if (!visibleTask(user, task)) deny(404, 'NOT_FOUND', 'Task not found');
       if (task.owner_id !== user.id && task.reviewer_id !== user.id) deny(403, 'FORBIDDEN', 'Only the owner or reviewer can complete this task');
+      if (needsReview(task)) deny(409, 'REVIEW_REQUIRED', 'Someone else gave you this task: submit a deliverable version, and it counts as done once the reviewer accepts it');
       if (task.version !== input.expectedVersion) deny(409, 'VERSION_CONFLICT', 'Task changed; reload before saving');
       if (task.board_status === 'done' && task.board_done_at && Date.now() - new Date(task.board_done_at).getTime() >= COMPLETION_LOCK_MS) deny(409, 'COMPLETION_LOCKED', 'This task was completed more than 3 days ago; its result is locked');
       const atts = input.attachmentIds.length ? (await tx.query('SELECT id,name FROM task_attachments WHERE task_id=$1 AND id=ANY($2::text[])', [taskId, input.attachmentIds])).rows : [];
@@ -239,7 +253,34 @@ export async function registerCompletionRoutes(app: FastifyInstance, db: Databas
 
   /* Periodic scoring job. Completions without a final score 24 hours after completion are scored by the AI.
      State lives in the database (claim lease + status), so it survives restarts and never scores twice. */
+  /* Review timeout: the current submitted version of a task that needs review, untouched for 3 days, is accepted
+     automatically. It counts as done now and the AI scores it on this same run (no 24-hour human window). */
+  async function runAutoAccepts(limit=20) {
+    const due=(await db.query(`SELECT t.id FROM tasks t JOIN submissions s ON s.task_id=t.id AND s.version=t.submission_version
+      WHERE t.status='submitted' AND t.archived_at IS NULL AND t.reviewer_id<>t.owner_id AND s.created_at<=now()-($1::bigint*interval '1 millisecond')
+      ORDER BY s.created_at LIMIT $2`,[REVIEW_TIMEOUT_MS,limit])).rows;
+    let accepted=0;
+    for(const {id:taskId} of due){
+      const done=await db.transaction(async tx=>{
+        const task=(await tx.query('SELECT * FROM tasks WHERE id=$1 FOR UPDATE',[taskId])).rows[0];
+        if(!task||task.status!=='submitted'||task.archived_at||task.reviewer_id===task.owner_id)return false;
+        const s=(await tx.query(`SELECT * FROM submissions WHERE task_id=$1 AND version=$2 AND created_at<=now()-($3::bigint*interval '1 millisecond')`,[taskId,task.submission_version,REVIEW_TIMEOUT_MS])).rows[0];
+        if(!s)return false;
+        await tx.query('UPDATE task_completions SET superseded_at=now() WHERE task_id=$1 AND superseded_at IS NULL',[taskId]);
+        const result=[s.description,s.evidence_url].filter(Boolean).join('\n');
+        const c=(await tx.query('INSERT INTO task_completions(id,org_id,task_id,result,self_review,attachment_ids,completed_by,auto_accepted_at) VALUES($1,$2,$3,$4,$5,$6,$7,now()) RETURNING id',
+          [randomUUID(),task.org_id,taskId,result,'',JSON.stringify(s.attachment_ids||[]),task.owner_id])).rows[0];
+        await tx.query("UPDATE tasks SET status='accepted',board_status='done',board_done_at=now(),version=version+1,updated_at=now() WHERE id=$1",[taskId]);
+        await recordAttempt(tx,task,task.owner_id,'task.auto_accepted',{completionId:c.id,submissionVersion:s.version,reason:'review_timeout'});
+        await pushInbox(tx,{orgId:task.org_id,recipients:[task.owner_id,task.reviewer_id,task.assigned_by],actorId:'',kind:'auto_accept',taskId,title:task.title,body:''});
+        return true;
+      });
+      if(done)accepted++;
+    }
+    return accepted;
+  }
   async function runAutoScores(limit=20) {
+    await runAutoAccepts(limit);
     // An accepted review with a quality score, given after this completion, is a person's score too.
     await db.query(`UPDATE task_completions c SET human_score=r.quality,human_scored_by=r.reviewer_id,human_scored_at=r.created_at
       FROM (SELECT DISTINCT ON (task_id) task_id,quality,reviewer_id,created_at FROM reviews WHERE decision='accept' AND quality IS NOT NULL ORDER BY task_id,created_at DESC) r
@@ -248,7 +289,7 @@ export async function registerCompletionRoutes(app: FastifyInstance, db: Databas
     const due=(await db.query(`SELECT c.id,c.result,c.self_review,c.attachment_ids,c.completed_by,t.id AS task_id
       FROM task_completions c JOIN tasks t ON t.id=c.task_id
       WHERE c.superseded_at IS NULL AND c.human_score IS NULL AND c.ai_status<>'scored' AND t.board_status='done' AND t.archived_at IS NULL
-        AND c.created_at<=now()-interval '24 hours' AND c.ai_attempts<$1
+        AND (c.created_at<=now()-interval '24 hours' OR c.auto_accepted_at IS NOT NULL) AND c.ai_attempts<$1
         AND (c.ai_status<>'pending' OR c.ai_attempted_at IS NULL OR c.ai_attempted_at<now()-interval '2 minutes')
       ORDER BY c.created_at LIMIT $2`,[AUTO_SCORE_MAX_ATTEMPTS,limit])).rows;
     let started=0;
@@ -276,7 +317,7 @@ export async function registerCompletionRoutes(app: FastifyInstance, db: Databas
   /* Team leaderboard: aggregated counts only (no task titles), for everyone in the same department. */
   app.get('/reports/leaderboard', async req => {
     const user = actorOf(req), since = new Date(); since.setDate(1); since.setHours(0, 0, 0, 0);
-    // Done counts as soon as the owner marks it complete. The final score is a person's score if given,
+    // Done counts as soon as the owner marks it complete, or the reviewer accepts work someone else gave. The final score is a person's score if given,
     // otherwise the AI's; tasks accepted through evidence review (no completion record) use the review score.
     const rows = (await db.query(`SELECT u.id,u.display_name,u.title,u.avatar_version,
         count(t.id) FILTER (WHERE t.created_at>=$3 OR t.due_at>=$3)::int AS total,

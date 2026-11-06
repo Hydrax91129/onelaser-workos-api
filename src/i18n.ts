@@ -98,6 +98,7 @@ const zh:Record<string,string>={
   'Write the result and a self-evaluation to complete this task':'完成任务前，请先写清楚完成结果和自我评价，AI 会根据你的结果打分。',
   'This task was completed more than 3 days ago; its result and score are locked':'这项任务完成已超过 3 天，结果和 AI 评分已锁定，不能再修改。',
   'Only the owner or reviewer can complete this task':'只有负责人或验收人可以完成这项任务。',
+  'Someone else gave you this task: submit a deliverable version, and it counts as done once the reviewer accepts it':'这项任务是别人下达的：请提交成果版本，验收人确认后自动算完成。',
   'Describe the result':'请写清楚完成结果：做了什么、产出是什么。',
   'Attach files to this task before referencing them':'请先把附件上传到这项任务。',
   'This file type is not allowed':'不支持这种文件类型。',
