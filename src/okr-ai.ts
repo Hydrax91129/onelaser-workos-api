@@ -111,6 +111,8 @@ Do not repeat objectives the employee already has. Write all text in ${lang}.`,
         SCHEMA, 'okr_draft', 3000);
     } catch (e: any) {
       req.log.warn({ err: e?.message, status: e?.status, detail: e?.detail }, 'okr ai draft failed');
+      // The provider refused the request (bad key, no credit, unknown model…): retrying will not help, so say so.
+      if (e?.status) deny(502, 'AI_PROVIDER_REJECTED', `The AI provider refused the request (HTTP ${e.status}); ask an administrator to check the AI account, credit and model`, `AI 服务拒绝了请求（状态 ${e.status}），请联系管理员检查 AI 账号、额度和模型设置。`);
       deny(502, 'AI_UPSTREAM_FAILED', 'AI drafting is temporarily unavailable', 'AI 暂时无法生成草稿，请稍后再试。');
     }
     try { return normaliseDraft(out, company.map((c: any) => c.id), budget); }

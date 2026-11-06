@@ -167,7 +167,8 @@ export async function registerCompletionRoutes(app: FastifyInstance, db: Databas
         const saved=await tx.query("UPDATE task_completions SET ai_status='scored',ai_score=$2,ai_summary=$3,ai_model=$4,scored_at=now() WHERE id=$1 AND superseded_at IS NULL AND ai_attempt_id=$5 AND ai_status='pending' AND human_score IS NULL RETURNING id",[completionId,score.score,score.summary,o.model!.model,attemptId]);
         if(saved.rows.length)await recordAttempt(tx,task,actorId,'task.completion_scored',{completionId,attemptId,score:score.score});
       });
-    } catch {
+    } catch (e:any) {
+      app.log.warn({ err: e?.message, status: e?.status, detail: e?.detail }, 'completion ai score failed');
       await db.transaction(async tx=>{
         const failed=await tx.query("UPDATE task_completions SET ai_status='failed' WHERE id=$1 AND superseded_at IS NULL AND ai_attempt_id=$2 AND ai_status='pending' RETURNING id",[completionId,attemptId]);
         if(failed.rows.length)await recordAttempt(tx,task,actorId,'task.completion_score_failed',{completionId,attemptId});

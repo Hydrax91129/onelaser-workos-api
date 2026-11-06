@@ -54,3 +54,18 @@ test('without a model the draft endpoint says it is not configured',async()=>{
   assert.equal((await app.inject({method:'GET',url:'/capabilities'})).json().okrAiDraft,false);
  }finally{await app.close();}
 });
+
+test('a provider that refuses the request is reported with its HTTP status, not as a temporary problem',async()=>{
+ const refused={model:'mock',async json(){const e:any=new Error('AI_UPSTREAM_FAILED');e.status=403;e.detail='synthetic: no credit';throw e;}};
+ const slow={model:'mock',async json(){throw new Error('AI_UPSTREAM_FAILED');}};
+ for(const [model,code] of [[refused,'AI_PROVIDER_REJECTED'],[slow,'AI_UPSTREAM_FAILED']] as const){
+  const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+  const app=await buildApp({db,okrDraftModel:model as any,translationModel:null,completionModel:null,mailer:null});
+  const token=(await issueSession(db,'m1')).accessToken;
+  try{
+   const r=await app.inject({method:'POST',url:'/okr/ai-draft',payload:{text:'Grow dealer sales',period:'2026-11'},headers:{authorization:'Bearer '+token,'accept-language':'zh'}});
+   assert.equal(r.statusCode,502,r.body);assert.equal(r.json().error.code,code);
+   if(code==='AI_PROVIDER_REJECTED')assert.match(r.json().error.message,/403/);
+  }finally{await app.close();}
+ }
+});

@@ -110,7 +110,8 @@ export async function buildApp(options:AppOptions) {
   const mailer=options.mailer===undefined?mailerFromEnv(process.env):options.mailer;
   const devEnabled=options.allowDevLogin===true && environment!=='production';
   if(devEnabled && (options.devLoginSecret?.length || 0)<32) throw new Error('DEV_LOGIN_SECRET must contain at least 32 characters when development login is enabled');
-  const app=Fastify({logger:false,bodyLimit:128*1024,trustProxy:false});
+  // Production keeps warnings (AI provider failures, with the provider's status and a short error text) so Render logs show why an AI feature failed. No request logging; credentials are redacted.
+  const app=Fastify({logger:environment==='production'?{level:'warn',redact:['req.headers.authorization','req.headers.cookie','headers.authorization']}:false,bodyLimit:128*1024,trustProxy:false});
   app.addContentTypeParser('application/x-www-form-urlencoded',{parseAs:'string'},(_req,body,done)=>{
     const values=new URLSearchParams(String(body)),output:Record<string,string>={};
     for(const[key,value]of values){if(Object.hasOwn(output,key)){const error=Object.assign(new Error('Duplicate form field'),{statusCode:400});done(error);return;}Object.defineProperty(output,key,{value,enumerable:true});}
