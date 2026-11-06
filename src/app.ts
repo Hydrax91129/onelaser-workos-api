@@ -241,7 +241,6 @@ export async function buildApp(options:AppOptions) {
   });
   app.post<{Params:{id:string}}>('/tasks/:id/reviews',async(req,reply)=>{
     const user=actor(req),input=reviewInput.parse(req.body),id=identifier.parse(req.params.id);
-    if(user.role!=='manager') deny(403,'FORBIDDEN','A designated manager must review evidence');
     const result=await db.transaction(async tx=>{
       const task=await loadTask(tx,user,id,true);
       if(task.owner_id===user.id) deny(403,'SELF_REVIEW_FORBIDDEN','Task owners cannot review their own work');
