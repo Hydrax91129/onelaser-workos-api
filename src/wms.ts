@@ -109,6 +109,16 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     canDecide: canDecide(u, m, people.get(m.created_by)),
   });
 
+  // Stock of one SKU in every warehouse, for the pricing page of the product library (read only).
+  app.get<{ Params: { sku: string } }>('/wms/stock/:sku', async req => {
+    const u = actorOf(req); requireView(u);
+    const s = z.string().trim().min(1).max(80).parse(req.params.sku);
+    const rows = (await db.query('SELECT location,qty FROM wms_stock WHERE org_id=$1 AND lower(sku)=lower($2)', [u.org_id, s])).rows;
+    const by = new Map(rows.map((r: any) => [r.location, Number(r.qty)]));
+    const locations = LOCATIONS.map(l => ({ id: l.id, zh: l.zh, en: l.en, qty: by.get(l.id) ?? 0 }));
+    return { sku: s, locations, total: locations.filter(l => l.id !== 'transit').reduce((n, l) => n + l.qty, 0), inTransit: by.get('transit') ?? 0 };
+  });
+
   app.get('/wms/summary', async req => {
     const u = actorOf(req); requireView(u);
     const items = (await db.query('SELECT sku,name,type FROM wms_items WHERE org_id=$1 ORDER BY sku', [u.org_id])).rows;

@@ -47,7 +47,7 @@ export async function loadRecords(q: Queryable, org: string, skus?: string[], lo
   const cats = (await q.query(`SELECT * FROM product_catalog WHERE org_id=$1${filter} ORDER BY sku${lock ? ' FOR UPDATE' : ''}`, args)).rows;
   const prs = new Map((await q.query(`SELECT * FROM product_pricing WHERE org_id=$1${filter}`, args)).rows.map((r: any) => [r.sku, r]));
   const chans = new Map<string, Record<string, number | null>>();
-  for (const r of (await q.query(`SELECT sku,channel,price FROM product_channel_prices WHERE org_id=$1${filter} AND (channel IN ('map','promo_floor') OR channel ~ '^wh[0-9]+$')`, args)).rows)
+  for (const r of (await q.query(`SELECT sku,channel,price FROM product_channel_prices WHERE org_id=$1${filter} AND (channel IN ('map','promo_floor','promo_major','promo_minor','clearance') OR channel ~ '^wh[0-9]+$')`, args)).rows)
     (chans.get(r.sku) || chans.set(r.sku, {}).get(r.sku)!)[r.channel] = num(r.price);
   const files = new Map<string, any[]>();
   for (const r of (await q.query(`SELECT id,sku,slot,name,mime,size,created_at FROM product_files WHERE org_id=$1${filter} ORDER BY created_at,id`, args)).rows)
@@ -138,7 +138,7 @@ export async function writeRecord(tx: Queryable, u: User, sku: string, rec: Rec 
         priceResults[key] = { status: 'applied' };
       }
       if (priceResults[key]?.status === 'pending') continue; // held for approval: the value has not changed yet
-    } else if (s.t === 'col') { cat[s.col] = to ?? (['gross', 'msrp'].includes(s.col) ? null : ''); catTouched = true; }
+    } else if (s.t === 'col') { cat[s.col] = to ?? (['gross', 'msrp', 'ship_fee'].includes(s.col) ? null : ''); catTouched = true; }
     else if (s.t === 'dim') { cat.dims[s.i] = to; catTouched = true; }
     else if (s.t === 'attr') { if (to == null) delete cat.attrs[key]; else cat.attrs[key] = to; catTouched = true; }
     else if (s.t === 'sattr') { if (to == null) delete pr.attrs[key]; else pr.attrs[key] = to; prTouched = true; }
@@ -149,9 +149,9 @@ export async function writeRecord(tx: Queryable, u: User, sku: string, rec: Rec 
   }
   if (catTouched) {
     const dims = cat.dims.every((x: any) => x == null) ? null : JSON.stringify(cat.dims.map((x: any) => x == null ? null : Number(x)));
-    await tx.query(`UPDATE product_catalog SET name_zh=$3,name_en=$4,status=$5,gross=$6,dims=$7,lead=$8,best=$9,family=$10,goods_type=$11,refb_sku=$12,attrs=$13,updated_by=$14,updated_at=now()
+    await tx.query(`UPDATE product_catalog SET name_zh=$3,name_en=$4,status=$5,gross=$6,dims=$7,lead=$8,best=$9,family=$10,goods_type=$11,refb_sku=$12,attrs=$13,updated_by=$14,ship_fee=$15,updated_at=now()
       WHERE org_id=$1 AND sku=$2`, [u.org_id, rec.sku, cat.name_zh ?? '', cat.name_en ?? '', cat.status ?? '', cat.gross ?? null, dims, cat.lead ?? '', cat.best ?? '',
-      cat.family ?? '', cat.goods_type || 'bulk', cat.refb_sku ?? '', JSON.stringify(cat.attrs), u.id]);
+      cat.family ?? '', cat.goods_type || 'bulk', cat.refb_sku ?? '', JSON.stringify(cat.attrs), u.id, cat.ship_fee ?? null]);
   }
   if (prTouched) await tx.query(`INSERT INTO product_pricing(org_id,sku,landed_usd,last_mile_usd,attrs,updated_by,updated_at) VALUES($1,$2,$3,$4,$5,$6,now())
     ON CONFLICT(org_id,sku) DO UPDATE SET landed_usd=$3,last_mile_usd=$4,attrs=$5,updated_by=$6,updated_at=now()`,
@@ -217,7 +217,7 @@ export async function registerProductLibraryRoutes(app: FastifyInstance, db: Dat
     const ws = await worksheetOf(db, u.org_id), recs = await loadRecords(db, u.org_id), dupes = duplicatesOf(recs.values());
     const pending = new Map<string, any[]>();
     for (const r of (await db.query(`SELECT id,sku,target,new_price FROM product_price_changes WHERE org_id=$1 AND status='pending' ORDER BY created_at`, [u.org_id])).rows)
-      if (r.target === 'msrp' || r.target === 'map' || r.target === 'promo_floor' || /^wh\d+$/.test(r.target) && (v.editCost || !ws.settings.whTiers[Number(r.target.slice(2))]?.floor))
+      if (['msrp', 'map', 'promo_floor', 'promo_major', 'promo_minor', 'clearance'].includes(r.target) || /^wh\d+$/.test(r.target) && (v.editCost || !ws.settings.whTiers[Number(r.target.slice(2))]?.floor))
         (pending.get(r.sku) || pending.set(r.sku, []).get(r.sku)!).push({ id: r.id, target: r.target, price: num(r.new_price) });
     const sens = canSee(v, 'sens');
     return {
@@ -290,7 +290,7 @@ export async function registerProductLibraryRoutes(app: FastifyInstance, db: Dat
     const changes = (await db.query(`SELECT c.*, ${nameSql('c.actor_id')} AS actor_name FROM product_changes c WHERE c.org_id=$1 AND c.sku=$2 ORDER BY c.created_at DESC LIMIT 300`, [u.org_id, rec.sku])).rows;
     const prices = (await db.query(`SELECT p.*, ${nameSql('p.requested_by')} AS actor_name FROM product_price_changes p WHERE p.org_id=$1 AND p.sku=$2 ORDER BY p.created_at DESC LIMIT 200`, [u.org_id, rec.sku])).rows;
     const visible = (key: string) => { const f = fieldOf(LEGACY[key] || key, ws.whTiers); return !!f && canSee(v, f.vis); };
-    const priceKey = (t: string) => t === 'msrp' ? 'msrp' : t === 'map' ? 'map' : t === 'promo_floor' ? 'promoFloor' : /^wh\d+$/.test(t) ? 'whOv' + t.slice(2) : null;
+    const priceKey = (t: string) => ({ msrp: 'msrp', map: 'map', promo_floor: 'promoFloor', promo_major: 'priceMajor', promo_minor: 'priceMinor', clearance: 'priceClear' } as Record<string, string>)[t] || (/^wh\d+$/.test(t) ? 'whOv' + t.slice(2) : null);
     return {
       sku: rec.sku,
       items: [
