@@ -13,6 +13,8 @@
   各模块是独立文件，挂在 `window.WorkOSXxx` 上，由 live-app 的 `render()` 调用 `configure()` 注入 api、state、lang 等。
 - 后端 `Hydrax91129/onelaser-workos-api`：Fastify + TypeScript，PostgreSQL（本地测试用 PGlite），参数校验用 zod。
   每个模块一个文件，导出 `xxxSchema`（建表 SQL，汇总到 `src/db.ts` 的 `schema`）和 `registerXxxRoutes`（在 `src/app.ts` 注册）。
+- AI（翻译、OKR 起草、成果评分）：设了 `ANTHROPIC_API_KEY` 就用 Claude（`ANTHROPIC_MODEL`，默认 `claude-haiku-5-5`，completions.ts 的 `claudeModel`）；
+  没设时沿用 xAI（`AI_PROVIDER_API_KEY` / `XAI_API_KEY` 和 `AI_*_MODEL_ID`）。Wiki 助手和 Grok Bot 仍走 xAI。
 - 上线：后端仓库 `deploy/frontend-revision.txt` 写死前端的 commit，Docker 构建时拉取这个版本的前端。线上服务在 Render（onelaser-workos-migration）。
 
 ## 2. 模块地图（谁负责什么数据）
@@ -53,6 +55,7 @@
    修改：产品字段要 `products_manage`，成本/敏感字段和文件要 `product_cost_detail`，MSRP/MAP/促销底价沿用 MSRP 规则；价格参数只有主管理员能改。
    人事档案按地区：美国区只有主管理员（`WORKOS_EXECUTIVE_USER_IDS`）能看能改，没有授权项；中国、海外其他地区用 grants 里的
    `hr_cn_view` / `hr_cn_manage`、`hr_intl_view` / `hr_intl_manage`（只读 / 可管理）逐人授权，只有主管理员能分配。`WORKOS_HR_USER_IDS` 不再给任何权限。
+   停用账号（members.ts）会在同一事务里调用 hr.ts 的 `hrMarkLeft`，把人事档案改为已离职、最后工作日取停用日期并记一条离职记录；恢复账号调用 `hrMarkReturned` 改回在职。反过来，把人事状态改为已离职不会停用账号。
    员工所属地区只有主管理员能改。有权限的人看到完整资料（数据库里加密保存）。员工本人只看自己的基本雇佣信息，自助填写个人资料是第二期。
    婚姻、子女、受抚养人和 EEO 只放在加密字段里，只能用于 payroll、福利和合规统计，不能用于聘用决定。
 7. **工厂对接人**：`users.quality_factory` 非空（邀请时选“工厂对接人”，或管理员在成员列表里改）的账号只能用质量追踪，后端会拦截其他接口。
@@ -69,6 +72,14 @@
   只负责收文件和检查类型、大小，存储和权限仍由各模块自己的接口负责。新功能不要再自己写一套上传。
 - 版本号：在 dist/changelog.js 的 RELEASES 最前面加一条，号码 = 当前最新版本 + 0.1，date 要晚于上一版。
 - 只用虚构的示例数据写测试和种子数据。
+- **发布前预览**：后端仓库 `npm run preview`（tools/preview-local.ts）在 http://localhost:4174 起一个完整的 WorkOS，前端取自旁边的
+  `../onelaser-workos/dist`，数据库在内存里、每次启动重置，填好虚构的人员、人事档案（三个地区，含一位已离职）、产品、经销商价和库存。
+  登录：owner@workos.test（主管理员）、hr@workos.test（中国 / 海外 HR）、staff@workos.test（普通员工），密码 workos-preview。
+  改了页面的 PR，合并前先用它跑一遍、截图给用户确认；新模块要用的示例数据也加在这个文件里。
+- **测试站**：用户在 Render 上另建的服务（和正式服务 onelaser-workos-migration、正式数据库完全分开），用 `Dockerfile.preview`
+  构建 `claude/preview` 分支：只有内存里的虚构数据，登录密码是那个服务上的 `PREVIEW_PASSWORD`（不写进仓库），页面底部有“测试站”标记。
+  给用户预览时：把后端 PR 的提交推到 `claude/preview`，要预览的前端提交写进 `deploy/preview-frontend-revision.txt`。
+  `claude/preview` 永远不合进 `main`；第 5 节对正式服务的规则不变。
 
 ## 5. 上线规则（全自动，任何会话都不手动部署）
 

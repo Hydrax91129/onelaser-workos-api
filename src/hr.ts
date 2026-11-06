@@ -34,6 +34,24 @@ import { deny } from './errors.js';
 import { pushInbox } from './inbox.js';
 import { factoryUserIds, type QualityOptions } from './quality.js';
 
+/** Called by members.ts in the same transaction that disables an account: a disabled account means the person has left.
+ * The HR record becomes "left" with the last day set to the disable date (an earlier last day entered by HR is kept). */
+export async function hrMarkLeft(tx: Queryable, orgId: string, userId: string, actorId: string) {
+  const row = (await tx.query(`INSERT INTO hr_profiles(user_id,org_id,status,last_day,updated_by) VALUES($1,$2,'left',CURRENT_DATE,$3)
+    ON CONFLICT (user_id) DO UPDATE SET status='left',last_day=COALESCE(hr_profiles.last_day,CURRENT_DATE),version=hr_profiles.version+1,updated_by=$3,updated_at=now()
+    WHERE hr_profiles.status<>'left' RETURNING last_day`, [userId, orgId, actorId])).rows[0];
+  if (row) await tx.query("INSERT INTO hr_events(id,org_id,user_id,kind,happened_on,note,actor_id) VALUES($1,$2,$3,'left',$4,$5,$6)",
+    [randomUUID(), orgId, userId, row.last_day, '账号已停用 · Account disabled', actorId]);
+}
+
+/** Called when a disabled account is enabled again: a "left" HR record goes back to active and its last day is cleared. */
+export async function hrMarkReturned(tx: Queryable, orgId: string, userId: string, actorId: string) {
+  const row = (await tx.query(`UPDATE hr_profiles SET status='active',last_day=NULL,version=version+1,updated_by=$3,updated_at=now()
+    WHERE user_id=$1 AND org_id=$2 AND status='left' RETURNING user_id`, [userId, orgId, actorId])).rows[0];
+  if (row) await tx.query("INSERT INTO hr_events(id,org_id,user_id,kind,happened_on,note,actor_id) VALUES($1,$2,$3,'other',CURRENT_DATE,$4,$5)",
+    [randomUUID(), orgId, userId, '账号已恢复，人事状态改回在职 · Account enabled again; back to active', actorId]);
+}
+
 export const hrSchema = `
 CREATE TABLE IF NOT EXISTS hr_profiles(user_id text PRIMARY KEY REFERENCES users(id), org_id text NOT NULL, hire_date date, employment_type text NOT NULL DEFAULT 'full_time',
   probation_end date, contract_start date, contract_end date, job_level text NOT NULL DEFAULT '', work_location text NOT NULL DEFAULT '', status text NOT NULL DEFAULT 'active',
@@ -58,6 +76,10 @@ CREATE INDEX IF NOT EXISTS hr_profiles_region ON hr_profiles(org_id, region);
 CREATE TABLE IF NOT EXISTS hr_exports(id text PRIMARY KEY, org_id text NOT NULL, region text NOT NULL, actor_id text NOT NULL, rows integer NOT NULL,
   snapshot text NOT NULL, key_id text NOT NULL, created_at timestamptz NOT NULL DEFAULT clock_timestamp());
 CREATE INDEX IF NOT EXISTS hr_exports_org ON hr_exports(org_id, region, created_at);
+-- A disabled account means the person has left: records of accounts disabled before this rule existed are marked left once.
+INSERT INTO hr_profiles(user_id,org_id,status,last_day) SELECT u.id,u.org_id,'left',u.disabled_at::date FROM users u WHERE u.active=false
+  ON CONFLICT (user_id) DO UPDATE SET status='left',last_day=COALESCE(hr_profiles.last_day,EXCLUDED.last_day),version=hr_profiles.version+1,updated_at=now()
+  WHERE hr_profiles.status<>'left';
 `;
 
 export type HrOptions = { userIds?: string[]; dataKey?: string; previousKeys?: string[]; executiveUserIds?: string[]; quality?: QualityOptions };

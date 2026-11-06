@@ -14,9 +14,11 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test --test-concurrency=1 test/*.test.ts",
-    "dealer:local": "tsx tools/dealer-local.ts"
+    "dealer:local": "tsx tools/dealer-local.ts",
+    "preview": "tsx tools/preview-local.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^1.6.0",
     "@electric-sql/pglite": "0.5.12",
     "@types/nodemailer": "^8.0.2",
     "fastify": "^5.0.0",

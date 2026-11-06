@@ -16,6 +16,7 @@ import { cookie, hash, issueSession, sessionCookieName, type User } from './auth
 import { deny } from './errors.js';
 import { GRANTS, isAdmin, PUBLIC_USER_COLUMNS, type OrgOptions } from './org.js';
 import { QUALITY_FACTORY_IDS } from './quality.js';
+import { hrMarkLeft, hrMarkReturned } from './hr.js';
 
 const scrypt = promisify(scryptCb) as (password: string, salt: Buffer, keylen: number, options: { N: number; r: number; p: number; maxmem: number }) => Promise<Buffer>;
 
@@ -130,6 +131,7 @@ export async function registerMemberRoutes(app: FastifyInstance, db: Database, o
       if (!member) deny(404, 'NOT_FOUND', 'Member not found');
       if (input.active) {
         await tx.query('UPDATE users SET active=true,disabled_at=NULL,disabled_by=NULL WHERE id=$1', [member.id]);
+        await hrMarkReturned(tx, user.org_id, member.id, user.id);
         await audit(tx, user, 'org.member_enabled', member.id, {}, member.id);
         return { id: member.id, active: true, reassigned: { owned: 0, reviewing: 0, reports: 0 } };
       }
@@ -142,6 +144,7 @@ export async function registerMemberRoutes(app: FastifyInstance, db: Database, o
       }
       await tx.query('UPDATE users SET active=false,disabled_at=now(),disabled_by=$2 WHERE id=$1', [member.id, user.id]);
       await tx.query('DELETE FROM sessions WHERE user_id=$1', [member.id]);
+      await hrMarkLeft(tx, user.org_id, member.id, user.id);
       // Direct reports move up one level so their reporting line stays intact.
       const reports = (await tx.query('UPDATE users SET manager_id=$2 WHERE manager_id=$1 AND org_id=$3 RETURNING id', [member.id, member.manager_id && member.manager_id !== member.id ? member.manager_id : null, user.org_id])).rows.length;
       // Second leader lines to the disabled member end; a second leader that now equals the first leader is dropped.

@@ -113,6 +113,60 @@ export async function registerOkrCycle(app: FastifyInstance, db: Database, o: Cy
     const phase = today < c.setupFrom ? 'before' : today <= c.setupUntil && today < c.selfFrom ? 'setup' : today < c.selfFrom ? 'running' : today <= c.selfUntil ? 'self' : today <= c.leadUntil ? 'lead' : 'closed';
     return { ...c, today, phase, timeZone: tz };
   });
+  /* 一键催办: a leader reminds everyone in their reporting scope who is behind on the current stage of a cycle.
+   * Setup: OKR not published once the setup window is open. Self: items not self-scored once self-scoring opened.
+   * Lead: a leader in scope (not the sender) with items of their people still to score. One manual reminder per person,
+   * stage and day; it goes to the in-app follow-up feed and DingTalk like the daily reminders. */
+  async function behind(user: User, p: string) {
+    const c = cycleDates(p), today = localDate(now(), tz).iso, admin = o.isAdmin(user);
+    const scope = Array.isArray(user.visibleOwnerIds) ? user.visibleOwnerIds
+      : admin ? (await db.query('SELECT id FROM users WHERE org_id=$1', [user.org_id])).rows.map((r: any) => r.id)
+      : user.role === 'manager' ? (await db.query('SELECT id FROM users WHERE org_id=$1 AND department_id=$2', [user.org_id, user.department_id])).rows.map((r: any) => r.id) : [];
+    const ids = scope.filter(id => id !== user.id);
+    if (!ids.length) return { period: p, today, items: [] as any[] };
+    const people = (await db.query(`SELECT u.id,u.display_name,u.manager_id FROM users u WHERE u.org_id=$1 AND u.id=ANY($2::text[]) AND u.active=true AND COALESCE(u.quality_factory,'')=''`, [user.org_id, ids])).rows;
+    const name = new Map(people.map((r: any) => [r.id, r.display_name]));
+    const out: { userId: string; name: string; stage: 'setup' | 'self' | 'lead'; overdue: boolean; count: number; detail: string; deadline: string }[] = [];
+    const mmdd = (d: string) => d.slice(5).replace('-', '/');
+    if (today >= c.setupFrom) {
+      const published = new Set((await db.query('SELECT owner_id FROM okr_publications WHERE org_id=$1 AND period=$2', [user.org_id, p])).rows.map((r: any) => r.owner_id));
+      for (const r of people) if (!published.has(r.id)) out.push({ userId: r.id, name: r.display_name, stage: 'setup', overdue: today > c.setupUntil, count: 0, detail: '还没有发布 OKR', deadline: c.setupUntil });
+    }
+    if (today >= c.selfFrom || today >= c.leadFrom) {
+      const items = (await scorables(p)).filter((i: any) => i.org_id === user.org_id);
+      if (today >= c.selfFrom) {
+        const missing = new Map<string, number>();
+        for (const i of items) if (!i.self_n && name.has(i.owner_id)) missing.set(i.owner_id, (missing.get(i.owner_id) || 0) + 1);
+        for (const [id, n] of missing) out.push({ userId: id, name: name.get(id), stage: 'self', overdue: today > c.selfUntil, count: n, detail: `${n} 项未自评`, deadline: c.selfUntil });
+      }
+      if (today >= c.leadFrom) {
+        const pending = new Map<string, number>();
+        for (const i of items) if (!i.lead_n && (name.has(i.owner_id) || i.owner_id === user.id)) for (const l of await leadersOf(i.owner_id)) if (l !== user.id && name.has(l)) pending.set(l, (pending.get(l) || 0) + 1);
+        for (const [id, n] of pending) out.push({ userId: id, name: name.get(id), stage: 'lead', overdue: today > c.leadUntil, count: n, detail: `${n} 项待领导评分`, deadline: c.leadUntil });
+      }
+    }
+    return { period: p, today, items: out.map(x => ({ ...x, deadline: mmdd(x.deadline) })) };
+  }
+  const periodOf = (v: unknown) => { const t = localDate(now(), tz); return typeof v === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(v) ? v : period(t.y, t.m); };
+  app.get('/okr/nudge', async req => behind(actorOf(req), periodOf((req.query as any)?.period)));
+  app.post('/okr/nudge', async req => {
+    const user = actorOf(req), body = (req.body || {}) as any, p = periodOf(body.period);
+    const only = Array.isArray(body.userIds) ? new Set(body.userIds.filter((x: unknown) => typeof x === 'string')) : null;
+    const list = (await behind(user, p)).items.filter(x => !only || only.has(x.userId));
+    if (!list.length) return { period: p, sent: 0, already: 0 };
+    const label = `${Number(p.slice(5))}月`, today = localDate(now(), tz).iso, from = user.display_name || '领导';
+    const text: Record<string, (x: any) => string> = {
+      setup: x => `${from} 催办：请尽快完成并发布你的${label} OKR（截止 ${x.deadline}${x.overdue ? '，已逾期' : ''}）。`,
+      self: x => `${from} 催办：你的${label} OKR 还有 ${x.count} 项没有自评（截止 ${x.deadline}${x.overdue ? '，已逾期' : ''}）。`,
+      lead: x => `${from} 催办：请尽快给团队的${label} OKR 打领导分，还有 ${x.count} 项待评（截止 ${x.deadline}${x.overdue ? '，已逾期' : ''}）。`,
+    };
+    let sent = 0, already = 0;
+    for (const x of list) {
+      const n = await remind(user.org_id, x.userId, `okr:${p}:manual-${x.stage}:${x.userId}`, 'okr_manual', today, text[x.stage](x));
+      if (n) sent++; else already++;
+    }
+    return { period: p, sent, already };
+  });
   app.post('/okr/cycle/run', async req => { const user = actorOf(req); if (!o.isAdmin(user)) deny(403, 'FORBIDDEN', 'Administrator access is required'); return runCycle(); });
 
   if (o.intervalMs && o.intervalMs > 0) {

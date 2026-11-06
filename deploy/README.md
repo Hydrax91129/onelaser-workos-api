@@ -36,6 +36,7 @@
 | `GROK_BOT_WEBHOOK_ALLOWED_HOST` | 逐字核对 routine 显示的实际域名；不接受通配符或本机/私网地址 |
 | `GROK_BOT_WORKER_TOKEN` | 仅 `bearer` 兼容模式需要；OAuth 使用主管批准与 PKCE，不把静态密钥传给 Bot 聊天 |
 | `GROK_BOT_ORG_ID` | 允许读取评审作业的企业，默认可读取显式配置的 `DINGTALK_CORP_ID` |
+| `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` | 可选：设了 `ANTHROPIC_API_KEY` 后，翻译、OKR 起草和成果评分改用 Claude；`ANTHROPIC_MODEL` 默认 `claude-haiku-5-5` |
 | `AI_PROVIDER_API_KEY` / `AI_MODEL_ID` | 仅 `api` 模式需要：模型密钥及账号实际支持结构化输出的模型 ID |
 | `DINGTALK_AGENT_ID` | 应用 AgentId，启用工作通知时需要 |
 

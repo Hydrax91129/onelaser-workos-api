@@ -18,6 +18,7 @@
  *    automatically and the AI scores it (`auto_accepted_at`).
  *  - Tasks you created for yourself keep the rule above: marking done counts at once, scored later.
  */
+import Anthropic from '@anthropic-ai/sdk';
 import { pushInbox, taskFollowers } from './inbox.js';
 import { randomUUID, createHash } from 'node:crypto';
 import { z } from 'zod';
@@ -83,7 +84,7 @@ const humanScoreInput = z.object({
 const attachmentInput = z.object({ name: z.string().trim().min(1).max(200), mime: z.string().trim().max(120), dataBase64: z.string().min(4).max(Math.ceil(MAX_ATTACHMENT * 4 / 3) + 8) }).strict();
 const insightInput = z.object({ board: z.enum(['home', 'okr', 'project', 'task', 'supply', 'quality']), lang: z.enum(['zh', 'en']).default('zh'), facts: z.record(z.string(), z.union([z.string().max(300), z.number(), z.null(), z.array(z.string().max(300)).max(8), z.array(z.union([z.string().max(120), z.number()])).max(4)])).refine(f => Object.keys(f).length <= 30, 'Too many facts') }).strict();
 
-/** Minimal JSON-schema chat call against the configured OpenAI-compatible provider (xAI by default). */
+/** Minimal JSON-schema chat call against the configured OpenAI-compatible provider (xAI by default). claudeModel below is the Claude equivalent. */
 export type JsonModel = { model: string; json: (system: string, user: string, schema: object, name: string, maxTokens?: number) => Promise<any> };
 export function jsonModel(config: { apiKey?: string; model?: string; baseUrl?: string } | undefined, fetcher: typeof fetch = fetch): JsonModel | undefined {
   const apiKey=config?.apiKey?.trim(), model=config?.model?.trim();
@@ -102,6 +103,33 @@ export function jsonModel(config: { apiKey?: string; model?: string; baseUrl?: s
       const choice = JSON.parse(text).choices?.[0];
       if (choice?.finish_reason !== 'stop' || typeof choice?.message?.content !== 'string') throw new Error('AI_INVALID_OUTPUT');
       return JSON.parse(choice.message.content);
+    },
+  };
+}
+
+/** The same JsonModel on Claude (Anthropic API): used for translation, OKR drafts and completion scoring when
+ * ANTHROPIC_API_KEY is set. Defaults to Claude Haiku 5.5, the cheapest current Claude model, at low effort with
+ * thinking off: these are short, well-specified jobs. The reply is constrained to the schema (structured outputs). */
+export function claudeModel(config: { apiKey?: string; model?: string } | undefined, client?: Pick<Anthropic, 'messages'>): JsonModel | undefined {
+  const apiKey = config?.apiKey?.trim(), model = config?.model?.trim() || 'claude-haiku-5-5';
+  if (!apiKey && !client) return undefined;
+  const api = client || new Anthropic({ apiKey, timeout: 30000, maxRetries: 2 });
+  return {
+    model,
+    async json(system, user, schema, _name, maxTokens = 800) {
+      let r: Anthropic.Message;
+      try {
+        r = await api.messages.create({
+          model, max_tokens: Math.max(100, Math.min(8000, maxTokens)), system,
+          thinking: { type: 'disabled' }, output_config: { effort: 'low', format: { type: 'json_schema', schema: schema as Record<string, unknown> } },
+          messages: [{ role: 'user', content: user }],
+        });
+      } catch (err: any) { const e: any = new Error('AI_UPSTREAM_FAILED'); e.status = err?.status; e.detail = String(err?.message || '').slice(0, 300); throw e; }
+      // A refusal or a cut-off answer is not valid JSON for the caller.
+      if (r.stop_reason !== 'end_turn') throw new Error('AI_INVALID_OUTPUT');
+      const text = r.content.filter((b): b is Anthropic.TextBlock => b.type === 'text').map(b => b.text).join('');
+      if (!text || text.length > 256 * 1024) throw new Error('AI_INVALID_OUTPUT');
+      return JSON.parse(text);
     },
   };
 }
