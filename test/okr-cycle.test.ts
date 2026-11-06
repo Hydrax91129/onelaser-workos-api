@@ -72,3 +72,24 @@ test('status rules: first update starts a task, past due becomes Overdue (not wh
   assert.equal((await call('m2','POST',`/tasks/${d.id}/board`,{expectedVersion:dv,dueAt:new Date(Date.now()+30*864e5).toISOString()})).statusCode,403,'assignees cannot move the due date');
  }finally{await app.close();}
 });
+
+test('一键催办: a leader reminds the people in their scope who are behind; once per person, stage and day',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ // m1 leads m2 and m3 (reporting lines); m2 has published November, m3 has not.
+ await db.query("UPDATE users SET manager_id='m1' WHERE id IN ('m2','m3')");
+ await db.query("INSERT INTO okr_publications(org_id,owner_id,period,published_by) SELECT org_id,'m2','2026-11','m2' FROM users WHERE id='m2'");
+ const app=await buildApp({db,integrations:{executiveUserIds:['m4']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0,clock:()=>Date.parse('2026-11-06T18:00:00Z')});
+ const tokens:Record<string,string>={};
+ const call=async(who:string,method:'GET'|'POST',url:string,payload?:any)=>{tokens[who]??=(await issueSession(db,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who]}});};
+ try{
+  const list=(await call('m1','GET','/okr/nudge?period=2026-11')).json();
+  assert.deepEqual(list.items.map((x:any)=>[x.userId,x.stage,x.overdue]),[['m3','setup',true]],'only the person who has not published, marked overdue after the 5th');
+  assert.equal(list.items[0].deadline,'11/05');
+  assert.deepEqual((await call('m3','GET','/okr/nudge?period=2026-11')).json().items,[],'people without reports nudge nobody');
+  assert.deepEqual((await call('m1','POST','/okr/nudge',{period:'2026-11'})).json(),{period:'2026-11',sent:1,already:0});
+  const n=(await db.query("SELECT user_id,kind,message FROM task_nudges WHERE kind='okr_manual'")).rows;
+  assert.equal(n.length,1);assert.equal(n[0].user_id,'m3');assert.match(n[0].message,/催办.*11月 OKR.*已逾期/);
+  assert.deepEqual((await call('m1','POST','/okr/nudge',{period:'2026-11'})).json(),{period:'2026-11',sent:0,already:1},'a second click the same day sends nothing');
+  assert.deepEqual((await call('m1','POST','/okr/nudge',{period:'2026-11',userIds:['m2']})).json(),{period:'2026-11',sent:0,already:0},'only people who are behind can be nudged');
+ }finally{await app.close();}
+});

@@ -51,6 +51,11 @@ for (const [id, zh, en, title, email] of people)
 await db.query(`UPDATE users SET grants='["hr_cn_manage","hr_intl_manage","warehouse","products"]' WHERE id='m4'`);
 await db.query(`UPDATE users SET grants='["warehouse","products"]' WHERE id='m6'`);
 await db.query("UPDATE users SET manager_id='m1' WHERE id IN ('m4','m5') ");
+await db.query("UPDATE users SET manager_id='m4' WHERE id IN ('m2','m6') ");
+// OKR: Zhao Ran has published this month's OKR; everyone else is behind, so the owner can try 一键催办.
+{ const d = new Date(), p = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  const o = (await db.query("INSERT INTO objectives(id,org_id,department_id,owner_id,title,level,planning) SELECT 'demo-okr-1',org_id,department_id,id,'Demo: launch the F2 accessory bundle','personal',jsonb_build_object('period',$1::text,'weight',100) FROM users WHERE id='m5' ON CONFLICT DO NOTHING RETURNING id", [p])).rows[0];
+  if (o) await db.query("INSERT INTO okr_publications(org_id,owner_id,period,published_by) SELECT org_id,'m5',$1,'m5' FROM users WHERE id='m5' ON CONFLICT DO NOTHING", [p]); }
 // A person who has left: their account is disabled, so their HR record shows as left.
 await db.query("UPDATE users SET active=false,disabled_at='2026-10-31T17:00:00Z',disabled_by='m1' WHERE id='m3'");
 
