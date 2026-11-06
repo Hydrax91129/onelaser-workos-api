@@ -19,6 +19,7 @@ import { extname, join, normalize, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { buildApp } from '../src/app.js';
 import { createDatabase, schema, seedDemo } from '../src/db.js';
+import { issueSession } from '../src/auth.js';
 import { hashPassword } from '../src/members.js';
 
 const PORT = Number(process.env.PORT || 4174), HOST = process.env.HOST || '127.0.0.1';
@@ -96,11 +97,33 @@ for (const [sku, name, type, status, msrp, dealer, qty] of products) {
   if (qty) await db.query("INSERT INTO wms_stock(org_id,sku,location,qty) VALUES($1,$2,'us',$3) ON CONFLICT DO NOTHING", [ORG, sku, qty]);
 }
 
+// Sample AI for the test site: "AI 拆任务" splits the text at sentence breaks and hands the pieces round the members,
+// so the draft-and-confirm flow can be tried without an AI account. Other AI features stay off here.
+const previewAi = { model: 'preview-sample', json: async (_system: string, user: string, _schema: object, name: string) => {
+  if (name !== 'project_tasks') throw new Error('AI is not configured on the test site');
+  const input = JSON.parse(user), parts = String(input.request).split(/[。；;\n]+|，(?=[^，]{6,})/).map((x: string) => x.trim()).filter((x: string) => x.length >= 2).slice(0, 8);
+  const end = new Date(input.project.end + 'T00:00:00Z').getTime(), now = Date.now();
+  return { tasks: parts.map((t: string, i: number) => ({ title: t.slice(0, 60), description: '示例 AI 拆分（测试站）', owner: (i % Math.max(1, input.people.length)) + 1,
+    stage: Math.min(input.stages.length, 1 + Math.floor(i * input.stages.length / Math.max(1, parts.length))), dueDate: new Date(now + (end - now) * (i + 1) / (parts.length + 1)).toISOString().slice(0, 10), priority: i === 0 ? 'high' : 'medium' })) };
+} };
+
 const app = await buildApp({
-  db, environment: 'development', mailer: null, completionModel: null, translationModel: null, okrDraftModel: null, nudgeIntervalMs: 0,
+  db, environment: 'development', mailer: null, completionModel: null, translationModel: null, okrDraftModel: previewAi, nudgeIntervalMs: 0,
   integrations: { appPublicUrl: ORIGIN, executiveUserIds: ['m1'] },
   hr: { dataKey: randomBytes(32).toString('base64') }, // a throwaway key: sensitive HR fields work, and vanish with the process
 });
+
+// A sample project with stages, tasks, a file and a status update, made through the same API the page uses.
+{
+  const token = (await issueSession(db, 'm1')).accessToken, call = (method: string, url: string, payload?: unknown) => app.inject({ method: method as any, url, payload: payload as any, headers: { authorization: `Bearer ${token}` } });
+  const day = (n: number) => new Date(Date.now() + n * 864e5).toISOString();
+  const proj = (await call('POST', '/projects', { name: '示例：黑五促销活动', description: '黑五 + 网络星期一全渠道促销（虚构示例）。', startDate: day(-5).slice(0, 10), endDate: day(25).slice(0, 10), template: 'campaign', members: ['m2', 'm4', 'm5'] })).json();
+  const [g1, g2, g3] = proj.groups;
+  for (const [title, owner, g, d] of [['确定折扣方案', 'm1', g1, 3], ['落地页改版', 'm5', g2, 8], ['三组广告素材', 'm2', g2, 10], ['邮件与短信排期', 'm4', g3, 15]] as const)
+    await call('POST', `/projects/${proj.id}/tasks`, { title, ownerId: owner, groupId: g.id, dueAt: day(d) });
+  await call('POST', `/projects/${proj.id}/files`, { name: '活动方案（示例）.pdf', category: 'brief', dataBase64: Buffer.from('%PDF-1.4\n% fictional sample\n').toString('base64') });
+  await call('POST', `/projects/${proj.id}/updates`, { health: 'on_track', body: '方案在评审，素材开始制作（示例）。' });
+}
 
 const TYPES: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.otf': 'font/otf', '.woff2': 'font/woff2', '.png': 'image/png', '.json': 'application/json', '.webp': 'image/webp', '.ico': 'image/x-icon' };
 createServer(async (req, res) => {

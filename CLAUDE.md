@@ -22,7 +22,7 @@
 | 子功能 | 后端 | 前端 | 拥有的数据（只有这个模块能写） |
 | --- | --- | --- | --- |
 | 账号、组织、权限 | auth.ts, org.ts, members.ts | people.js, erp-access.js | users（含第一领导 manager_id、第二领导 second_manager_id，两者权限相同）、departments、grants（功能权限） |
-| 任务、OKR、项目 | app.ts, task-board.ts, completions.ts, assign.ts, okr*.ts, projects.ts | task-board.js, okr-board.js, projects.js, reports.js | tasks、submissions、reviews、objectives、key_results、projects |
+| 任务、OKR、项目 | app.ts, task-board.ts, completions.ts, assign.ts, okr*.ts, projects.ts | task-board.js, okr-board.js, projects.js, reports.js | tasks、submissions、reviews、objectives、key_results、projects、project_files（项目附件）、project_activity（项目动态） |
 | 消息红点 | inbox.ts | inbox.js | inbox_items（其他模块只调用 `pushInbox()`，不要自建通知表） |
 | PIM 与定价 | products.ts, product-spec.ts（产品资料库字段模型）, product-library.ts, product-worksheet.ts（定价工作表）, product-import.ts（标准模板、上传预览、确认、撤销）, xlsx.ts | products.js, product-library.js | product_catalog（SKU 主数据、MSRP；产品族 family、大货/退货 goods_type、退货 SKU refb_sku，其余规格字段在 attrs）、product_pricing（成本输入；供应商在 attrs）、pricing_rules（公司计价规则；价格参数在 worksheet 列，仓库里不放真实数值）、product_channel_prices（各渠道价格及审批；MAP=map、官网促销底价=promo_floor、批发档手动价=wh0…）、product_files（产品主图和文件栏位）、product_imports / product_import_previews（批量更新记录与预览，只有主管理员能上传和确认） |
 | WMS 库存 | wms.ts | wms.js | WMS 库位与出入库流水 |
