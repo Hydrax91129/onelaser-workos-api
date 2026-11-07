@@ -123,7 +123,7 @@ ALTER TABLE caldock_settings ADD COLUMN IF NOT EXISTS month_commission_bps integ
 ALTER TABLE caldock_settings ADD COLUMN IF NOT EXISTS quarter_commission_bps integer NOT NULL DEFAULT 750 CHECK(quarter_commission_bps BETWEEN 0 AND 10000);
 ALTER TABLE caldock_settings ADD COLUMN IF NOT EXISTS half_commission_bps integer NOT NULL DEFAULT 1000 CHECK(half_commission_bps BETWEEN 0 AND 10000);
 ALTER TABLE caldock_settings ADD COLUMN IF NOT EXISTS year_commission_bps integer NOT NULL DEFAULT 1500 CHECK(year_commission_bps BETWEEN 0 AND 10000);
--- Customer's own answers before setup (Apple ID or Gmail, Claude account, card for overseas subscriptions). All optional; customer and admins can change them.
+-- Customer's own answers before setup (US Apple ID, US email, US credit card). All optional; customer and admins can change them.
 ALTER TABLE caldock_orders ADD COLUMN IF NOT EXISTS setup_answers jsonb NOT NULL DEFAULT '{}';
 ALTER TABLE caldock_orders ADD COLUMN IF NOT EXISTS setup_updated_at timestamptz;
 `;
