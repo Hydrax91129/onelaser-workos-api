@@ -160,3 +160,19 @@ test('half-yearly login, authoritative upfront price, referral commission and si
 test('logout revokes the server session and clears the cookie',async()=>{
  assert.equal((await send(other,'DELETE','/session')).statusCode,200);assert.equal((await send(other,'GET','/me')).statusCode,401);
 });
+test('setup answers are optional, editable by the customer and admins, and private to the customer',async()=>{
+ const customer=await login('setup-answers-customer','google',undefined,'month'),stranger=await login('setup-answers-stranger');
+ const row=(await send(customer,'POST','/orders',{interval:'month',requestKey:randomUUID()})).json();
+ assert.deepEqual(row.setup_answers,{});
+ assert.equal((await send(customer,'PATCH','/orders/'+row.id+'/setup',{claude:'maybe'})).statusCode,400);
+ assert.equal((await send(customer,'PATCH','/orders/'+row.id+'/setup',{claude:'yes',password:'x'})).statusCode,400);
+ const saved=await send(customer,'PATCH','/orders/'+row.id+'/setup',{appleOrGoogle:'yes',claude:'no'});assert.equal(saved.statusCode,200,saved.body);
+ assert.deepEqual(saved.json().setup_answers,{appleOrGoogle:'yes',claude:'no',card:null});assert.equal(saved.json().version,row.version);
+ assert.equal((await send(stranger,'PATCH','/orders/'+row.id+'/setup',{card:'yes'})).statusCode,404);
+ assert.equal((await send(customer,'PATCH','/admin/orders/'+row.id+'/setup',{card:'yes'})).statusCode,403);
+ const edited=await send(owner,'PATCH','/admin/orders/'+row.id+'/setup',{appleOrGoogle:'yes',claude:'yes',card:'no'});assert.equal(edited.statusCode,200,edited.body);
+ assert.deepEqual((await send(customer,'GET','/orders/'+row.id)).json().setup_answers,{appleOrGoogle:'yes',claude:'yes',card:'no'});
+ assert.deepEqual((await send(owner,'GET','/admin/orders?search='+row.id)).json().items[0].setup_answers,{appleOrGoogle:'yes',claude:'yes',card:'no'});
+ assert.equal((await send(customer,'PATCH','/orders/'+row.id,{action:'cancel_pending',expectedVersion:row.version})).statusCode,200);
+ assert.equal((await send(customer,'PATCH','/orders/'+row.id+'/setup',{card:'yes'})).statusCode,409);
+});
