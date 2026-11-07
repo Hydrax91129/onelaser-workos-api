@@ -9,7 +9,7 @@ import { recordCaldockRenewalCommission, caldockAudit, caldockOrderAmounts, cald
 import { ApiError } from './errors.js';
 import { mailerFromEnv, type Mailer } from './members.js';
 import { orderWebhookFromEnv, type OrderWebhook } from './caldock-notify.js';
-import { isStaleTestSession, stripeFromEnv, verifyStripeEvent, StripeRequestError, STRIPE_RECURRING, type CaldockStripe } from './caldock-stripe.js';
+import { isStaleTestSession, onExistingStripeObject, stripeFromEnv, verifyCaldockStripeEvent, StripeRequestError, STRIPE_RECURRING, type CaldockStripe } from './caldock-stripe.js';
 
 type Customer = {id:string;display_name:string;email:string|null;active:boolean;created_at:string};
 type Session = {user:Customer;csrf:string;token:string};
@@ -51,7 +51,7 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
   const stripe=options.stripe;
   const requireStock=async(quantity=1)=>{if(!options.liveStock)return;const {left}=await caldockStockStatus(db);if(left===0)deny(409,'CALDOCK_SOLD_OUT','All Macs are rented right now');if(left<quantity)deny(409,'CALDOCK_NOT_ENOUGH_STOCK','Fewer Macs are available than this order needs');};
   const viaStripe=async<T>(call:()=>Promise<T>):Promise<T>=>{try{return await call();}catch(error){if(error instanceof StripeRequestError)deny(502,'CALDOCK_PAYMENT_PROVIDER_ERROR','The payment provider could not complete the request; try again');throw error;}};
-  const stopStripeRenewal=async(subscriptionId:string|null)=>{if(stripe&&subscriptionId)await viaStripe(()=>stripe.request('POST','/v1/subscriptions/'+encodeURIComponent(subscriptionId),{cancel_at_period_end:'true'},'caldock-stop-'+subscriptionId));};
+  const stopStripeRenewal=async(subscriptionId:string|null)=>{if(stripe&&subscriptionId)await viaStripe(()=>onExistingStripeObject(stripe,account=>account.request('POST','/v1/subscriptions/'+encodeURIComponent(subscriptionId),{cancel_at_period_end:'true'},'caldock-stop-'+subscriptionId)));};
   const sessions=new WeakMap<FastifyRequest,Session>();
   const actor=(req:FastifyRequest)=>sessions.get(req)||deny(401,'CALDOCK_UNAUTHENTICATED','Sign in to wodeMac to continue');
   const admin=(req:FastifyRequest)=>{const current=actor(req);if(!admins.has(current.user.id))deny(403,'CALDOCK_ADMIN_REQUIRED','wodeMac administrator access is required');return current;};
@@ -156,7 +156,7 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
         if(!order)deny(404,'NOT_FOUND','Order not found');
         if(order.status!=='pending_payment')deny(409,'INVALID_ORDER_STATE','This order is not awaiting payment');
         if(order.stripe_checkout_session_id&&!isStaleTestSession(stripe,order.stripe_checkout_session_id)){
-          const existing=await viaStripe(()=>stripe.request('GET','/v1/checkout/sessions/'+encodeURIComponent(order.stripe_checkout_session_id)));
+          const existing=await viaStripe(()=>onExistingStripeObject(stripe,account=>account.request('GET','/v1/checkout/sessions/'+encodeURIComponent(order.stripe_checkout_session_id))));
           if(existing.status==='open'&&typeof existing.url==='string')return {url:existing.url};
           if(existing.status==='complete')deny(409,'CALDOCK_PAYMENT_IN_PROGRESS','Payment for this order is being confirmed; reload in a moment');
         }
@@ -197,9 +197,11 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
       return db.transaction(async tx=>{const row=(await tx.query('SELECT * FROM caldock_orders WHERE id=$1 AND customer_id=$2 FOR UPDATE',[id.parse(req.params.id),current.user.id])).rows[0];if(!row)deny(404,'NOT_FOUND','Order not found');if(row.version!==input.expectedVersion)deny(409,'VERSION_CONFLICT','Order changed; reload before continuing');if(input.action==='cancel_pending'&&row.status!=='pending_payment'||input.action==='stop_renewal'&&!['paid','provisioning','active'].includes(row.status))deny(409,'INVALID_ORDER_STATE','This order cannot perform the requested action');
         if(input.action==='cancel_pending'&&stripe&&row.stripe_checkout_session_id&&!isStaleTestSession(stripe,row.stripe_checkout_session_id)){
           // Close the hosted payment page first so a cancelled order cannot be paid afterwards.
-          const session=await viaStripe(()=>stripe.request('GET','/v1/checkout/sessions/'+encodeURIComponent(row.stripe_checkout_session_id)));
-          if(session.status==='complete')deny(409,'CALDOCK_PAYMENT_IN_PROGRESS','Payment for this order is being confirmed; reload in a moment');
-          if(session.status==='open')await viaStripe(()=>stripe.request('POST','/v1/checkout/sessions/'+encodeURIComponent(row.stripe_checkout_session_id)+'/expire'));
+          await viaStripe(()=>onExistingStripeObject(stripe,async account=>{
+            const session=await account.request('GET','/v1/checkout/sessions/'+encodeURIComponent(row.stripe_checkout_session_id));
+            if(session.status==='complete')deny(409,'CALDOCK_PAYMENT_IN_PROGRESS','Payment for this order is being confirmed; reload in a moment');
+            if(session.status==='open')await account.request('POST','/v1/checkout/sessions/'+encodeURIComponent(row.stripe_checkout_session_id)+'/expire');
+          }));
         }
         if(input.action==='stop_renewal')await stopStripeRenewal(row.stripe_subscription_id);
         const updated=(await tx.query("UPDATE caldock_orders SET status=CASE WHEN $2='cancel_pending' THEN 'cancelled' ELSE status END,renewal_enabled=false,version=version+1 WHERE id=$1 RETURNING *",[row.id,input.action])).rows[0];await caldockAudit(tx,current.user.id,'order.'+input.action,row.id);return updated;});
@@ -224,7 +226,7 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
         if(input.status==='active'&&stripe&&row.stripe_subscription_id&&!row.billed_from_payment){
           // Older orders bill from delivery: push the next automatic charge to the end of the delivered period.
           const next=Math.floor(new Date(row.billing_ends_at).getTime()/1000);
-          await viaStripe(()=>stripe.request('POST','/v1/subscriptions/'+encodeURIComponent(row.stripe_subscription_id),{trial_end:String(next),proration_behavior:'none'},'caldock-deliver-'+order.id));
+          await viaStripe(()=>onExistingStripeObject(stripe,account=>account.request('POST','/v1/subscriptions/'+encodeURIComponent(row.stripe_subscription_id),{trial_end:String(next),proration_behavior:'none'},'caldock-deliver-'+order.id)));
         }
         await caldockAudit(tx,current.user.id,'order.'+input.status,order.id);return row;});
     });
@@ -280,7 +282,7 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
     hooks.post('/caldock/stripe/webhook',async(req,reply)=>{
       reply.header('Cache-Control','no-store');
       let event:any;
-      try{event=verifyStripeEvent(req.body as Buffer,req.headers['stripe-signature'] as string|undefined,stripe.webhookSecret);}
+      try{event=verifyCaldockStripeEvent(stripe,req.body as Buffer,req.headers['stripe-signature'] as string|undefined);}
       catch{return reply.code(400).send({error:{code:'CALDOCK_WEBHOOK_INVALID'}});}
       if(event.livemode!==(stripe.mode==='live'))return reply.code(400).send({error:{code:'CALDOCK_WEBHOOK_MODE_MISMATCH'}});
       await handleStripeEvent(event);

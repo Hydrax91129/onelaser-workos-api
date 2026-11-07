@@ -6,7 +6,7 @@ import {buildApp} from '../src/app.js';
 import {createDatabase,schema,type Database} from '../src/db.js';
 import {caldockOptionsFromEnv} from '../src/caldock.js';
 import {type CaldockGateway,type CaldockProvider} from '../src/caldock-oidc.js';
-import {createCaldockStripe,signStripePayload,verifyStripeEvent,type StripeFetch} from '../src/caldock-stripe.js';
+import {createCaldockStripe,signStripePayload,stripeFromEnv,verifyStripeEvent,type StripeFetch} from '../src/caldock-stripe.js';
 
 let db:Database,dbAdmin:Database|undefined,isolated:string|undefined,app:Awaited<ReturnType<typeof buildApp>>;
 const origin='https://craftos.example.test',adminId=randomUUID(),webhookSecret='whsec_testsecret1234567890';
@@ -530,4 +530,56 @@ test('without Stripe configuration checkout is unavailable and the webhook does 
     assert.equal((await plain.inject('/caldock/capabilities')).json().payments,false);
     assert.equal((await plain.inject({method:'POST',url:'/caldock/stripe/webhook',payload:'{}',headers:{'content-type':'application/json'}})).statusCode,404);
   }finally{await plain.close();}
+});
+
+test('after a switch, the previous Stripe account still verifies its webhooks and manages its own subscriptions',async()=>{
+  const env={CALDOCK_STRIPE_SECRET_KEY:'sk_test_newAccount1234567890',CALDOCK_STRIPE_WEBHOOK_SECRET:'whsec_newAccount1234567890'};
+  assert.equal(stripeFromEnv(env)!.previous,undefined);
+  assert.throws(()=>stripeFromEnv({...env,CALDOCK_STRIPE_PREVIOUS_SECRET_KEY:'sk_test_oldAccount1234567890'}),/both/);
+  assert.throws(()=>stripeFromEnv({...env,CALDOCK_STRIPE_PREVIOUS_SECRET_KEY:'sk_live_oldAccount1234567890',CALDOCK_STRIPE_PREVIOUS_WEBHOOK_SECRET:'whsec_oldAccount1234567890',CALDOCK_STRIPE_ALLOW_LIVE:'true'}),/same mode/);
+  assert.throws(()=>stripeFromEnv({...env,CALDOCK_STRIPE_PREVIOUS_SECRET_KEY:env.CALDOCK_STRIPE_SECRET_KEY,CALDOCK_STRIPE_PREVIOUS_WEBHOOK_SECRET:'whsec_oldAccount1234567890'}),/differ/);
+  assert.equal(stripeFromEnv({...env,CALDOCK_STRIPE_PREVIOUS_SECRET_KEY:'sk_test_oldAccount1234567890',CALDOCK_STRIPE_PREVIOUS_WEBHOOK_SECRET:'whsec_oldAccount1234567890'})!.previous!.mode,'test');
+
+  const oldSecret='whsec_oldAccount1234567890',newSecret='whsec_newAccount1234567890';
+  const newCalls:string[]=[],oldCalls:{method:string;path:string;body:string}[]=[];
+  const missing={ok:false,status:404,json:async()=>({error:{code:'resource_missing'}})};
+  const newFetch:StripeFetch=async(url,init)=>{const u=new URL(url);newCalls.push(init.method+' '+u.pathname);
+    if(init.method==='POST'&&u.pathname==='/v1/checkout/sessions')return {ok:true,status:200,json:async()=>({id:'cs_test_new_1',url:'https://checkout.stripe.test/new',status:'open'})};
+    return missing;};
+  const oldFetch:StripeFetch=async(url,init)=>{const u=new URL(url);oldCalls.push({method:init.method,path:u.pathname,body:init.body||''});
+    assert.equal(init.headers.authorization,'Bearer sk_test_oldAccount1234567890');
+    if(u.pathname.startsWith('/v1/subscriptions/'))return {ok:true,status:200,json:async()=>({id:u.pathname.split('/').pop()})};
+    return missing;};
+  const previous=createCaldockStripe({secretKey:'sk_test_oldAccount1234567890',webhookSecret:oldSecret,fetch:oldFetch,apiBase:'https://api.stripe.test'});
+  const current={...createCaldockStripe({secretKey:'sk_test_newAccount1234567890',webhookSecret:newSecret,fetch:newFetch,apiBase:'https://api.stripe.test'}),previous};
+  const dual=await buildApp({db,environment:'production',closeDatabase:false,mailer:null,caldock:{publicUrl:origin,providers:gateways,adminUserIds:[adminId],stripe:current}});
+  try{
+    const start=await dual.inject('/caldock/auth/google/start?next=account&lang=zh&interval=month');
+    const state=new URL(start.headers.location!).searchParams.get('state')!,flow=cookieList(start).map(c=>c.split(';')[0]).join('; ');
+    const back=await dual.inject({url:`/caldock/auth/google/callback?state=${state}&code=dual-account`,headers:{cookie:flow}});
+    const cookie=cookieList(back).find(c=>c.startsWith('__Host-caldock_session='))!.split(';')[0];
+    const csrf=(await dual.inject({url:'/caldock/me',headers:{cookie}})).json().csrfToken,headers={cookie,origin,'x-csrf-token':csrf};
+    const hook=(event:Record<string,unknown>,secret:string)=>{const payload=JSON.stringify({livemode:false,...event});return dual.inject({method:'POST',url:'/caldock/stripe/webhook',payload,headers:{'content-type':'application/json','stripe-signature':signStripePayload(payload,secret)}});};
+    // An order paid on the previous account: its webhook still verifies, and an unknown signer does not.
+    const placed=await dual.inject({method:'POST',url:'/caldock/orders',payload:{interval:'month',requestKey:randomUUID()},headers});
+    assert.equal(placed.statusCode,201,placed.body);const legacy=placed.json().id as string;
+    const paid=completed(legacy,'cs_old_1',16900);
+    assert.equal((await hook(paid,'whsec_strangerSecret123456')).statusCode,400);
+    assert.equal((await hook(paid,oldSecret)).statusCode,200);
+    const row=(await db.query('SELECT status,version,stripe_subscription_id FROM caldock_orders WHERE id=$1',[legacy])).rows[0];
+    assert.equal(row.status,'paid');
+    // New payment pages always open on the current account.
+    const made=await dual.inject({method:'POST',url:'/caldock/orders',payload:{interval:'month',requestKey:randomUUID()},headers});
+    assert.equal(made.statusCode,201,made.body);const fresh=made.json().id as string;
+    assert.equal((await dual.inject({method:'POST',url:`/caldock/orders/${fresh}/checkout`,payload:{lang:'zh'},headers})).json().url,'https://checkout.stripe.test/new');
+    assert(newCalls.includes('POST /v1/checkout/sessions'));assert(!oldCalls.some(c=>c.path==='/v1/checkout/sessions'));
+    // Stopping renewal: the current account does not know this subscription, so the previous one is asked.
+    const stop=await dual.inject({method:'PATCH',url:`/caldock/orders/${legacy}`,payload:{action:'stop_renewal',expectedVersion:row.version},headers});
+    assert.equal(stop.statusCode,200);assert.equal(stop.json().renewal_enabled,false);
+    assert(newCalls.includes('POST /v1/subscriptions/'+row.stripe_subscription_id));
+    const asked=oldCalls.find(c=>c.path==='/v1/subscriptions/'+row.stripe_subscription_id);assert(asked);assert.match(asked.body,/cancel_at_period_end=true/);
+    // Renewals billed on the previous account keep arriving.
+    assert.equal((await hook({id:'evt_'+randomUUID(),type:'customer.subscription.deleted',data:{object:{id:row.stripe_subscription_id,object:'subscription',metadata:{caldock_order_id:legacy}}}},oldSecret)).statusCode,200);
+    assert.equal((await hook(completed(fresh,'cs_test_new_1',16900),newSecret)).statusCode,200);
+  }finally{await db.query("UPDATE caldock_orders SET paid_at='2026-01-01' WHERE paid_at IS NOT NULL");await dual.close();}
 });
