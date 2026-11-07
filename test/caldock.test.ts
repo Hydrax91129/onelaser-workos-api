@@ -188,3 +188,17 @@ test('answers saved on an order before the move are copied to the account once',
  await db.exec(caldockSchema);
  assert.equal((await send(legacy,'GET','/me')).json().user.profile_answers.card,'yes');
 });
+test('admins see one customer in full; customers cannot',async()=>{
+ const code=(await send(affiliate,'GET','/affiliate')).json().affiliate.code;
+ const customer=await login('detail-customer','apple',code,'year');
+ await send(customer,'PATCH','/profile/answers',{source:'friend',sourceNote:'Alice',wechat:'detail_wx'});
+ const row=(await send(customer,'POST','/orders',{interval:'year',requestKey:randomUUID()})).json();
+ assert.equal((await send(customer,'GET','/admin/customers/'+customer.user.id)).statusCode,403);
+ assert.equal((await send(owner,'GET','/admin/customers/'+randomUUID())).statusCode,404);
+ const detail=await send(owner,'GET','/admin/customers/'+customer.user.id);assert.equal(detail.statusCode,200,detail.body);
+ const d=detail.json();
+ assert.equal(d.user.email,'detail-customer@example.test');assert.deepEqual(d.signInMethods,['apple']);assert.ok(d.lastSignIn);
+ assert.equal(d.user.profile_answers.wechat,'detail_wx');assert.equal(d.referredBy.code,code);
+ assert.equal(d.orders[0].id,row.id);assert.equal(d.paidCents,0);assert.equal(d.affiliate,null);
+ const partner=(await send(owner,'GET','/admin/customers/'+affiliate.user.id)).json();assert.equal(partner.affiliate.code,code);assert.ok(partner.affiliate.registrations>=1);
+});
