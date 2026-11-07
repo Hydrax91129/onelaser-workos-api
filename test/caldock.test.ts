@@ -160,19 +160,31 @@ test('half-yearly login, authoritative upfront price, referral commission and si
 test('logout revokes the server session and clears the cookie',async()=>{
  assert.equal((await send(other,'DELETE','/session')).statusCode,200);assert.equal((await send(other,'GET','/me')).statusCode,401);
 });
-test('setup answers are optional, editable by the customer and admins, and private to the customer',async()=>{
- const customer=await login('setup-answers-customer','google',undefined,'month'),stranger=await login('setup-answers-stranger');
+test('profile answers are optional, validated, editable by the customer and visible to admins only',async()=>{
+ const customer=await login('profile-answers-customer','google',undefined,'month');
+ assert.deepEqual(customer.user.profile_answers,{});
+ assert.equal((await send(customer,'PATCH','/profile/answers',{appleId:'maybe'})).statusCode,400);
+ assert.equal((await send(customer,'PATCH','/profile/answers',{password:'x'})).statusCode,400);
+ assert.equal((await send(customer,'PATCH','/profile/answers',{source:'friend',sourceDetail:'chatgpt'})).statusCode,400);
+ assert.equal((await send(customer,'PATCH','/profile/answers',{uses:['coding','coding']})).statusCode,400);
+ const saved=await send(customer,'PATCH','/profile/answers',{appleId:'yes',source:'social',sourceDetail:'xiaohongshu',sourceNote:'  a post  ',uses:['coding','content'],wechat:'wodemac_test'});assert.equal(saved.statusCode,200,saved.body);
+ const expected={appleId:'yes',email:null,card:null,source:'social',sourceDetail:'xiaohongshu',sourceNote:'a post',uses:['coding','content'],teamSize:null,wechat:'wodemac_test'};
+ assert.deepEqual(saved.json().profile_answers,expected);
+ assert.deepEqual((await send(customer,'GET','/me')).json().user.profile_answers,expected);
  const row=(await send(customer,'POST','/orders',{interval:'month',requestKey:randomUUID()})).json();
- assert.deepEqual(row.setup_answers,{});
- assert.equal((await send(customer,'PATCH','/orders/'+row.id+'/setup',{email:'maybe'})).statusCode,400);
- assert.equal((await send(customer,'PATCH','/orders/'+row.id+'/setup',{email:'yes',password:'x'})).statusCode,400);
- const saved=await send(customer,'PATCH','/orders/'+row.id+'/setup',{appleId:'yes',email:'no'});assert.equal(saved.statusCode,200,saved.body);
- assert.deepEqual(saved.json().setup_answers,{appleId:'yes',email:'no',card:null});assert.equal(saved.json().version,row.version);
- assert.equal((await send(stranger,'PATCH','/orders/'+row.id+'/setup',{card:'yes'})).statusCode,404);
- assert.equal((await send(customer,'PATCH','/admin/orders/'+row.id+'/setup',{card:'yes'})).statusCode,403);
- const edited=await send(owner,'PATCH','/admin/orders/'+row.id+'/setup',{appleId:'yes',email:'yes',card:'no'});assert.equal(edited.statusCode,200,edited.body);
- assert.deepEqual((await send(customer,'GET','/orders/'+row.id)).json().setup_answers,{appleId:'yes',email:'yes',card:'no'});
- assert.deepEqual((await send(owner,'GET','/admin/orders?search='+row.id)).json().items[0].setup_answers,{appleId:'yes',email:'yes',card:'no'});
- assert.equal((await send(customer,'PATCH','/orders/'+row.id,{action:'cancel_pending',expectedVersion:row.version})).statusCode,200);
- assert.equal((await send(customer,'PATCH','/orders/'+row.id+'/setup',{card:'yes'})).statusCode,409);
+ assert.deepEqual((await send(owner,'GET','/admin/orders?search='+row.id)).json().items[0].customer_answers,expected);
+ assert.deepEqual((await send(owner,'GET','/admin/customers')).json().items.find((u:any)=>u.id===customer.user.id).profile_answers,expected);
+ assert.equal((await send(customer,'GET','/admin/customers')).statusCode,403);
+ const audit=(await db.query("SELECT details FROM caldock_audit WHERE action='profile.answers' AND object_id=$1",[customer.user.id])).rows[0];assert.ok(!JSON.stringify(audit.details).includes('wodemac_test'));
+ const cleared=await send(customer,'PATCH','/profile/answers',{});assert.equal(cleared.statusCode,200);assert.equal(cleared.json().profile_answers.source,null);
+});
+test('answers saved on an order before the move are copied to the account once',async()=>{
+ const legacy=await login('order-answers-legacy');
+ const row=(await send(legacy,'POST','/orders',{interval:'month',requestKey:randomUUID()})).json();
+ await db.query(`UPDATE caldock_orders SET setup_answers='{"appleId":"yes","email":null,"card":"no"}',setup_updated_at=now() WHERE id=$1`,[row.id]);
+ await db.exec(caldockSchema);await db.exec(caldockSchema);
+ assert.deepEqual((await send(legacy,'GET','/me')).json().user.profile_answers,{appleId:'yes',email:null,card:'no'});
+ assert.equal((await send(legacy,'PATCH','/profile/answers',{card:'yes'})).statusCode,200);
+ await db.exec(caldockSchema);
+ assert.equal((await send(legacy,'GET','/me')).json().user.profile_answers.card,'yes');
 });
