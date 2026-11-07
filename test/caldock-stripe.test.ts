@@ -101,7 +101,7 @@ test('checkout uses the server price, reuses one open page, and only a signed ev
   assert.equal(created.params.get('line_items[0][price_data][recurring][interval_count]'),'3');
   assert.equal(created.params.get('metadata[caldock_order_id]'),order.id);
   assert.equal(created.params.get('customer_email'),'stripe-buyer@example.test');
-  assert.match(created.params.get('success_url')!,/^https:\/\/craftos\.example\.test\/caldock\/\?view=orders&lang=en&interval=quarter&checkout=success$/);
+  assert.match(created.params.get('success_url')!,/^https:\/\/craftos\.example\.test\/caldock\/\?view=orders&lang=en&interval=quarter&checkout=success&order=[0-9a-f-]{36}$/);
   const again=await send(buyer,'POST',`/orders/${order.id}/checkout`,{lang:'en'});
   assert.equal(again.json().url,first.json().url);
   assert.equal(calls.filter(c=>c.method==='POST'&&c.path==='/v1/checkout/sessions').length,1);

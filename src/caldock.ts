@@ -165,7 +165,7 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
         const recurring=STRIPE_RECURRING[order.interval as 'week'|'month'|'quarter'|'half'|'year'];
         const params:Record<string,string>={
           mode:'subscription',client_reference_id:order.id,locale:input.lang==='en'?'en':'zh',
-          success_url:back('orders','success'),cancel_url:back('checkout','cancelled'),
+          success_url:back('orders','success')+'&order='+encodeURIComponent(order.id),cancel_url:back('checkout','cancelled'),
           'line_items[0][quantity]':String(order.quantity),'line_items[0][price_data][currency]':'usd',
           // Server-owned price snapshot from the order, never a client amount.
           'line_items[0][price_data][unit_amount]':String(amounts.unit),
@@ -200,6 +200,11 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
         if(input.action==='stop_renewal')await stopStripeRenewal(row.stripe_subscription_id);
         const updated=(await tx.query("UPDATE caldock_orders SET status=CASE WHEN $2='cancel_pending' THEN 'cancelled' ELSE status END,renewal_enabled=false,version=version+1 WHERE id=$1 RETURNING *",[row.id,input.action])).rows[0];await caldockAudit(tx,current.user.id,'order.'+input.action,row.id);return updated;});
     });
+    // Setup answers: optional, editable by the customer and by admins, and kept apart from the order version.
+    const setupAnswer=z.enum(['yes','no']).nullable().default(null),setupInput=z.object({appleId:setupAnswer,email:setupAnswer,card:setupAnswer}).strict();
+    const saveSetup=(orderId:string,customerId:string|null,actorId:string,answers:z.infer<typeof setupInput>)=>db.transaction(async tx=>{const row=(await tx.query('SELECT id,status FROM caldock_orders WHERE id=$1 AND ($2::text IS NULL OR customer_id=$2) FOR UPDATE',[orderId,customerId])).rows[0];if(!row)deny(404,'NOT_FOUND','Order not found');if(['cancelled','refunded'].includes(row.status))deny(409,'INVALID_ORDER_STATE','This order cannot perform the requested action');const updated=(await tx.query('UPDATE caldock_orders SET setup_answers=$2::jsonb,setup_updated_at=now() WHERE id=$1 RETURNING *',[row.id,JSON.stringify(answers)])).rows[0];await caldockAudit(tx,actorId,'order.setup_answers',row.id,answers);return updated;});
+    routes.patch<{Params:{id:string}}>('/orders/:id/setup',async req=>{const current=actor(req);return saveSetup(id.parse(req.params.id),current.user.id,current.user.id,setupInput.parse(req.body));});
+    routes.patch<{Params:{id:string}}>('/admin/orders/:id/setup',async req=>{const current=admin(req);return saveSetup(id.parse(req.params.id),null,current.user.id,setupInput.parse(req.body));});
     routes.post('/affiliate',async req=>{const current=actor(req);await db.query('INSERT INTO caldock_affiliates(user_id,code) VALUES($1,$2) ON CONFLICT(user_id) DO NOTHING',[current.user.id,randomBytes(6).toString('hex').toUpperCase()]);return {joined:true};});
     routes.get('/affiliate',async req=>{
       const current=actor(req),affiliate=(await db.query('SELECT * FROM caldock_affiliates WHERE user_id=$1',[current.user.id])).rows[0];
