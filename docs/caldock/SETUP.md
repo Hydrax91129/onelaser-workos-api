@@ -62,6 +62,12 @@ Activation (the Stripe account owner or an operator with Render access; never pa
 
 Live money needs a separate decision: replace both values with live-mode ones **and** set `CALDOCK_STRIPE_ALLOW_LIVE=true`. A live key without that switch, or any malformed value, disables CalDock payments only (logged at startup); Work OS keeps running.
 
+Switching to another Stripe account (subscriptions already paid on the old one keep working):
+1. In the new account, repeat steps 1–2 (same webhook URL and events) and put its key and signing secret in `CALDOCK_STRIPE_SECRET_KEY` / `CALDOCK_STRIPE_WEBHOOK_SECRET`.
+2. Move the old account's two values to `CALDOCK_STRIPE_PREVIOUS_SECRET_KEY` / `CALDOCK_STRIPE_PREVIOUS_WEBHOOK_SECRET`, and leave the old account's webhook endpoint in place.
+3. New payment pages always open on the new account. Webhooks are accepted when signed by either account. Stopping renewal, delivery and closing a payment page try the new account first and, on "not found", the old one.
+4. Both accounts must be in the same mode; a half-set or mismatched previous account disables CalDock payments (logged at startup). Remove both `PREVIOUS` values once the old account has no live subscriptions.
+
 Behaviour:
 - `POST /caldock/orders/:id/checkout` (signed-in owner, Origin + CSRF) returns one hosted Checkout URL per pending order and reuses it while open. The frontend only navigates to `https://checkout.stripe.com`.
 - The webhook verifies the v1 signature over raw bytes (5-minute tolerance) and rejects test/live mismatches. Duplicate deliveries are harmless. Deterministic rejections (amount or state mismatch) are written to `caldock_audit` as `payment.rejected` for manual refund review instead of being retried forever.

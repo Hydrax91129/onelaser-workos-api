@@ -7,6 +7,9 @@ export type StripeFetch = (url:string,init:{method:string;headers:Record<string,
 export type CaldockStripe = {
   mode:'test'|'live';
   webhookSecret:string;
+  // The account payments used before a switch: its webhooks still verify and its existing
+  // checkout sessions and subscriptions are still managed there. New payment pages never use it.
+  previous?:CaldockStripe;
   request(method:'GET'|'POST'|'DELETE',path:string,params?:Record<string,string>,idempotencyKey?:string):Promise<any>;
 };
 export class StripeRequestError extends Error {
@@ -50,7 +53,31 @@ export const isStaleTestSession=(stripe:Pick<CaldockStripe,'mode'>,sessionId:str
 
 export function stripeFromEnv(env:NodeJS.ProcessEnv):CaldockStripe|undefined {
   if(!env.CALDOCK_STRIPE_SECRET_KEY||!env.CALDOCK_STRIPE_WEBHOOK_SECRET)return undefined;
-  return createCaldockStripe({secretKey:env.CALDOCK_STRIPE_SECRET_KEY.trim(),webhookSecret:env.CALDOCK_STRIPE_WEBHOOK_SECRET.trim(),allowLive:env.CALDOCK_STRIPE_ALLOW_LIVE==='true'});
+  const allowLive=env.CALDOCK_STRIPE_ALLOW_LIVE==='true';
+  const stripe=createCaldockStripe({secretKey:env.CALDOCK_STRIPE_SECRET_KEY.trim(),webhookSecret:env.CALDOCK_STRIPE_WEBHOOK_SECRET.trim(),allowLive});
+  const previousKey=env.CALDOCK_STRIPE_PREVIOUS_SECRET_KEY?.trim(),previousSecret=env.CALDOCK_STRIPE_PREVIOUS_WEBHOOK_SECRET?.trim();
+  if(!previousKey&&!previousSecret)return stripe;
+  if(!previousKey||!previousSecret)throw new Error('The previous Stripe account needs both CALDOCK_STRIPE_PREVIOUS_SECRET_KEY and CALDOCK_STRIPE_PREVIOUS_WEBHOOK_SECRET');
+  const previous=createCaldockStripe({secretKey:previousKey,webhookSecret:previousSecret,allowLive});
+  if(previous.mode!==stripe.mode)throw new Error('The previous Stripe account must be in the same mode (test or live) as the current one');
+  if(previousKey===env.CALDOCK_STRIPE_SECRET_KEY.trim())throw new Error('The previous Stripe account must differ from the current one');
+  return {...stripe,previous};
+}
+
+// For an object that already exists (a checkout session or subscription): it may belong to the
+// previous account, so a "not found" from the current account is retried there once.
+export async function onExistingStripeObject<T>(stripe:CaldockStripe,call:(account:CaldockStripe)=>Promise<T>):Promise<T> {
+  try{return await call(stripe);}
+  catch(error){
+    if(stripe.previous&&error instanceof StripeRequestError&&error.status===404)return call(stripe.previous);
+    throw error;
+  }
+}
+
+// Verifies against the current account's signing secret, then the previous account's.
+export function verifyCaldockStripeEvent(stripe:CaldockStripe,payload:Buffer,header:string|undefined):any {
+  try{return verifyStripeEvent(payload,header,stripe.webhookSecret);}
+  catch(error){if(!stripe.previous)throw error;return verifyStripeEvent(payload,header,stripe.previous.webhookSecret);}
 }
 
 // Returns the parsed event only when a v1 signature over the exact raw bytes is valid and fresh.
