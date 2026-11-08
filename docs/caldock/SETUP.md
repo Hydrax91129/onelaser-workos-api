@@ -55,7 +55,7 @@ CalDock uses Stripe Checkout subscriptions: monthly $199, quarterly $507 every 3
 
 Activation (the Stripe account owner or an operator with Render access; never paste keys into GitHub, chat or the frontend):
 
-1. In Stripe **test mode**, Developers → API keys: create a **restricted key** with write access to Checkout Sessions and Subscriptions and read access to Customers and Invoices (a standard `sk_test_` key also works).
+1. In Stripe **test mode**, Developers → API keys: create a **restricted key** with write access to Checkout Sessions, Subscriptions and Coupons (5+ yearly Macs get a fixed coupon) and read access to Customers and Invoices (a standard `sk_test_` key also works).
 2. Developers → Webhooks → Add endpoint: `https://craftos.app/api/caldock/stripe/webhook`. Events: `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `invoice.paid`, `invoice.payment_failed`, `customer.subscription.updated`, `customer.subscription.deleted`, `charge.refunded`. Copy its signing secret (`whsec_…`).
 3. Render private environment variables: `CALDOCK_STRIPE_SECRET_KEY` and `CALDOCK_STRIPE_WEBHOOK_SECRET`, then redeploy.
 4. Check `https://craftos.app/api/caldock/capabilities`: `"payments":true,"paymentMode":"test"`.

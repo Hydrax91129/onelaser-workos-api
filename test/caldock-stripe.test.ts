@@ -578,6 +578,12 @@ test('after a switch, the previous Stripe account still verifies its webhooks an
     assert.equal(stop.statusCode,200);assert.equal(stop.json().renewal_enabled,false);
     assert(newCalls.includes('POST /v1/subscriptions/'+row.stripe_subscription_id));
     const asked=oldCalls.find(c=>c.path==='/v1/subscriptions/'+row.stripe_subscription_id);assert(asked);assert.match(asked.body,/cancel_at_period_end=true/);
+    // A full refund made on the previous account cancels the subscription there.
+    await db.query("UPDATE caldock_orders SET status='paid' WHERE id=$1",[legacy]);
+    const customer=(await db.query('SELECT stripe_customer_id FROM caldock_orders WHERE id=$1',[legacy])).rows[0].stripe_customer_id;
+    assert.equal((await hook({id:'evt_'+randomUUID(),type:'charge.refunded',data:{object:{id:'ch_old_1',object:'charge',refunded:true,customer,amount:16900,currency:'usd'}}},oldSecret)).statusCode,200);
+    assert(oldCalls.some(c=>c.method==='DELETE'&&c.path==='/v1/subscriptions/'+row.stripe_subscription_id));
+    assert.equal((await db.query("SELECT count(*)::int AS n FROM caldock_audit WHERE action='payment.cancel_failed' AND object_id=$1",[legacy])).rows[0].n,0);
     // Renewals billed on the previous account keep arriving.
     assert.equal((await hook({id:'evt_'+randomUUID(),type:'customer.subscription.deleted',data:{object:{id:row.stripe_subscription_id,object:'subscription',metadata:{caldock_order_id:legacy}}}},oldSecret)).statusCode,200);
     assert.equal((await hook(completed(fresh,'cs_test_new_1',16900),newSecret)).statusCode,200);
