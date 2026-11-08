@@ -348,7 +348,7 @@ export async function registerCaldockRoutes(app:FastifyInstance,db:Database,opti
       if(!order)return;
       // A full refund ends the rental: cancel the subscription now so no further charge is attempted.
       const subscription=(await db.query('SELECT stripe_subscription_id FROM caldock_orders WHERE id=$1',[order.id])).rows[0]?.stripe_subscription_id;
-      if(subscription)await stripe!.request('DELETE','/v1/subscriptions/'+encodeURIComponent(subscription)).catch(()=>caldockAudit(db,null,'payment.cancel_failed',order.id,{subscription}));
+      if(subscription)await onExistingStripeObject(stripe!,account=>account.request('DELETE','/v1/subscriptions/'+encodeURIComponent(subscription))).catch(()=>caldockAudit(db,null,'payment.cancel_failed',order.id,{subscription}));
       await record({orderId:order.id,type:'refunded',eventId:'stripe_ch:'+object.id,amountCents:Number(object.amount),currency:String(object.currency||'').toUpperCase()});
       return;
     }
