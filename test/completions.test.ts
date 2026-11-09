@@ -88,6 +88,10 @@ test('attachments: allowed types only, size-checked, scoped to visible tasks, do
   assert.equal((await call('m2','POST',`/tasks/${t.id}/attachments`,{name:'x.html',mime:'text/html',dataBase64:Buffer.from('<script>').toString('base64')})).statusCode,400);
   assert.equal((await call('m4','POST',`/tasks/${t.id}/attachments`,{name:'a.png',mime:'image/png',dataBase64:'AAAA'})).statusCode,404);
   const dl=await call('m2','GET',`/tasks/${t.id}/attachments/${ok.json().id}`);assert.equal(dl.statusCode,200);assert.equal(dl.headers['x-content-type-options'],'nosniff');assert.equal(dl.body,'fake-png-bytes');
+  assert.match(dl.headers['content-security-policy'] as string,/sandbox/,'non-PDF files stay sandboxed');
+  const pdf=await call('m2','POST',`/tasks/${t.id}/attachments`,{name:'示例.pdf',mime:'application/pdf',dataBase64:Buffer.from('%PDF-1.4 fictional').toString('base64')});assert.equal(pdf.statusCode,201,pdf.body);
+  const pdfDl=await call('m2','GET',`/tasks/${t.id}/attachments/${pdf.json().id}`);const csp=String(pdfDl.headers['content-security-policy']);
+  assert.doesNotMatch(csp,/sandbox/,'Chrome refuses to show a sandboxed PDF');assert.doesNotMatch(csp,/script-src/);assert.match(csp,/frame-ancestors 'self'/);assert.match(String(pdfDl.headers['content-disposition']),/^inline/);
   const done=await call('m2','POST',`/tasks/${t.id}/complete`,{expectedVersion:t.version,result:'Uploaded the screenshot of the fictional result as evidence.',selfReview:'Evidence attached.',attachmentIds:[ok.json().id]});assert.equal(done.statusCode,201,done.body);
   assert.equal((await call('m2','POST',`/tasks/${(await create()).id}/complete`,{expectedVersion:1,result:'Referencing an attachment from a different task is not allowed.',selfReview:'Should fail.',attachmentIds:[ok.json().id]})).statusCode,400);
 });

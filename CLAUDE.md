@@ -70,6 +70,9 @@
 - 后端所有报错文案都要在 i18n.ts 里有中文（有测试检查）。
 - 上传文件统一用前端的 `dist/upload-zone.js`（`window.WorkOSUpload`）：一个框同时支持粘贴、拖拽、点击选择和“上传”按钮，
   只负责收文件和检查类型、大小，存储和权限仍由各模块自己的接口负责。新功能不要再自己写一套上传。
+- 打开附件统一用 `dist/file-preview.js`（`window.WorkOSPreview.open`）：PDF、图片、文本、视频直接预览，Word / Excel 等给下载按钮。
+  指向文件接口的普通 `<a href>` 会自动用它打开。新增返回文件的接口时，要同时加进 file-preview.js 的 `FILE_PATH`
+  和后端 `deploy/Caddyfile` 的 `@stored_file`（只允许 WorkOS 自己嵌入预览）；PDF 不能带 CSP `sandbox`，否则 Chrome 会拦截。
 - 版本号：在 dist/changelog.js 的 RELEASES 最前面加一条，号码 = 当前最新版本 + 0.1，date 要晚于上一版。
 - 只用虚构的示例数据写测试和种子数据。
 - **发布前预览**：后端仓库 `npm run preview`（tools/preview-local.ts）在 http://localhost:4174 起一个完整的 WorkOS，前端取自旁边的
