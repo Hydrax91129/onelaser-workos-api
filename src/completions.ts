@@ -35,6 +35,8 @@ export const REVIEW_TIMEOUT_MS = 3 * 86400000;
 export const needsReview = (t: any) => !!t && t.reviewer_id !== t.owner_id && (t.assigned_by || t.created_by) !== t.owner_id;
 /** A person may score a completion within this window; after it the AI scores unscored completions. */
 export const HUMAN_SCORE_WINDOW_MS = 24 * 3600000;
+/* A person's score below this sends the task back: it no longer counts as done until the owner completes it again. */
+export const LOW_SCORE = 5;
 /** Automatic AI attempts per completion before the job leaves it for a manual retry. */
 const AUTO_SCORE_MAX_ATTEMPTS = 5;
 
@@ -58,6 +60,16 @@ ALTER TABLE task_completions DROP CONSTRAINT IF EXISTS task_completions_human_sc
 ALTER TABLE task_completions ADD CONSTRAINT task_completions_human_score_0_10 CHECK(human_score IS NULL OR human_score BETWEEN 0 AND 10);
 CREATE INDEX IF NOT EXISTS task_completion_unscored_idx ON task_completions(created_at) WHERE superseded_at IS NULL AND human_score IS NULL AND ai_status<>'scored';
 CREATE INDEX IF NOT EXISTS task_completion_task_idx ON task_completions(task_id,created_at DESC);
+-- One-time change (marker): finishing a task now counts as done right away, so tasks that were waiting for a
+-- reviewer become done, with their submitted version as the completion; a person can still score it for 24 hours.
+CREATE TABLE IF NOT EXISTS task_data_migrations (id text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());
+WITH applied AS (INSERT INTO task_data_migrations(id) VALUES('submitted-counts-as-done') ON CONFLICT DO NOTHING RETURNING id),
+ due AS (SELECT t.id,t.org_id,t.owner_id,s.description,s.evidence_url,s.attachment_ids FROM tasks t JOIN submissions s ON s.task_id=t.id AND s.version=t.submission_version
+   WHERE t.status='submitted' AND t.archived_at IS NULL AND EXISTS (SELECT 1 FROM applied)),
+ old AS (UPDATE task_completions c SET superseded_at=now() FROM due WHERE c.task_id=due.id AND c.superseded_at IS NULL RETURNING c.id),
+ added AS (INSERT INTO task_completions(id,org_id,task_id,result,self_review,attachment_ids,completed_by)
+   SELECT gen_random_uuid()::text,org_id,id,concat_ws(E'\n',description,evidence_url),'',to_jsonb(attachment_ids),owner_id FROM due RETURNING task_id)
+UPDATE tasks SET status='accepted',board_status='done',board_done_at=now(),version=version+1,updated_at=now() WHERE id IN (SELECT id FROM due);
 CREATE TABLE IF NOT EXISTS task_attachments (
  id text PRIMARY KEY, org_id text NOT NULL, task_id text NOT NULL REFERENCES tasks(id), uploader_id text NOT NULL REFERENCES users(id),
  name text NOT NULL, mime text NOT NULL, size integer NOT NULL, data bytea NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
@@ -211,14 +223,15 @@ export async function registerCompletionRoutes(app: FastifyInstance, db: Databas
       const task = (await tx.query('SELECT * FROM tasks WHERE id=$1 FOR UPDATE', [taskId])).rows[0];
       if (!visibleTask(user, task)) deny(404, 'NOT_FOUND', 'Task not found');
       if (task.owner_id !== user.id && task.reviewer_id !== user.id) deny(403, 'FORBIDDEN', 'Only the owner or reviewer can complete this task');
-      if (needsReview(task)) deny(409, 'REVIEW_REQUIRED', 'Someone else gave you this task: submit a deliverable version, and it counts as done once the reviewer accepts it');
       if (task.version !== input.expectedVersion) deny(409, 'VERSION_CONFLICT', 'Task changed; reload before saving');
       if (task.board_status === 'done' && task.board_done_at && Date.now() - new Date(task.board_done_at).getTime() >= COMPLETION_LOCK_MS) deny(409, 'COMPLETION_LOCKED', 'This task was completed more than 3 days ago; its result is locked');
       const atts = input.attachmentIds.length ? (await tx.query('SELECT id,name FROM task_attachments WHERE task_id=$1 AND id=ANY($2::text[])', [taskId, input.attachmentIds])).rows : [];
       if (atts.length !== input.attachmentIds.length) deny(400, 'INVALID_ATTACHMENT', 'Attach files to this task before referencing them');
       await tx.query('UPDATE task_completions SET superseded_at=now() WHERE task_id=$1 AND superseded_at IS NULL', [taskId]);
       const completion = (await tx.query('INSERT INTO task_completions(id,org_id,task_id,result,self_review,attachment_ids,completed_by) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *', [randomUUID(), task.org_id, taskId, input.result, input.selfReview, JSON.stringify(input.attachmentIds), user.id])).rows[0];
-      const next = (await tx.query("UPDATE tasks SET board_status='done',board_done_at=now(),version=version+1,updated_at=now(),updated_by=$2 WHERE id=$1 RETURNING *", [taskId, user.id])).rows[0];
+      // Finishing counts as done right away, also for work someone else gave you; scoring is optional and comes after.
+      const next = (await tx.query(`UPDATE tasks SET board_status='done',board_done_at=now(),version=version+1,updated_at=now(),updated_by=$2,
+        status=CASE WHEN $3 THEN 'accepted' WHEN status='revision' THEN 'planned' ELSE status END WHERE id=$1 RETURNING *`, [taskId, user.id, needsReview(task)])).rows[0];
       await tx.query('INSERT INTO audit_events(id,org_id,department_id,owner_id,actor_id,action,object_id,details) VALUES($1,$2,$3,$4,$5,$6,$7,$8)', [randomUUID(), task.org_id, task.department_id, task.owner_id, user.id, 'task.completed', taskId, JSON.stringify({ completionId: completion.id, attachments: atts.length })]);
       await pushInbox(tx, { orgId: task.org_id, recipients: taskFollowers(task), actorId: user.id, kind: 'completion', taskId, title: task.title, body: input.result });
       return { task: next, completion, names: atts.map((a: any) => a.name) };
@@ -260,7 +273,8 @@ export async function registerCompletionRoutes(app: FastifyInstance, db: Databas
   });
 
   /* Human score: a 0–10 score by the reviewer, assigner, the owner's manager or an administrator. It is the
-     final score; it can be given until the AI has scored (normally the first 24 hours) and never changes. */
+     final score; it can be given until the AI has scored (normally the first 24 hours) and never changes.
+     Below LOW_SCORE (5) the task goes back to not done (status 'revision'), and the owner completes it again. */
   app.post<{ Params: { id: string } }>('/tasks/:id/completion/score', async req => {
     const user=actorOf(req), taskId=id.parse(req.params.id), v=humanScoreInput.parse(req.body);
     await db.transaction(async tx=>{
@@ -274,7 +288,12 @@ export async function registerCompletionRoutes(app: FastifyInstance, db: Databas
       if(c.human_score!=null||c.ai_status==='scored')deny(409,'SCORE_FINAL','This completion already has a final score');
       await tx.query('UPDATE task_completions SET human_score=$2,human_scored_by=$3,human_scored_at=now(),human_note=$4 WHERE id=$1',[c.id,v.score,user.id,v.note||null]);
       await recordAttempt(tx,task,user.id,'task.completion_human_scored',{completionId:c.id,score:v.score});
-      await pushInbox(tx,{orgId:task.org_id,recipients:[task.owner_id],actorId:user.id,kind:'completion_scored',taskId,title:task.title,body:`${v.score}/10${v.note?' · '+v.note:''}`});
+      if(v.score<LOW_SCORE){
+        // Below 5: the task is not done any more; the owner fixes it and completes it again (a new completion, scored again).
+        await tx.query("UPDATE tasks SET status='revision',board_status='working',board_done_at=NULL,version=version+1,updated_at=now(),updated_by=$2 WHERE id=$1",[taskId,user.id]);
+        await recordAttempt(tx,task,user.id,'task.sent_back_low_score',{completionId:c.id,score:v.score});
+        await pushInbox(tx,{orgId:task.org_id,recipients:[task.owner_id],actorId:user.id,kind:'review_revise',taskId,title:task.title,body:`${v.score}/10，低于 ${LOW_SCORE} 分，任务退回未完成${v.note?' · '+v.note:''}`});
+      } else await pushInbox(tx,{orgId:task.org_id,recipients:[task.owner_id],actorId:user.id,kind:'completion_scored',taskId,title:task.title,body:`${v.score}/10${v.note?' · '+v.note:''}`});
     });
     return {completion:await latestCompletion(db,taskId)};
   });
