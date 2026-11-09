@@ -11,7 +11,7 @@
  * cases; the assigned technician can update diagnosis, photos and mark the repair done; prices are set
  * by company admins and people with the MSRP pricing grant. Registration also records what the item is (machine, accessory,
  * material, other; machines need a serial), whether it can be repaired and the suggested refurbished discount. A return SKU
- * starting with RE- that is not in the item list yet is added to WMS (ensureReturnItem); other SKUs must already exist. */
+ * starting with REF- that is not in the item list yet is added to WMS (ensureReturnItem); other SKUs must already exist. */
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
@@ -133,8 +133,8 @@ export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: {
     if (v.productClass === 'machine' && !v.serial) deny(400, 'RMA_SERIAL_REQUIRED', 'A machine needs its serial number');
     const row = await db.transaction(async tx => {
       let item = (await tx.query('SELECT sku FROM wms_items WHERE org_id=$1 AND lower(sku)=lower($2)', [u.org_id, v.sku])).rows[0];
-      if (!item && /^RE-[A-Za-z0-9]/i.test(v.sku)) item = { sku: await ensureReturnItem(tx, u.org_id, u.id, 'RE-' + v.sku.slice(3)) };
-      if (!item) deny(400, 'RMA_UNKNOWN_SKU', 'This SKU is not in the item list; a return SKU starts with RE- (for example RE-XRF38)');
+      if (!item && /^REF-[A-Za-z0-9]/i.test(v.sku)) item = { sku: await ensureReturnItem(tx, u.org_id, u.id, 'REF-' + v.sku.slice(4)) };
+      if (!item) deny(400, 'RMA_UNKNOWN_SKU', 'This SKU is not in the item list; a return SKU starts with REF- (for example REF-XRF38)');
       if (v.technicianId && !(await technicianOk(tx, u.org_id, v.technicianId))) deny(400, 'RMA_TECHNICIAN', 'Choose an active colleague with warehouse access as technician');
       const year = v.receivedAt.slice(0, 4);
       const n = Number((await tx.query("SELECT count(*)::int n FROM rma_cases WHERE org_id=$1 AND number LIKE $2", [u.org_id, `RMA-${year}-%`])).rows[0].n) + 1;

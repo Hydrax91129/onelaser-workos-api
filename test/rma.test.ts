@@ -64,20 +64,20 @@ async function setupRma(){
  return {db,app,call};
 }
 
-test('register a return: item class, serial required for machines, repairable, discount, and a new RE- SKU is added to WMS',async()=>{
+test('register a return: item class, serial required for machines, repairable, discount, and a new REF- SKU is added to WMS',async()=>{
  const {db,app,call}=await setupRma();
  try{
   const base={qty:1,reason:'客户退货，已退款 $3,499（示例）',condition:'外观轻微划痕，配件齐全',receivedAt:'2026-11-01',repairable:'yes'};
   const noSn=await call('m1','POST','/rma',{...base,sku:'DEMO-A',productClass:'machine'});assert.equal(noSn.statusCode,400);assert.match(noSn.body,/serial/i);
   assert.equal((await call('m1','POST','/rma',{...base,sku:'DEMO-A',productClass:'accessory'})).statusCode,201,'accessories need no serial');
   assert.equal((await call('m1','POST','/rma',{...base,sku:'DEMO-A',productClass:'machine',serial:'SN9',discountPct:15})).statusCode,400,'discount is 10, 20 or 30');
-  const r=await call('m1','POST','/rma',{...base,sku:'re-demo-a',productClass:'machine',serial:'SN9',discountPct:20,repairable:'no'});assert.equal(r.statusCode,201,r.body);
+  const r=await call('m1','POST','/rma',{...base,sku:'ref-demo-a',productClass:'machine',serial:'SN9',discountPct:20,repairable:'no'});assert.equal(r.statusCode,201,r.body);
   const c=(await call('m1','GET',`/rma/${r.json().id}`)).json();
-  assert.equal(c.sku,'RE-demo-a');assert.equal(c.productClass,'machine');assert.equal(c.repairable,'no');assert.equal(c.discountPct,20);
+  assert.equal(c.sku,'REF-demo-a');assert.equal(c.productClass,'machine');assert.equal(c.repairable,'no');assert.equal(c.discountPct,20);
   const org=(await db.query(`SELECT org_id FROM users WHERE id='m1'`)).rows[0].org_id;
-  const it=(await db.query(`SELECT name,type FROM wms_items WHERE org_id=$1 AND sku='RE-demo-a'`,[org])).rows[0];assert.equal(it.type,'return');assert.match(it.name,/退货/);
-  assert.equal((await call('m1','POST','/rma',{...base,sku:'RE-demo-a',productClass:'accessory'})).statusCode,201,'the second return reuses the RE- SKU');
-  assert.equal((await db.query(`SELECT count(*)::int n FROM wms_items WHERE org_id=$1 AND lower(sku)='re-demo-a'`,[org])).rows[0].n,1);
+  const it=(await db.query(`SELECT name,type FROM wms_items WHERE org_id=$1 AND sku='REF-demo-a'`,[org])).rows[0];assert.equal(it.type,'return');assert.match(it.name,/退货/);
+  assert.equal((await call('m1','POST','/rma',{...base,sku:'REF-demo-a',productClass:'accessory'})).statusCode,201,'the second return reuses the REF- SKU');
+  assert.equal((await db.query(`SELECT count(*)::int n FROM wms_items WHERE org_id=$1 AND lower(sku)='ref-demo-a'`,[org])).rows[0].n,1);
   const ph=await call('m1','POST',`/rma/${r.json().id}/photos`,{kind:'listing',name:'front.png',mime:'image/png',dataBase64:Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,1,2,3]).toString('base64')});
   assert.ok([200,201].includes(ph.statusCode),ph.body);
  }finally{await app.close();}
