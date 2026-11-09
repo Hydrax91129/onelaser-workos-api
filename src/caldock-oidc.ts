@@ -20,8 +20,8 @@ export async function verifyCaldockIdentity(token: string, provider: CaldockProv
   const email = typeof payload.email==='string'&&payload.email.length<=320 ? payload.email : null;
   // Never trust unverified email for display or account association; subject is identity.
   if(email&&payload.email_verified!==true&&payload.email_verified!=='true') throw new Error('Email not verified');
-  const name=typeof payload.name==='string'?payload.name.replace(/[\u0000-\u001f]/g,'').trim().slice(0,100):'wodeMac user';
-  return { provider, subject:payload.sub, email, name:name||'wodeMac user' };
+  const name=typeof payload.name==='string'?payload.name.replace(/[\u0000-\u001f]/g,'').trim().slice(0,100):'WodeMac user';
+  return { provider, subject:payload.sub, email, name:name||'WodeMac user' };
 }
 export function createCaldockGateway(provider: CaldockProvider, config: { clientId:string; clientSecret?:string; teamId?:string; keyId?:string; privateKey?:string }): CaldockGateway {
   const keys=createRemoteJWKSet(new URL(endpoints[provider].jwks),{timeoutDuration:5000});
