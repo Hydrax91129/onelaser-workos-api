@@ -37,8 +37,8 @@ test('returns & repairs: register, diagnose, photos, repaired, restock into refu
   assert.equal((await call('m3','POST',`/rma/${id}/update`,{diagnosis:'激光管老化，更换激光管',partsUsed:'激光管 ×1',status:'repairing'})).statusCode,200);
   assert.equal((await call('m3','POST',`/rma/${id}/update`,{technicianId:'m1'})).statusCode,403,'technician cannot reassign');
   const r1=await call('m3','POST',`/rma/${id}/repaired`,{});assert.equal(r1.statusCode,400);assert.equal(r1.json().error.code,'RMA_NEEDS_PHOTO');
-  assert.equal((await call('m3','POST',`/rma/${id}/photos`,{kind:'repaired',name:'after.png',mime:'image/png',dataBase64:png})).statusCode,201);
-  assert.equal((await call('m3','POST',`/rma/${id}/photos`,{kind:'repaired',name:'x.svg',mime:'image/svg+xml',dataBase64:png})).statusCode,400);
+  assert.equal((await call('m3','POST',`/rma/${id}/photos`,{kind:'diagnosis',name:'diagnosis.png',mime:'image/png',dataBase64:png})).statusCode,201);
+  assert.equal((await call('m3','POST',`/rma/${id}/photos`,{kind:'diagnosis',name:'x.svg',mime:'image/svg+xml',dataBase64:png})).statusCode,400);
   const done=await call('m3','POST',`/rma/${id}/repaired`,{repairedAt:'2026-11-06'});assert.equal(done.statusCode,200,done.body);assert.equal(done.json().repairDays,5);
   assert.equal((await call('m1','GET',`/rma/${id}`)).json().stage,'repaired');
   assert.equal((await call('m1','POST',`/rma/${id}/price`,{discountPct:20})).statusCode,200,'the discount can be chosen once repaired');
@@ -95,6 +95,8 @@ test('register a return: item class, serial required for machines, repairable, n
   const c=(await call('m1','GET',`/rma/${r.json().id}`)).json();
   assert.equal(c.sku,'REF-demo-a');assert.equal(c.productClass,'machine');assert.equal(c.repairable,'no','repairable may still be sent');assert.equal(c.discountPct,null);assert.equal(c.stage,'waiting_repair');
   const org=(await db.query(`SELECT org_id FROM users WHERE id='m1'`)).rows[0].org_id;
+  await db.query(`INSERT INTO product_catalog(org_id,sku,msrp) VALUES($1,'DEMO-A',4000)`,[org]);
+  assert.equal((await call('m1','GET',`/rma/${r.json().id}`)).json().msrp,4000,'a REF- SKU uses the MSRP of its model');
   const it=(await db.query(`SELECT name,type FROM wms_items WHERE org_id=$1 AND sku='REF-demo-a'`,[org])).rows[0];assert.equal(it.type,'return');assert.match(it.name,/退货/);
   assert.equal((await call('m1','POST','/rma',{...base,sku:'REF-demo-a',productClass:'accessory'})).statusCode,201,'the second return reuses the REF- SKU');
   assert.equal((await db.query(`SELECT count(*)::int n FROM wms_items WHERE org_id=$1 AND lower(sku)='ref-demo-a'`,[org])).rows[0].n,1);
