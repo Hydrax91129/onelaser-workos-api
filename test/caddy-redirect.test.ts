@@ -144,6 +144,13 @@ test('canonical origin switches only the approved Render host and retains health
           assert.equal(projectFile.frameOptions, 'SAMEORIGIN', 'project files open in the in-app preview window');
           assert.match(projectFile.csp, /frame-ancestors 'self'/);assert.match(projectFile.csp, /default-src 'none'/);assert.doesNotMatch(projectFile.csp, /script-src/);
           assert.equal((await get('craftos.app', '/api/projects/0f8f/files')).frameOptions, 'DENY', 'only the file download itself may be framed');
+          for (const path of ['/api/tasks/t1/attachments/a1', '/api/products/library/files/f1', '/api/rma/c1/photos/p1', '/api/hr/people/u1/documents/d1', '/api/feedback/x/images/0']) {
+            const stored = await get('craftos.app', path);
+            assert.equal(stored.frameOptions, 'SAMEORIGIN', path);assert.match(stored.csp, /frame-ancestors 'self'/, path);assert.doesNotMatch(stored.csp, /script-src/, path);
+          }
+          for (const path of ['/api/tasks/t1/attachments', '/api/tasks/t1/attachments/a1/x', '/api/hr/people/u1/documents']) {
+            assert.equal((await get('craftos.app', path)).frameOptions, 'DENY', path);
+          }
           for (const path of ['/healthz', '/api/health']) {
             const response = await get(oldHost, path);
             assert.equal(response.status, 200); assert.equal(response.location, undefined);

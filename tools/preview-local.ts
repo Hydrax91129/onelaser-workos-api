@@ -120,8 +120,16 @@ const app = await buildApp({
   const day = (n: number) => new Date(Date.now() + n * 864e5).toISOString();
   const proj = (await call('POST', '/projects', { name: '示例：黑五促销活动', description: '黑五 + 网络星期一全渠道促销（虚构示例）。', startDate: day(-5).slice(0, 10), endDate: day(25).slice(0, 10), template: 'campaign', members: ['m2', 'm4', 'm5'] })).json();
   const [g1, g2, g3] = proj.groups;
+  const made: any[] = [];
   for (const [title, owner, g, d] of [['确定折扣方案', 'm1', g1, 3], ['落地页改版', 'm5', g2, 8], ['三组广告素材', 'm2', g2, 10], ['邮件与短信排期', 'm4', g3, 15]] as const)
-    await call('POST', `/projects/${proj.id}/tasks`, { title, ownerId: owner, groupId: g.id, dueAt: day(d) });
+    made.push((await call('POST', `/projects/${proj.id}/tasks`, { title, ownerId: owner, groupId: g.id, dueAt: day(d) })).json());
+  // Sample attachments on the first task, to try the preview window (PDF, text, image).
+  const first = made[0]?.id || made[0]?.task?.id;
+  if (first) for (const f of [
+    { name: '折扣方案（示例）.pdf', mime: 'application/pdf', dataBase64: Buffer.from('%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj 2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj 3 0 obj<</Type/Page/MediaBox[0 0 300 200]/Parent 2 0 R>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n').toString('base64') },
+    { name: '会议纪要（示例）.txt', mime: 'text/plain', dataBase64: Buffer.from('示例会议纪要（虚构）\n1. 折扣力度待定\n2. 下周一前给出方案\n').toString('base64') },
+    { name: '素材草图（示例）.png', mime: 'image/png', dataBase64: 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFklEQVR42mP8z8DwnwEJMDEgAUYGBgAU2gH/0ZcVlQAAAABJRU5ErkJggg==' },
+  ]) await call('POST', `/tasks/${first}/attachments`, f);
   await call('POST', `/projects/${proj.id}/files`, { name: '活动方案（示例）.pdf', category: 'brief', dataBase64: Buffer.from('%PDF-1.4\n% fictional sample\n').toString('base64') });
   await call('POST', `/projects/${proj.id}/updates`, { health: 'on_track', body: '方案在评审，素材开始制作（示例）。' });
   // Inbox samples for the main admin: one result to review and one new task (need you), progress updates (for information).
