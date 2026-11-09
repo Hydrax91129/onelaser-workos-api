@@ -51,7 +51,8 @@ export const stageOf = (c: { status: string; listing?: string }) =>
     : c.status === 'restocked' ? (c.listing === 'listed' ? 'listed' : c.listing === 'sold' ? 'sold' : 'restocked') : c.status;
 const KINDS = ['return', 'warranty', 'repair', 'exchange'] as const;
 const CHANNELS = ['website', 'amazon', 'dealer', 'other'] as const;
-const PHOTO_KINDS = ['received', 'diagnosis', 'repaired', 'listing'] as const;
+/* Three photo groups per return: on receipt, diagnosis, listing. 'repaired' is kept only for photos uploaded before. */
+const PHOTO_KINDS = ['received', 'diagnosis', 'listing', 'repaired'] as const;
 const CLASSES = ['machine', 'accessory', 'material', 'other'] as const;
 /* Grade sets the refurbished discount: A = untouched, sold as new stock (no discount); B = 10% off; C = 20% off. */
 export const GRADE_DISCOUNT: Record<string, number> = { A: 0, B: 10, C: 20 };
@@ -90,7 +91,7 @@ export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: {
     return !!p && level(p) !== 'none';
   };
   const shape = (c: any, ppl: Map<string, any>, items: Map<string, any>, msrp: Map<string, number>, photoCount = 0) => {
-    const list = msrp.get(c.sku) ?? null, pct = c.discount_pct == null ? null : Number(c.discount_pct);
+    const list = msrp.get(String(c.sku).toLowerCase()) ?? msrp.get(String(c.sku).toLowerCase().replace(/^ref-/, '')) ?? null, pct = c.discount_pct == null ? null : Number(c.discount_pct);
     return {
       id: c.id, number: c.number, sku: c.sku, name: items.get(c.sku)?.name || '', serial: c.serial, qty: Number(c.qty), kind: c.kind, channel: c.channel,
       productClass: c.product_class || '', repairable: c.repairable || '',
@@ -104,7 +105,7 @@ export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: {
   };
   const lookups = async (org: string) => {
     const items = new Map((await db.query('SELECT sku,name FROM wms_items WHERE org_id=$1', [org])).rows.map((r: any) => [r.sku, r]));
-    const msrp = new Map((await db.query('SELECT sku,msrp FROM product_catalog WHERE org_id=$1 AND msrp IS NOT NULL', [org])).rows.map((r: any) => [r.sku, Number(r.msrp)]));
+    const msrp = new Map((await db.query('SELECT sku,msrp FROM product_catalog WHERE org_id=$1 AND msrp IS NOT NULL', [org])).rows.map((r: any) => [String(r.sku).toLowerCase(), Number(r.msrp)]));
     return { items, msrp, ppl: await people(org) };
   };
 
@@ -196,8 +197,8 @@ export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: {
       if (!OPEN.includes(c.status) || c.status === 'repaired') deny(409, 'RMA_CLOSED', 'This case is already repaired or closed');
       if (!c.technician_id) deny(400, 'RMA_NEEDS_TECHNICIAN', 'Assign a technician first');
       if (!String(c.diagnosis || '').trim()) deny(400, 'RMA_NEEDS_DIAGNOSIS', 'Write the diagnosis first');
-      const photos = Number((await tx.query("SELECT count(*)::int n FROM rma_photos WHERE case_id=$1 AND kind='repaired'", [caseId])).rows[0].n);
-      if (!photos) deny(400, 'RMA_NEEDS_PHOTO', 'Upload at least one photo of the repaired product');
+      const photos = Number((await tx.query("SELECT count(*)::int n FROM rma_photos WHERE case_id=$1 AND kind IN ('diagnosis','repaired')", [caseId])).rows[0].n);
+      if (!photos) deny(400, 'RMA_NEEDS_PHOTO', 'Upload at least one diagnosis photo');
       const at = v.repairedAt || new Date(now()).toISOString().slice(0, 10);
       if (at < ymd(c.received_at)!) deny(400, 'RMA_DATE_ORDER', 'The repair date cannot be before the received date');
       await tx.query(`UPDATE rma_cases SET status='repaired',repaired_at=$2,repair_notes=COALESCE($3,repair_notes),updated_at=now() WHERE id=$1`, [caseId, at, v.repairNotes ?? null]);

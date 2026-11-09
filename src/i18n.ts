@@ -191,6 +191,7 @@ const zh:Record<string,string>={
   'Your work email was set by an administrator and cannot be changed':'你的工作邮箱已由管理员设置，本人不能修改；如需更改请联系管理员。',
   'Project not found':'找不到这个项目。',
   'A machine needs its serial number':'机器必须填写序列号。',
+  'Upload at least one diagnosis photo':'请至少上传一张问题诊断照片',
   'Say which parts you are waiting for':'请填写在等待什么配件',
   'The refurbished discount can be chosen once the repair is done':'维修完成后才能选择翻新折扣',
   'This SKU is not in the item list; a return SKU starts with REF- (for example REF-XRF38)':'物料表里没有这个 SKU；退货 SKU 请以 REF- 开头（例如 REF-XRF38），登记时会自动新建。',

@@ -134,7 +134,7 @@ const app = await buildApp({
     const make = async (serial: string, days: number, reason: string) => (await call('POST', '/rma', { sku: 'REF-' + item.sku, serial, productClass: 'machine', reason, condition: '外箱有压痕，配件齐全（示例）', receivedAt: ago(days), channel: 'website' })).json().id;
     const repair = async (id: string) => {
       await call('POST', `/rma/${id}/update`, { technicianId: 'm1', repairable: 'yes', diagnosis: '示例诊断：电源板接触不良' });
-      await call('POST', `/rma/${id}/photos`, { kind: 'repaired', name: 'after.png', mime: 'image/png', dataBase64: png });
+      await call('POST', `/rma/${id}/photos`, { kind: 'diagnosis', name: 'diagnosis.png', mime: 'image/png', dataBase64: png });
       await call('POST', `/rma/${id}/repaired`, {});
     };
     await make('DEMO-SN-001', 2, '示例：开机不出光；已全额退款');
