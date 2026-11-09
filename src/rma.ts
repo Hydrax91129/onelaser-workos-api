@@ -12,7 +12,8 @@
  * Access: anyone who can view warehouse stock can view cases; warehouse managers register and close
  * cases; the assigned technician can update diagnosis, photos and mark the repair done; prices are set
  * by company admins and people with the MSRP pricing grant. Registration also records what the item is (machine, accessory,
- * material, other; machines need a serial) and whether it can be repaired. Waiting for parts needs the parts named (waiting_for);
+ * material, other; machines need a serial), the reason and condition, and photos on receipt; whether it can be repaired
+ * and who repairs it are decided in the repair step. Waiting for parts needs the parts named (waiting_for);
  * the refurbished discount can be chosen only once the repair is done. A return SKU
  * starting with REF- that is not in the item list yet is added to WMS (ensureReturnItem); other SKUs must already exist. */
 import { randomUUID } from 'node:crypto';
@@ -133,7 +134,7 @@ export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: {
 
   const createInput = z.object({
     sku, serial: z.string().trim().max(80).optional(), qty: z.number().int().min(1).max(500).default(1), kind: z.enum(KINDS).default('return'), channel: z.enum(CHANNELS).optional(),
-    productClass: z.enum(CLASSES), repairable: z.enum(['yes', 'no']),
+    productClass: z.enum(CLASSES), repairable: z.enum(['yes', 'no']).optional(),
     customer: z.string().trim().max(120).optional(), orderRef: z.string().trim().max(80).optional(), reason: z.string().trim().min(2).max(2000),
     condition: z.string().trim().min(2).max(1000), receivedAt: day, technicianId: id.optional(),
   }).strict();
@@ -151,7 +152,7 @@ export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: {
       const caseId = randomUUID(), number = `RMA-${year}-${String(n).padStart(4, '0')}`;
       const c = (await tx.query(`INSERT INTO rma_cases(id,org_id,number,sku,serial,qty,kind,channel,customer,order_ref,reason,condition,received_at,technician_id,status,created_by,product_class,repairable)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING *`,
-        [caseId, u.org_id, number, item.sku, v.serial || '', v.qty, v.kind, v.channel || '', v.customer || '', v.orderRef || '', v.reason, v.condition, v.receivedAt, v.technicianId || null, v.technicianId ? 'diagnosing' : 'received', u.id, v.productClass, v.repairable])).rows[0];
+        [caseId, u.org_id, number, item.sku, v.serial || '', v.qty, v.kind, v.channel || '', v.customer || '', v.orderRef || '', v.reason, v.condition, v.receivedAt, v.technicianId || null, v.technicianId ? 'diagnosing' : 'received', u.id, v.productClass, v.repairable || ''])).rows[0];
       await event(tx, u, caseId, 'created', v.reason);
       await audit(tx, u, 'rma.created', caseId, { number, sku: item.sku, qty: v.qty });
       return c;
@@ -162,7 +163,7 @@ export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: {
 
   const updateInput = z.object({
     diagnosis: z.string().trim().max(5000).optional(), technicianId: id.nullable().optional(), repairNotes: z.string().trim().max(5000).optional(),
-    partsUsed: z.string().trim().max(2000).optional(), waitingFor: z.string().trim().max(500).optional(), status: z.enum(['received', 'diagnosing', 'waiting_parts', 'repairing']).optional(),
+    partsUsed: z.string().trim().max(2000).optional(), waitingFor: z.string().trim().max(500).optional(), repairable: z.enum(['yes', 'no']).optional(), status: z.enum(['received', 'diagnosing', 'waiting_parts', 'repairing']).optional(),
     serial: z.string().trim().max(80).optional(), customer: z.string().trim().max(120).optional(), orderRef: z.string().trim().max(80).optional(), condition: z.string().trim().max(1000).optional(),
   }).strict().refine(v => Object.keys(v).length > 0, 'Nothing to change');
   app.post<{ Params: { id: string } }>('/rma/:id/update', async req => {
@@ -175,13 +176,13 @@ export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: {
       if (v.technicianId && !(await technicianOk(tx, u.org_id, v.technicianId))) deny(400, 'RMA_TECHNICIAN', 'Choose an active colleague with warehouse access as technician');
       const nextStatus = v.status ?? (c.status === 'repaired' && (v.diagnosis !== undefined || v.repairNotes !== undefined) ? 'repairing' : c.status);
       if (nextStatus === 'waiting_parts' && !(v.waitingFor ?? c.waiting_for ?? '').trim()) deny(400, 'RMA_PARTS_NEEDED', 'Say which parts you are waiting for');
-      const col: Record<string, string> = { diagnosis: 'diagnosis', technicianId: 'technician_id', repairNotes: 'repair_notes', partsUsed: 'parts_used', waitingFor: 'waiting_for', status: 'status', serial: 'serial', customer: 'customer', orderRef: 'order_ref', condition: 'condition' };
+      const col: Record<string, string> = { diagnosis: 'diagnosis', technicianId: 'technician_id', repairNotes: 'repair_notes', partsUsed: 'parts_used', waitingFor: 'waiting_for', repairable: 'repairable', status: 'status', serial: 'serial', customer: 'customer', orderRef: 'order_ref', condition: 'condition' };
       const sets: string[] = [], vals: unknown[] = [caseId];
       for (const [k, val] of Object.entries(v)) { vals.push(val); sets.push(`${col[k]}=$${vals.length}`); }
       if (v.status === undefined && c.status === 'received' && (v.technicianId || v.diagnosis)) sets.push("status='diagnosing'");
       if (c.status === 'repaired' && (v.diagnosis !== undefined || v.repairNotes !== undefined || v.status)) sets.push("repaired_at=NULL"), v.status === undefined && sets.push("status='repairing'");
       await tx.query(`UPDATE rma_cases SET ${sets.join(',')},updated_at=now() WHERE id=$1`, vals);
-      const parts = [v.status && `status:${v.status}`, v.technicianId !== undefined && 'technician', v.diagnosis !== undefined && 'diagnosis', v.repairNotes !== undefined && 'repair notes', v.partsUsed !== undefined && 'parts', v.waitingFor && `waiting for: ${v.waitingFor}`].filter(Boolean).join(', ');
+      const parts = [v.status && `status:${v.status}`, v.technicianId !== undefined && 'technician', v.diagnosis !== undefined && 'diagnosis', v.repairNotes !== undefined && 'repair notes', v.partsUsed !== undefined && 'parts', v.waitingFor && `waiting for: ${v.waitingFor}`, v.repairable && `repairable: ${v.repairable}`].filter(Boolean).join(', ');
       await event(tx, u, caseId, 'updated', parts);
       return { ok: true };
     });
