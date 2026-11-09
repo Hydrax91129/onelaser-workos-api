@@ -412,7 +412,10 @@ export async function registerCompletionRoutes(app: FastifyInstance, db: Databas
     if (!a) deny(404, 'NOT_FOUND', 'Task not found');
     const inline = /^image\/(png|jpeg|webp|gif)$|^application\/pdf$/.test(a.mime);
     return reply.header('content-type', a.mime).header('x-content-type-options', 'nosniff').header('cache-control', 'private, max-age=300')
-      .header('content-security-policy', "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox")
+      // A PDF must not be sandboxed: Chrome refuses to show a PDF in a sandboxed page ("blocked by Chrome").
+      // It still runs no script; only WorkOS may frame it (deploy/Caddyfile). Everything else stays sandboxed.
+      .header('content-security-policy', a.mime === 'application/pdf' ? "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; object-src 'self'; frame-ancestors 'self'"
+        : "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox")
       .header('content-disposition', `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(a.name)}`).send(a.data);
   });
 
