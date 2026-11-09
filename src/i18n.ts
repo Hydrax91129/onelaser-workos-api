@@ -191,6 +191,8 @@ const zh:Record<string,string>={
   'Your work email was set by an administrator and cannot be changed':'你的工作邮箱已由管理员设置，本人不能修改；如需更改请联系管理员。',
   'Project not found':'找不到这个项目。',
   'A machine needs its serial number':'机器必须填写序列号。',
+  'Say which parts you are waiting for':'请填写在等待什么配件',
+  'The refurbished discount can be chosen once the repair is done':'维修完成后才能选择翻新折扣',
   'This SKU is not in the item list; a return SKU starts with REF- (for example REF-XRF38)':'物料表里没有这个 SKU；退货 SKU 请以 REF- 开头（例如 REF-XRF38），登记时会自动新建。',
   'Upload a PDF, Word, Excel, PowerPoint, image, CSV or TXT file':'请上传 PDF、Word、Excel、PowerPoint、图片、CSV 或 TXT 文件。',
   'The file content does not match its type; save it again and upload the saved file':'文件内容和扩展名不一致，请重新保存后再上传。',

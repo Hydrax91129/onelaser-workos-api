@@ -134,6 +134,30 @@ const app = await buildApp({
   await m4('POST', '/tasks/assign', { assigneeId: 'm1', title: '确认示例新员工入职资料', description: '虚构示例任务，用来演示“去领取”。', criteria: ['资料确认完毕'], dueAt: day(6) });
 }
 
+// Sample returns, one at each stage: 等待维修, 等待配件, 完成维修, 完成上架, 售出 (fictional, made through the API).
+{
+  const token = (await issueSession(db, 'm1')).accessToken, call = (method: string, url: string, payload?: unknown) => app.inject({ method: method as any, url, payload: payload as any, headers: { authorization: `Bearer ${token}` } });
+  const item = (await db.query("SELECT sku FROM wms_items WHERE org_id=$1 ORDER BY sku LIMIT 1", [ORG])).rows[0];
+  if (item) {
+    const ago = (n: number) => new Date(Date.now() - n * 864e5).toISOString().slice(0, 10), png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]).toString('base64');
+    const make = async (serial: string, days: number, reason: string) => (await call('POST', '/rma', { sku: 'REF-' + item.sku, serial, productClass: 'machine', repairable: 'yes', reason, condition: '外箱有压痕，配件齐全（示例）', receivedAt: ago(days), channel: 'website' })).json().id;
+    const repair = async (id: string) => {
+      await call('POST', `/rma/${id}/update`, { technicianId: 'm1', diagnosis: '示例诊断：电源板接触不良' });
+      await call('POST', `/rma/${id}/photos`, { kind: 'repaired', name: 'after.png', mime: 'image/png', dataBase64: png });
+      await call('POST', `/rma/${id}/repaired`, {});
+    };
+    await make('DEMO-SN-001', 2, '示例：开机不出光；已全额退款');
+    const parts = await make('DEMO-SN-002', 6, '示例：雕刻偏移；已部分退款');
+    await call('POST', `/rma/${parts}/update`, { technicianId: 'm1', status: 'waiting_parts', waitingFor: '示例同步带 ×1' });
+    const fixed = await make('DEMO-SN-003', 9, '示例：风扇异响；已全额退款'); await repair(fixed); await call('POST', `/rma/${fixed}/price`, { discountPct: 20 });
+    for (const [serial, listing] of [['DEMO-SN-004', 'listed'], ['DEMO-SN-005', 'sold']] as const) {
+      const id = await make(serial, 14, '示例：客户七天无理由退货'); await repair(id);
+      await call('POST', `/rma/${id}/close`, { outcome: 'restock', grade: 'A' });
+      await call('POST', `/rma/${id}/price`, { discountPct: 10, listing });
+    }
+  }
+}
+
 const TYPES: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.otf': 'font/otf', '.woff2': 'font/woff2', '.png': 'image/png', '.json': 'application/json', '.webp': 'image/webp', '.ico': 'image/x-icon' };
 createServer(async (req, res) => {
   try {
