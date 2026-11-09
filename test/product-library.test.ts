@@ -42,13 +42,13 @@ test('requirement matrix: five families, core fields stay required, everything e
  const a=completeness(rec,vAll),b=completeness(rec,vCost);
  assert.ok(b.need>a.need,'cost access adds HS code, suppliers, landed cost and file slots');assert.ok(!a.missing.includes('supplier'));assert.ok(b.missing.includes('supplier'));
  assert.ok(b.missing.includes('file:manual'));
- const refb=completeness({values:{...rec.values,goodsType:'refb'}},vAll);assert.ok(refb.missing.includes('refbSku'),'REFB SKU is required for 退货');
+ const refb=completeness({values:{...rec.values,goodsType:'refb'}},vAll);assert.ok(refb.missing.includes('refbSku'),'return SKU is required for 退货');
 });
 
 test('value rules: SKU, REFB, enums by label, dates, numbers with units, clear marker',()=>{
  const p=(k:string,v:unknown)=>parseValue(FIELD.get(k)!,v);
  assert.equal(p('sku','ODL-TEST-1').ok,true);assert.equal(p('sku','-bad').ok,false);assert.equal(p('sku','bad sku!').ok,false);
- assert.equal(p('refbSku','REFB-ODL-1').ok,true);assert.equal(p('refbSku','ODL-1').ok,false);assert.equal(p('refbSku','refb-x').ok,false);
+ assert.equal(p('refbSku','REF-ODL-1').ok,true);assert.equal(p('refbSku','ODL-1').ok,false);assert.equal(p('refbSku','ref-x').ok,false);
  assert.deepEqual(p('family','配件/备件'),{ok:true,value:'acc'});assert.deepEqual(p('family','main'),{ok:true,value:'main'});assert.equal(p('family','整机').ok,false);
  assert.deepEqual(p('status','在售'),{ok:true,value:'live'});assert.deepEqual(p('goodsType','退货'),{ok:true,value:'refb'});
  assert.deepEqual(p('launchDate','2026/3/5'),{ok:true,value:'2026-03-05'});assert.equal(p('launchDate','2026-02-30').ok,false);
@@ -92,8 +92,8 @@ test('product library: visibility on every response, editing rights, SKU and REF
   assert.equal((await call('m1','PATCH','/products/library/ODL-DEMO-1',{values:{msrp:2000,map:1900}})).statusCode,200);
   // Core fields cannot be cleared; REFB rules
   assert.equal((await call('m3','PATCH','/products/library/ODL-DEMO-1',{values:{nameZh:null}})).statusCode,400);
-  assert.equal((await call('m3','PATCH','/products/library/ODL-DEMO-1',{values:{refbSku:'REFB-ODL-DEMO-1'}})).statusCode,400,'only 退货 products carry a REFB SKU');
-  assert.equal((await call('m3','PATCH','/products/library/ODL-DEMO-1',{values:{goodsType:'退货',refbSku:'ODL-1'}})).statusCode,400,'REFB- prefix');
+  assert.equal((await call('m3','PATCH','/products/library/ODL-DEMO-1',{values:{refbSku:'REF-ODL-DEMO-1'}})).statusCode,400,'only 退货 products carry a return SKU');
+  assert.equal((await call('m3','PATCH','/products/library/ODL-DEMO-1',{values:{goodsType:'退货',refbSku:'ODL-1'}})).statusCode,400,'REF- prefix');
   // Status changes follow the lifecycle and need a reason into clearance
   assert.equal((await call('m3','PATCH','/products/library/ODL-DEMO-1',{values:{status:'在售'}})).statusCode,409,'dev cannot jump to live');
   assert.equal((await call('m3','PATCH','/products/library/ODL-DEMO-1',{values:{status:'上新中'}})).statusCode,200);
@@ -154,9 +154,9 @@ test('review fixes: history filtered on the old endpoint too, worksheet floors d
   // 2. with 价格参数 set, approval uses its rate and floor: 1500 leaves 11.7% (DTC floor 10%) → applies without approval
   const r=await call('m3','PATCH','/products/library/ODL-R-1',{values:{msrp:1500}});assert.equal(r.statusCode,200,r.body);assert.equal(r.json().prices.msrp.status,'applied');
   const low=await call('m3','PATCH','/products/library/ODL-R-1',{values:{msrp:1400}});assert.equal(low.json().prices.msrp.status,'pending','8.9% is below the 10% floor');
-  // 5. a REFB SKU belongs to one product; 6. replacement must exist; end of sale not before launch
-  assert.equal((await call('m3','POST','/products/library',{sku:'ODL-R-2',values:{family:'main',nameZh:'示例退货',nameEn:'Sample',goodsType:'退货',refbSku:'REFB-ODL-R-1'}})).statusCode,201);
-  const dup=await call('m3','POST','/products/library',{sku:'ODL-R-3',values:{family:'main',nameZh:'示例',nameEn:'Sample',goodsType:'退货',refbSku:'REFB-odl-r-1'}});
+  // 5. a return SKU belongs to one product; 6. replacement must exist; end of sale not before launch
+  assert.equal((await call('m3','POST','/products/library',{sku:'ODL-R-2',values:{family:'main',nameZh:'示例退货',nameEn:'Sample',goodsType:'退货',refbSku:'REF-ODL-R-1'}})).statusCode,201);
+  const dup=await call('m3','POST','/products/library',{sku:'ODL-R-3',values:{family:'main',nameZh:'示例',nameEn:'Sample',goodsType:'退货',refbSku:'REF-odl-r-1'}});
   assert.equal(dup.statusCode,400);assert.match(dup.json().error.message,/ODL-R-2/);
   assert.equal((await call('m3','PATCH','/products/library/ODL-R-1',{values:{replacementSku:'ODL-NOPE'}})).statusCode,400);
   assert.equal((await call('m3','PATCH','/products/library/ODL-R-1',{values:{replacementSku:'odl-r-2'}})).statusCode,200);
@@ -167,4 +167,13 @@ test('review fixes: history filtered on the old endpoint too, worksheet floors d
   const bad=await call('m5','POST','/products/library/ODL-R-1/files/manual',{name:'manual.pdf',dataBase64:fake});assert.equal(bad.statusCode,400);assert.equal(bad.json().error.code,'FILE_CONTENT');
   assert.equal((await call('m3','POST','/products/library/ODL-R-1/files/mainImage',{name:'x.png',dataBase64:Buffer.from([0xff,0xd8,0xff,0xe0]).toString('base64')})).statusCode,400,'a JPEG named .png');
  }finally{await app.close();}
+});
+
+test('return SKUs saved with the old REFB- prefix become REF- when the service starts',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ await db.query(`INSERT INTO product_catalog(org_id,sku,status,goods_type,refb_sku) VALUES('demo','ODL-OLD-1','dev','refb','REFB-ODL-OLD-1'),('demo','ODL-OLD-2','dev','refb','REF-ODL-OLD-2')`);
+ await db.exec(schema);await db.exec(schema);
+ const rows=(await db.query(`SELECT sku,refb_sku FROM product_catalog WHERE sku LIKE 'ODL-OLD-%' ORDER BY sku`)).rows;
+ assert.deepEqual(rows.map((r:any)=>r.refb_sku),['REF-ODL-OLD-1','REF-ODL-OLD-2']);
+ await db.close?.();
 });

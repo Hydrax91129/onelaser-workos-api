@@ -61,7 +61,7 @@ function notesSheet(fields: Field[]) {
       ['1. 第 1 行是中文表头，第 2 行（已隐藏）是字段键，请勿修改或删除这两行；从第 3 行开始每行一个产品。'],
       ['2. 按 SKU 匹配（不区分大小写）：已有的 SKU 会更新，新的 SKU 会新增。上传不会删除任何产品。'],
       [`3. 单元格留空 = 不修改；要清空某个值，请填 ${CLEAR}。核心字段（SKU、大货/退货、产品族、中文名、英文名、状态）不能清空。`],
-      ['4. 新增产品必须填 产品族、中文名、英文名；大货/退货 留空按“大货”，状态 留空按“开发中”。退货产品必须填以 REFB- 打头的退货 SKU。'],
+      ['4. 新增产品必须填 产品族、中文名、英文名；大货/退货 留空按“大货”，状态 留空按“开发中”。退货产品必须填以 REF- 开头的退货 SKU。'],
       ['5. 下拉框列只能选列表里的值；日期写成 YYYY-MM-DD；重量、尺寸、价格只填数字（单位见表头）。'],
       ['6. 上传后系统先给出“更新前后对比与分析”，管理员点击“确认更新”之前不会写入任何数据；确认后可在导入记录里撤销。'],
       ['7. 产品主图和文件（说明书、认证等）请在产品编辑页上传，不在这个表格里。'],
@@ -71,7 +71,7 @@ function notesSheet(fields: Field[]) {
       ...fields.map(f => [
         GROUPS.find(g => g.no === f.group)?.zh || '', f.zh, f.key,
         f.type === 'number' ? `数字（${f.unit}）` : f.type === 'price' ? '价格（USD）' : f.type === 'date' ? '日期 YYYY-MM-DD' : f.type === 'enum' ? '下拉选择' : f.type === 'list' ? '文字（可选建议值）' : '文字',
-        f.opts ? (f.opts as any[]).map(o => Array.isArray(o) ? o[1] : o).join(' / ') : f.key === 'refbSku' ? 'REFB- 打头' : f.ph ? `例：${f.ph}` : '',
+        f.opts ? (f.opts as any[]).map(o => Array.isArray(o) ? o[1] : o).join(' / ') : f.key === 'refbSku' ? 'REF- 开头' : f.ph ? `例：${f.ph}` : '',
         ...FAMILIES.map(([k]) => f.key === 'refbSku' ? '退货时必填' : REQ_ZH[famCode(f.code, k) || 'na']),
         VIS_NAMES[f.vis][0],
       ]),
@@ -152,7 +152,7 @@ export function diffUpload(v: Viewer, ws: Worksheet, recs: Map<string, Rec>, par
   for (const r of recs.values()) sysCount.set(r.sku.toLowerCase(), (sysCount.get(r.sku.toLowerCase()) || 0) + 1);
   const fileSeen = new Map<string, number>();
   const results: RowResult[] = [];
-  // SKUs and REFB SKUs as they will be after this file: products in the system plus the rows of the file.
+  // SKUs and return SKUs as they will be after this file: products in the system plus the rows of the file.
   const index = { skus: new Set<string>([...recs.values()].map(r => r.sku.toLowerCase())), refb: new Map<string, string[]>() };
   const refbOf = new Map<string, string>();
   for (const r of recs.values()) if (r.values.refbSku) refbOf.set(r.sku.toLowerCase(), String(r.values.refbSku));

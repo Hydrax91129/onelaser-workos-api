@@ -98,7 +98,7 @@ test('upload preview: statuses, old → new, errors with row/column/reason, anal
   const dup=pv.results.find((r:any)=>r.sku==='odl-a1');assert.equal(dup.status,'error');assert.match(dup.errors[0].zh,/重复/);
   assert.equal(R('ODL-NEW-1').status,'new');
   const e2=R('ODL-NEW-2');assert.equal(e2.status,'error');assert.ok(e2.errors.some((e:any)=>e.key==='family'&&e.col&&e.header==='产品族'));
-  assert.ok(R('ODL-NEW-3').errors.some((e:any)=>e.key==='refbSku'&&/REFB-/.test(e.zh)));
+  assert.ok(R('ODL-NEW-3').errors.some((e:any)=>e.key==='refbSku'&&/REF-/.test(e.zh)));
   const e4=R('ODL-NEW-4');assert.ok(e4.errors.some((e:any)=>e.key==='launchDate'));assert.ok(e4.errors.some((e:any)=>e.key==='netWeight'));
   assert.equal(e4.row,g.length,'row numbers are sheet rows');
   const an=pv.analysis;
@@ -161,18 +161,18 @@ test('confirm is all or nothing, and refuses a preview the data has moved past',
  }finally{await app.close();}
 });
 
-test('review fixes: REFB SKUs unique across the file and the system, replacement SKUs may come from the same file, zip bombs are refused',async()=>{
+test('review fixes: return SKUs unique across the file and the system, replacement SKUs may come from the same file, zip bombs are refused',async()=>{
  const {app,call}=await setup();
  try{
   const head=[['SKU','产品族','中文名','英文名','大货 / 退货','退货 SKU','替代 SKU'],['sku','family','nameZh','nameEn','goodsType','refbSku','replacementSku']];
   const p=await preview(call,'refb.csv',writeCsv([...head,
-   ['ODL-RF-1','主机','示例退货一','Sample 1','退货','REFB-ODL-X',''],
-   ['ODL-RF-2','主机','示例退货二','Sample 2','退货','REFB-odl-x',''],
+   ['ODL-RF-1','主机','示例退货一','Sample 1','退货','REF-ODL-X',''],
+   ['ODL-RF-2','主机','示例退货二','Sample 2','退货','REF-odl-x',''],
    ['ODL-RF-3','主机','示例新品','Sample 3','大货','','ODL-RF-1'],
    ['ODL-RF-4','主机','示例','Sample 4','大货','','ODL-NOWHERE']]));
   assert.equal(p.statusCode,200,p.body);
   const R=(s:string)=>p.json().results.find((r:any)=>r.sku===s);
-  assert.ok(R('ODL-RF-1').errors.some((e:any)=>e.key==='refbSku')&&R('ODL-RF-2').errors.some((e:any)=>e.key==='refbSku'),'both rows claiming one REFB SKU are flagged');
+  assert.ok(R('ODL-RF-1').errors.some((e:any)=>e.key==='refbSku')&&R('ODL-RF-2').errors.some((e:any)=>e.key==='refbSku'),'both rows claiming one return SKU are flagged');
   assert.equal(R('ODL-RF-3').status,'new','a replacement created in the same file is fine');
   assert.ok(R('ODL-RF-4').errors.some((e:any)=>e.key==='replacementSku'));
   const bomb=writeXlsx([{name:'产品资料',rows:[['sku'],['x'.repeat(60*1024*1024)]]}]);

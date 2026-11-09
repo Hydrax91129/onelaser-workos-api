@@ -23,6 +23,8 @@ export const productLibrarySchema = `
 ALTER TABLE product_catalog ADD COLUMN IF NOT EXISTS family text NOT NULL DEFAULT '';
 ALTER TABLE product_catalog ADD COLUMN IF NOT EXISTS goods_type text NOT NULL DEFAULT 'bulk';
 ALTER TABLE product_catalog ADD COLUMN IF NOT EXISTS refb_sku text NOT NULL DEFAULT '';
+-- Return SKUs start with REF- (they used to start with REFB-).
+UPDATE product_catalog SET refb_sku = 'REF-' || substr(refb_sku, 6) WHERE refb_sku LIKE 'REFB-%';
 ALTER TABLE product_catalog ADD COLUMN IF NOT EXISTS attrs jsonb NOT NULL DEFAULT '{}';
 ALTER TABLE product_pricing ADD COLUMN IF NOT EXISTS attrs jsonb NOT NULL DEFAULT '{}';
 ALTER TABLE pricing_rules ALTER COLUMN rules DROP NOT NULL;
@@ -176,15 +178,15 @@ export function validateValues(v: Viewer, raw: Record<string, unknown>, ws: Work
   }
   return { values, errors };
 }
-/** Rules that look at the whole record after the change (REFB). */
+/** Rules that look at the whole record after the change (return SKU). */
 export function recordIssues(after: Record<string, any>): Issue[] {
   const out: Issue[] = [];
-  if (after.goodsType === 'refb' && !after.refbSku) out.push({ key: 'refbSku', zh: '退货产品必须填退货 SKU（REFB- 打头）', en: 'A returned product needs a returned-goods SKU starting with REFB-' });
+  if (after.goodsType === 'refb' && !after.refbSku) out.push({ key: 'refbSku', zh: '退货产品必须填退货 SKU（REF- 开头）', en: 'A returned product needs a returned-goods SKU starting with REF-' });
   if (after.goodsType !== 'refb' && after.refbSku) out.push({ key: 'refbSku', zh: '只有退货产品才填退货 SKU', en: 'Only returned products have a returned-goods SKU' });
   return out;
 }
 
-/** SKUs and REFB SKUs of the org, for relationIssues. */
+/** SKUs and return SKUs of the org, for relationIssues. */
 export async function relationIndex(q: Queryable, org: string) {
   const rows = (await q.query('SELECT sku,refb_sku FROM product_catalog WHERE org_id=$1', [org])).rows;
   const refb = new Map<string, string[]>();
@@ -267,7 +269,7 @@ export async function registerProductLibraryRoutes(app: FastifyInstance, db: Dat
     if (errors.length) fail(errors, req.language);
     return db.transaction(async tx => {
       const rec = findRec(await loadRecords(tx, u.org_id, [skuParam(req)], true), skuParam(req)) || deny(404, 'PRODUCT_NOT_FOUND', 'This SKU is not in the product catalog');
-      // Leaving 退货 clears the REFB SKU. A product switched to 退货 without its REFB SKU yet only shows it as missing (autosave).
+      // Leaving 退货 clears the return SKU. A product switched to 退货 without its return SKU yet only shows it as missing (autosave).
       if (values.goodsType && values.goodsType !== 'refb' && rec.values.refbSku && !('refbSku' in values)) values.refbSku = null;
       const issues = recordIssues({ ...rec.values, ...values }).filter(i => i.zh.startsWith('只有'));
       if (issues.length) fail(issues, req.language);

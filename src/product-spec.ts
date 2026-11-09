@@ -56,7 +56,7 @@ const attr: Store = { t: 'attr' }, sattr: Store = { t: 'sattr' };
 export const FIELDS: Field[] = [
   F('1', 'sku', 'SKU', 'SKU', 'ODL-XRF-38-US01', 'rrrrr', 'all', 'sku', { t: 'col', col: 'sku' }),
   F('1', 'goodsType', '大货 / 退货', 'New / returned', '', 'rrrrr', 'all', 'enum', { t: 'col', col: 'goods_type' }, { opts: GOODS }),
-  F('1', 'refbSku', '退货 SKU', 'Returned-goods SKU', 'REFB-…', 'ooooo', 'all', 'sku', { t: 'col', col: 'refb_sku' }),
+  F('1', 'refbSku', '退货 SKU', 'Returned-goods SKU', 'REF-…', 'ooooo', 'all', 'sku', { t: 'col', col: 'refb_sku' }),
   F('1', 'family', '产品族', 'Product family', '', 'rrrrr', 'all', 'enum', { t: 'col', col: 'family' }, { opts: FAMILIES }),
   F('1', 'series', '产品线 / 系列', 'Product line / series', 'XRF', 'rrron', 'all', 'list', attr, { opts: ['XRF', 'Hydra', 'Cobra', 'VertiGo', 'Galvo Flex'] }),
   F('1', 'nameZh', '中文名', 'Chinese name', 'XRF 38W 桌面激光机', 'rrrrr', 'all', 'text', { t: 'col', col: 'name_zh' }, { max: 200 }),
@@ -190,7 +190,7 @@ export function parseValue(f: Field, raw: unknown): Parsed {
   switch (f.type) {
     case 'sku':
       if (s.length > 80 || !SKU_RE.test(s)) return bad('SKU 只能用字母、数字、点、横线、斜杠或下划线，且以字母或数字开头', 'Use letters, digits, dot, dash, slash or underscore in the SKU');
-      if (f.key === 'refbSku' && !/^REFB-./.test(s)) return bad('退货 SKU 必须以 REFB- 打头', 'A returned-goods SKU must start with REFB-');
+      if (f.key === 'refbSku' && !/^REF-./.test(s)) return bad('退货 SKU 必须以 REF- 开头', 'A returned-goods SKU must start with REF-');
       return { ok: true, value: s };
     case 'enum': {
       const k = enumKey(f, s);
@@ -230,8 +230,8 @@ export function gs1Ok(code: string) {
   return (10 - sum % 10) % 10 === check;
 }
 
-/** Rules between products: a REFB SKU belongs to one product, a replacement SKU must exist, end of sale is not before launch.
- *  index: every SKU (lower case) and every REFB SKU (lower case → its product's SKU), after the change. */
+/** Rules between products: a return SKU belongs to one product, a replacement SKU must exist, end of sale is not before launch.
+ *  index: every SKU (lower case) and every return SKU (lower case → its product's SKU), after the change. */
 export function relationIssues(sku: string, after: Record<string, any>, keys: string[], index: { skus: Set<string>; refb: Map<string, string[]> }) {
   const out: { key: string; zh: string; en: string }[] = [], has = (k: string) => keys.includes(k);
   if (after.refbSku && (has('refbSku') || has('goodsType'))) {
