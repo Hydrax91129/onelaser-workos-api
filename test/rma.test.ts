@@ -26,6 +26,12 @@ test('returns & repairs: register, diagnose, photos, repaired, restock into refu
   assert.equal((await call('m3','POST',`/rma/${id}/update`,{diagnosis:'x'})).statusCode,403);
   assert.equal((await call('m1','POST',`/rma/${id}/update`,{technicianId:'m3'})).statusCode,200);
   assert.equal((await call('m1','GET',`/rma/${id}`)).json().status,'diagnosing');
+  assert.equal((await call('m1','GET',`/rma/${id}`)).json().stage,'waiting_repair');
+  assert.equal((await call('m1','POST',`/rma/${id}/price`,{discountPct:20})).statusCode,409,'no refurbished discount before the repair is done');
+  // waiting for parts needs the parts named
+  const wp=await call('m3','POST',`/rma/${id}/update`,{status:'waiting_parts'});assert.equal(wp.statusCode,400);assert.equal(wp.json().error.code,'RMA_PARTS_NEEDED');
+  assert.equal((await call('m3','POST',`/rma/${id}/update`,{status:'waiting_parts',waitingFor:'示例激光管 ×1'})).statusCode,200);
+  const wpc=(await call('m1','GET',`/rma/${id}`)).json();assert.equal(wpc.stage,'waiting_parts');assert.equal(wpc.waitingFor,'示例激光管 ×1');
   assert.equal((await call('m3','POST',`/rma/${id}/repaired`,{})).statusCode,400,'needs a diagnosis');
   assert.equal((await call('m3','POST',`/rma/${id}/update`,{diagnosis:'激光管老化，更换激光管',partsUsed:'激光管 ×1',status:'repairing'})).statusCode,200);
   assert.equal((await call('m3','POST',`/rma/${id}/update`,{technicianId:'m1'})).statusCode,403,'technician cannot reassign');
@@ -33,7 +39,9 @@ test('returns & repairs: register, diagnose, photos, repaired, restock into refu
   assert.equal((await call('m3','POST',`/rma/${id}/photos`,{kind:'repaired',name:'after.png',mime:'image/png',dataBase64:png})).statusCode,201);
   assert.equal((await call('m3','POST',`/rma/${id}/photos`,{kind:'repaired',name:'x.svg',mime:'image/svg+xml',dataBase64:png})).statusCode,400);
   const done=await call('m3','POST',`/rma/${id}/repaired`,{repairedAt:'2026-11-06'});assert.equal(done.statusCode,200,done.body);assert.equal(done.json().repairDays,5);
-  assert.equal((await call('m1','POST',`/rma/${id}/price`,{discountPct:20})).statusCode,409,'price only after restock');
+  assert.equal((await call('m1','GET',`/rma/${id}`)).json().stage,'repaired');
+  assert.equal((await call('m1','POST',`/rma/${id}/price`,{discountPct:20})).statusCode,200,'the discount can be chosen once repaired');
+  assert.equal((await call('m1','POST',`/rma/${id}/price`,{listing:'listed'})).statusCode,409,'listing only after restock');
   assert.equal((await call('m3','POST',`/rma/${id}/close`,{outcome:'restock'})).statusCode,403,'only warehouse managers close');
   assert.equal((await call('m1','POST',`/rma/${id}/close`,{outcome:'restock',grade:'A'})).statusCode,200);
   const sum=(await call('m1','GET','/wms/summary')).json();
@@ -42,7 +50,10 @@ test('returns & repairs: register, diagnose, photos, repaired, restock into refu
   assert.equal((await call('m3','POST',`/rma/${id}/price`,{discountPct:20})).statusCode,403,'pricing is restricted');
   assert.equal((await call('m1','POST',`/rma/${id}/price`,{discountPct:20,listing:'pending'})).statusCode,200);
   const d=(await call('m1','GET',`/rma/${id}`)).json();
-  assert.equal(d.salePrice,3200);assert.equal(d.listing,'pending');assert.equal(d.repairDays,5);assert.equal(d.photos.length,1);assert.equal(d.grade,'A');
+  assert.equal(d.salePrice,3200);assert.equal(d.listing,'pending');assert.equal(d.stage,'restocked');
+  assert.equal((await call('m1','POST',`/rma/${id}/price`,{listing:'listed'})).statusCode,200);assert.equal((await call('m1','GET',`/rma/${id}`)).json().stage,'listed');
+  assert.equal((await call('m1','POST',`/rma/${id}/price`,{listing:'sold'})).statusCode,200);assert.equal((await call('m1','GET',`/rma/${id}`)).json().stage,'sold');
+  await call('m1','POST',`/rma/${id}/price`,{listing:'pending'});assert.equal(d.repairDays,5);assert.equal(d.photos.length,1);assert.equal(d.grade,'A');
   assert.ok(d.events.length>=5);
   const img=await call('m1','GET',`/rma/${id}/photos/${d.photos[0].id}`);assert.equal(img.headers['content-type'],'image/png');
   assert.equal((await call('m1','POST',`/rma/${id}/update`,{diagnosis:'y'})).statusCode,409,'closed');
@@ -64,16 +75,16 @@ async function setupRma(){
  return {db,app,call};
 }
 
-test('register a return: item class, serial required for machines, repairable, discount, and a new REF- SKU is added to WMS',async()=>{
+test('register a return: item class, serial required for machines, repairable, no discount yet, and a new REF- SKU is added to WMS',async()=>{
  const {db,app,call}=await setupRma();
  try{
   const base={qty:1,reason:'客户退货，已退款 $3,499（示例）',condition:'外观轻微划痕，配件齐全',receivedAt:'2026-11-01',repairable:'yes'};
   const noSn=await call('m1','POST','/rma',{...base,sku:'DEMO-A',productClass:'machine'});assert.equal(noSn.statusCode,400);assert.match(noSn.body,/serial/i);
   assert.equal((await call('m1','POST','/rma',{...base,sku:'DEMO-A',productClass:'accessory'})).statusCode,201,'accessories need no serial');
-  assert.equal((await call('m1','POST','/rma',{...base,sku:'DEMO-A',productClass:'machine',serial:'SN9',discountPct:15})).statusCode,400,'discount is 10, 20 or 30');
-  const r=await call('m1','POST','/rma',{...base,sku:'ref-demo-a',productClass:'machine',serial:'SN9',discountPct:20,repairable:'no'});assert.equal(r.statusCode,201,r.body);
+  assert.equal((await call('m1','POST','/rma',{...base,sku:'DEMO-A',productClass:'machine',serial:'SN9',discountPct:20})).statusCode,400,'no discount at registration');
+  const r=await call('m1','POST','/rma',{...base,sku:'ref-demo-a',productClass:'machine',serial:'SN9',repairable:'no'});assert.equal(r.statusCode,201,r.body);
   const c=(await call('m1','GET',`/rma/${r.json().id}`)).json();
-  assert.equal(c.sku,'REF-demo-a');assert.equal(c.productClass,'machine');assert.equal(c.repairable,'no');assert.equal(c.discountPct,20);
+  assert.equal(c.sku,'REF-demo-a');assert.equal(c.productClass,'machine');assert.equal(c.repairable,'no');assert.equal(c.discountPct,null);assert.equal(c.stage,'waiting_repair');
   const org=(await db.query(`SELECT org_id FROM users WHERE id='m1'`)).rows[0].org_id;
   const it=(await db.query(`SELECT name,type FROM wms_items WHERE org_id=$1 AND sku='REF-demo-a'`,[org])).rows[0];assert.equal(it.type,'return');assert.match(it.name,/退货/);
   assert.equal((await call('m1','POST','/rma',{...base,sku:'REF-demo-a',productClass:'accessory'})).statusCode,201,'the second return reuses the REF- SKU');

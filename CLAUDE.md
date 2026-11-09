@@ -26,7 +26,7 @@
 | 消息红点 | inbox.ts | inbox.js | inbox_items（其他模块只调用 `pushInbox()`，不要自建通知表） |
 | PIM 与定价 | products.ts, product-spec.ts（产品资料库字段模型）, product-library.ts, product-worksheet.ts（定价工作表）, product-import.ts（标准模板、上传预览、确认、撤销）, xlsx.ts | products.js, product-library.js | product_catalog（SKU 主数据、MSRP；产品族 family、大货/退货 goods_type、退货 SKU refb_sku（以 REF- 开头，和退货登记 RMA 用同一规则），其余规格字段在 attrs）、product_pricing（成本输入；供应商在 attrs）、pricing_rules（公司计价规则；价格参数在 worksheet 列，仓库里不放真实数值）、product_channel_prices（各渠道价格及审批；MAP=map、官网促销底价=promo_floor、批发档手动价=wh0…）、product_files（产品主图和文件栏位）、product_imports / product_import_previews（批量更新记录与预览，只有主管理员能上传和确认） |
 | WMS 库存 | wms.ts | wms.js | WMS 库位与出入库流水 |
-| 退货维修 RMA | rma.ts | rma.js | rma_cases（翻新机入库走 WMS） |
+| 退货维修 RMA | rma.ts | rma.js | rma_cases（翻新机入库走 WMS；状态：等待维修 → 等待配件（填等待什么配件）→ 完成维修 → 已入库待上架 → 完成上架 → 售出，见 rma.ts 的 `stageOf`；翻新折扣在完成维修后才能设） |
 | 经销商下单 portal | dealer.ts, dealer-admin.ts | dealers.js | dealer_accounts、dealer_orders（价格读 product_channel_prices 的 dealer 渠道，发货走 WMS 出库） |
 | 客服 | support.ts, shopify.ts | company-support.js | 工单、客服回复 |
 | HRM | hr.ts | hr.js | hr_profiles（含所属地区 region：us / cn / intl，地区资料 details）、hr_secrets（SSN、身份证号、银行账号、当地税号、薪酬与税务，均加密）、hr_salary、hr_documents、hr_events。按地区授权，见第 3 节第 6 条 |
