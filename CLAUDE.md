@@ -24,9 +24,9 @@
 | 账号、组织、权限 | auth.ts, org.ts, members.ts | people.js, erp-access.js | users（含第一领导 manager_id、第二领导 second_manager_id，两者权限相同）、departments、grants（功能权限） |
 | 任务、OKR、项目 | app.ts, task-board.ts, completions.ts, assign.ts, okr*.ts, projects.ts | task-board.js, okr-board.js, projects.js, reports.js | tasks、submissions、reviews、objectives、key_results、projects、project_files（项目附件）、project_activity（项目动态） |
 | 消息红点 | inbox.ts | inbox.js | inbox_items（其他模块只调用 `pushInbox()`，不要自建通知表） |
-| PIM 与定价 | products.ts, product-spec.ts（产品资料库字段模型）, product-library.ts, product-worksheet.ts（定价工作表）, product-import.ts（标准模板、上传预览、确认、撤销）, xlsx.ts | products.js, product-library.js | product_catalog（SKU 主数据、MSRP；产品族 family、大货/退货 goods_type、退货 SKU refb_sku，其余规格字段在 attrs）、product_pricing（成本输入；供应商在 attrs）、pricing_rules（公司计价规则；价格参数在 worksheet 列，仓库里不放真实数值）、product_channel_prices（各渠道价格及审批；MAP=map、官网促销底价=promo_floor、批发档手动价=wh0…）、product_files（产品主图和文件栏位）、product_imports / product_import_previews（批量更新记录与预览，只有主管理员能上传和确认） |
+| PIM 与定价 | products.ts, product-spec.ts（产品资料库字段模型）, product-library.ts, product-worksheet.ts（定价工作表）, product-import.ts（标准模板、上传预览、确认、撤销）, xlsx.ts | products.js, product-library.js | product_catalog（SKU 主数据、MSRP；产品族 family、大货/退货 goods_type、退货 SKU refb_sku（以 REF- 开头，和退货登记 RMA 用同一规则），其余规格字段在 attrs）、product_pricing（成本输入；供应商在 attrs）、pricing_rules（公司计价规则；价格参数在 worksheet 列，仓库里不放真实数值）、product_channel_prices（各渠道价格及审批；MAP=map、官网促销底价=promo_floor、批发档手动价=wh0…）、product_files（产品主图和文件栏位）、product_imports / product_import_previews（批量更新记录与预览，只有主管理员能上传和确认） |
 | WMS 库存 | wms.ts | wms.js | WMS 库位与出入库流水 |
-| 退货维修 RMA | rma.ts | rma.js | rma_cases（翻新机入库走 WMS） |
+| 退货维修 RMA | rma.ts | rma.js | rma_cases（登记退货只记录退货和收货照片，是否可维修、维修人员在维修环节填；翻新机入库走 WMS；状态：等待维修 → 等待配件（填等待什么配件）→ 完成维修 → 已入库待上架 → 完成上架 → 售出，见 rma.ts 的 `stageOf`；入库时按成色定折扣：A 品原封不动当新货、不打折，B 品 10% off，C 品 20% off（`GRADE_DISCOUNT`）；标记售出自动写 WMS 出库，撤销售出写回） |
 | 经销商下单 portal | dealer.ts, dealer-admin.ts | dealers.js | dealer_accounts、dealer_orders（价格读 product_channel_prices 的 dealer 渠道，发货走 WMS 出库） |
 | 客服 | support.ts, shopify.ts | company-support.js | 工单、客服回复 |
 | HRM | hr.ts | hr.js | hr_profiles（含所属地区 region：us / cn / intl，地区资料 details）、hr_secrets（SSN、身份证号、银行账号、当地税号、薪酬与税务，均加密）、hr_salary、hr_documents、hr_events。按地区授权，见第 3 节第 6 条 |
@@ -61,6 +61,10 @@
 7. **工厂对接人**：`users.quality_factory` 非空（邀请时选“工厂对接人”，或管理员在成员列表里改）的账号只能用质量追踪，后端会拦截其他接口。
    面向全公司的流程（季度确认、全员提醒、统计人数等）要用 quality.ts 的 `factoryUserIds()` 把他们排除。
 8. **任务删除是软删除**：`tasks.archived_at` 非空表示已删除（批量删除/撤销在 task-board.ts 的 `/tasks/batch-archive`、`/tasks/batch-restore`）。任何模块读 tasks 做列表、统计、提醒、排行榜都要加 `archived_at IS NULL`；按 id 取单条任务用 `visibleTask()`，它已把已删除任务当作不存在。
+9. **点完成就算完成**：负责人点“完成”（`/tasks/:id/complete`）任务马上算完成，别人派的任务也一样，不再等验收。
+   评分是可选的：验收人、派任务的人、直属领导或管理员 24 小时内可打 0–10 分，没人打分时由 AI 评分；
+   人打分低于 5 分（completions.ts 的 `LOW_SCORE`）任务退回未完成（status `revision`），负责人改完再点完成。
+   旧的“提交 / 验收”接口（submissions、reviews）保留给机器人和老数据用，网页不再用它来完成任务。
 
 ## 4. 开发规则（所有改动都走 PR）
 
