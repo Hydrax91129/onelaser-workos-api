@@ -9,14 +9,16 @@
  *
  * Access: anyone who can view warehouse stock can view cases; warehouse managers register and close
  * cases; the assigned technician can update diagnosis, photos and mark the repair done; prices are set
- * by company admins and people with the MSRP pricing grant. SKUs are never created here. */
+ * by company admins and people with the MSRP pricing grant. Registration also records what the item is (machine, accessory,
+ * material, other; machines need a serial), whether it can be repaired and the suggested refurbished discount. A return SKU
+ * starting with RE- that is not in the item list yet is added to WMS (ensureReturnItem); other SKUs must already exist. */
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
 import { deny } from './errors.js';
-import { LOCATIONS, warehouseLevelFor } from './wms.js';
+import { LOCATIONS, warehouseLevelFor, ensureReturnItem } from './wms.js';
 
 export const rmaSchema = `
 CREATE TABLE IF NOT EXISTS rma_cases(id text PRIMARY KEY, org_id text NOT NULL, number text NOT NULL, sku text NOT NULL, serial text NOT NULL DEFAULT '',
@@ -32,13 +34,16 @@ CREATE INDEX IF NOT EXISTS rma_photos_case ON rma_photos(case_id);
 CREATE TABLE IF NOT EXISTS rma_events(id text PRIMARY KEY, org_id text NOT NULL, case_id text NOT NULL, actor_id text NOT NULL, action text NOT NULL, note text NOT NULL DEFAULT '',
   created_at timestamptz NOT NULL DEFAULT now());
 CREATE INDEX IF NOT EXISTS rma_events_case ON rma_events(case_id, created_at);
+ALTER TABLE rma_cases ADD COLUMN IF NOT EXISTS product_class text NOT NULL DEFAULT '';
+ALTER TABLE rma_cases ADD COLUMN IF NOT EXISTS repairable text NOT NULL DEFAULT '';
 `;
 
 export const RMA_STATUSES = ['received', 'diagnosing', 'waiting_parts', 'repairing', 'repaired', 'restocked', 'scrapped', 'returned'] as const;
 const OPEN = ['received', 'diagnosing', 'waiting_parts', 'repairing', 'repaired'];
 const KINDS = ['return', 'warranty', 'repair', 'exchange'] as const;
 const CHANNELS = ['website', 'amazon', 'dealer', 'other'] as const;
-const PHOTO_KINDS = ['received', 'diagnosis', 'repaired'] as const;
+const PHOTO_KINDS = ['received', 'diagnosis', 'repaired', 'listing'] as const;
+const CLASSES = ['machine', 'accessory', 'material', 'other'] as const;
 const PHOTO_MIME = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 const MAX_PHOTO = 5 * 1024 * 1024, MAX_PHOTOS = 40;
 const LOC_IDS = LOCATIONS.map(l => l.id) as [string, ...string[]];
@@ -77,6 +82,7 @@ export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: {
     const list = msrp.get(c.sku) ?? null, pct = c.discount_pct == null ? null : Number(c.discount_pct);
     return {
       id: c.id, number: c.number, sku: c.sku, name: items.get(c.sku)?.name || '', serial: c.serial, qty: Number(c.qty), kind: c.kind, channel: c.channel,
+      productClass: c.product_class || '', repairable: c.repairable || '',
       customer: c.customer, orderRef: c.order_ref, reason: c.reason, condition: c.condition, receivedAt: ymd(c.received_at), status: c.status,
       diagnosis: c.diagnosis, technicianId: c.technician_id, technicianName: nameOf(ppl.get(c.technician_id)), repairNotes: c.repair_notes, partsUsed: c.parts_used,
       repairedAt: ymd(c.repaired_at), outcome: c.outcome, restockLocation: c.restock_location, grade: c.grade, closedAt: c.closed_at,
@@ -116,23 +122,26 @@ export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: {
   });
 
   const createInput = z.object({
-    sku, serial: z.string().trim().max(80).optional(), qty: z.number().int().min(1).max(500).default(1), kind: z.enum(KINDS), channel: z.enum(CHANNELS).optional(),
+    sku, serial: z.string().trim().max(80).optional(), qty: z.number().int().min(1).max(500).default(1), kind: z.enum(KINDS).default('return'), channel: z.enum(CHANNELS).optional(),
+    productClass: z.enum(CLASSES), repairable: z.enum(['yes', 'no']), discountPct: z.union([z.literal(10), z.literal(20), z.literal(30)]).optional(),
     customer: z.string().trim().max(120).optional(), orderRef: z.string().trim().max(80).optional(), reason: z.string().trim().min(2).max(2000),
-    condition: z.string().trim().max(1000).optional(), receivedAt: day, technicianId: id.optional(),
+    condition: z.string().trim().min(2).max(1000), receivedAt: day, technicianId: id.optional(),
   }).strict();
   app.post('/rma', async (req, reply) => {
     const u = actorOf(req), v = createInput.parse(req.body); requireManage(u);
     if (v.receivedAt > new Date(now() + 86400000).toISOString().slice(0, 10)) deny(400, 'RMA_FUTURE_DATE', 'The received date cannot be in the future');
+    if (v.productClass === 'machine' && !v.serial) deny(400, 'RMA_SERIAL_REQUIRED', 'A machine needs its serial number');
     const row = await db.transaction(async tx => {
-      const item = (await tx.query('SELECT sku FROM wms_items WHERE org_id=$1 AND lower(sku)=lower($2)', [u.org_id, v.sku])).rows[0];
-      if (!item) deny(400, 'RMA_UNKNOWN_SKU', 'This SKU is not in the product list; product management must create it first');
+      let item = (await tx.query('SELECT sku FROM wms_items WHERE org_id=$1 AND lower(sku)=lower($2)', [u.org_id, v.sku])).rows[0];
+      if (!item && /^RE-[A-Za-z0-9]/i.test(v.sku)) item = { sku: await ensureReturnItem(tx, u.org_id, u.id, 'RE-' + v.sku.slice(3)) };
+      if (!item) deny(400, 'RMA_UNKNOWN_SKU', 'This SKU is not in the item list; a return SKU starts with RE- (for example RE-XRF38)');
       if (v.technicianId && !(await technicianOk(tx, u.org_id, v.technicianId))) deny(400, 'RMA_TECHNICIAN', 'Choose an active colleague with warehouse access as technician');
       const year = v.receivedAt.slice(0, 4);
       const n = Number((await tx.query("SELECT count(*)::int n FROM rma_cases WHERE org_id=$1 AND number LIKE $2", [u.org_id, `RMA-${year}-%`])).rows[0].n) + 1;
       const caseId = randomUUID(), number = `RMA-${year}-${String(n).padStart(4, '0')}`;
-      const c = (await tx.query(`INSERT INTO rma_cases(id,org_id,number,sku,serial,qty,kind,channel,customer,order_ref,reason,condition,received_at,technician_id,status,created_by)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
-        [caseId, u.org_id, number, item.sku, v.serial || '', v.qty, v.kind, v.channel || '', v.customer || '', v.orderRef || '', v.reason, v.condition || '', v.receivedAt, v.technicianId || null, v.technicianId ? 'diagnosing' : 'received', u.id])).rows[0];
+      const c = (await tx.query(`INSERT INTO rma_cases(id,org_id,number,sku,serial,qty,kind,channel,customer,order_ref,reason,condition,received_at,technician_id,status,created_by,product_class,repairable,discount_pct)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING *`,
+        [caseId, u.org_id, number, item.sku, v.serial || '', v.qty, v.kind, v.channel || '', v.customer || '', v.orderRef || '', v.reason, v.condition, v.receivedAt, v.technicianId || null, v.technicianId ? 'diagnosing' : 'received', u.id, v.productClass, v.repairable, v.discountPct ?? null])).rows[0];
       await event(tx, u, caseId, 'created', v.reason);
       await audit(tx, u, 'rma.created', caseId, { number, sku: item.sku, qty: v.qty });
       return c;
