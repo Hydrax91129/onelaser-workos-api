@@ -61,6 +61,10 @@
 7. **工厂对接人**：`users.quality_factory` 非空（邀请时选“工厂对接人”，或管理员在成员列表里改）的账号只能用质量追踪，后端会拦截其他接口。
    面向全公司的流程（季度确认、全员提醒、统计人数等）要用 quality.ts 的 `factoryUserIds()` 把他们排除。
 8. **任务删除是软删除**：`tasks.archived_at` 非空表示已删除（批量删除/撤销在 task-board.ts 的 `/tasks/batch-archive`、`/tasks/batch-restore`）。任何模块读 tasks 做列表、统计、提醒、排行榜都要加 `archived_at IS NULL`；按 id 取单条任务用 `visibleTask()`，它已把已删除任务当作不存在。
+9. **点完成就算完成**：负责人点“完成”（`/tasks/:id/complete`）任务马上算完成，别人派的任务也一样，不再等验收。
+   评分是可选的：验收人、派任务的人、直属领导或管理员 24 小时内可打 0–10 分，没人打分时由 AI 评分；
+   人打分低于 5 分（completions.ts 的 `LOW_SCORE`）任务退回未完成（status `revision`），负责人改完再点完成。
+   旧的“提交 / 验收”接口（submissions、reviews）保留给机器人和老数据用，网页不再用它来完成任务。
 
 ## 4. 开发规则（所有改动都走 PR）
 
