@@ -8,7 +8,7 @@ import { registerPublicWikiRoutes, PUBLIC_WIKI_PATHS, type PublicWikiOptions } f
 import { registerShopifyRoutes, type ShopifyOptions } from './shopify.js';
 import { registerOkrRoutes } from './okr.js';
 import { registerOkrCollabRoutes } from './okr-collab.js';
-import { registerCompletionRoutes, jsonModel, claudeModel, type JsonModel } from './completions.js';
+import { registerCompletionRoutes, jsonModel, claudeModel, REVIEW_TIMEOUT_MS, type JsonModel } from './completions.js';
 import { registerTranslateRoutes } from './translate.js';
 import { registerOkrAiRoutes } from './okr-ai.js';
 import { registerAssignRoutes, TASK_SOURCE_COLUMNS } from './assign.js';
@@ -201,6 +201,8 @@ export async function buildApp(options:AppOptions) {
   registerPublicWikiRoutes(app,db,options.publicWiki,options.support,integrations.executiveUserIds);
   registerShopifyRoutes(app,db,options.shopify,options.support,integrations.executiveUserIds);
   registerTaskBoardRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
+  /* The reviewer's own to-do list. /task-board only returns tasks the person owns, so the home page needs this to see work others submitted for them. */
+  app.get('/tasks/awaiting-my-review',async req=>{const user=actor(req);const rows=(await db.query("SELECT t.id,t.title,t.owner_id,t.reviewer_id,t.status,t.due_at,t.submission_version,s.created_at AS submitted_at FROM tasks t JOIN submissions s ON s.task_id=t.id AND s.version=t.submission_version WHERE t.org_id=$1 AND t.reviewer_id=$2 AND t.owner_id<>$2 AND t.status='submitted' AND t.archived_at IS NULL ORDER BY s.created_at,t.id LIMIT 500",[user.org_id,user.id])).rows;return {items:rows.map((r:any)=>({...r,auto_accept_at:new Date(new Date(r.submitted_at).getTime()+REVIEW_TIMEOUT_MS).toISOString()}))};});
   app.get('/tasks',async req=>{
     const user=actor(req),[where,params]=scope(user);await applyAutoStatus(db,user.org_id);
     return {items:(await db.query(`SELECT tasks.*,CASE WHEN tasks.status='accepted' THEN (SELECT r.created_at FROM reviews r WHERE r.task_id=tasks.id AND r.submission_version=tasks.submission_version AND r.decision='accept' ORDER BY r.created_at DESC,r.id DESC LIMIT 1) ELSE NULL END AS accepted_at,(SELECT json_build_object('ai_status',c.ai_status,'ai_score',c.ai_score,'human_score',c.human_score,'final_score',COALESCE(c.human_score,CASE WHEN c.ai_status='scored' THEN c.ai_score END),'score_source',CASE WHEN c.human_score IS NOT NULL THEN 'human' WHEN c.ai_status='scored' THEN 'ai' END,'score_due_at',c.created_at+interval '24 hours') FROM task_completions c WHERE c.task_id=tasks.id AND c.superseded_at IS NULL ORDER BY c.created_at DESC LIMIT 1) AS completion,${TASK_SOURCE_COLUMNS} FROM tasks WHERE ${where} AND archived_at IS NULL ORDER BY created_at,id LIMIT 100`,[...params])).rows,limit:100};
@@ -229,6 +231,7 @@ export async function buildApp(options:AppOptions) {
   });
   app.post<{Params:{id:string}}>('/tasks/:id/submissions',async(req,reply)=>{
     const user=actor(req),input=submissionInput.parse(req.body),id=identifier.parse(req.params.id);
+    let waitingReviewer:{id:string,title:string}|null=null;
     const result=await db.transaction(async tx=>{
       const task=await loadTask(tx,user,id,true);
       if(task.owner_id!==user.id) deny(403,'FORBIDDEN','Only the task owner can submit evidence');
@@ -239,8 +242,11 @@ export async function buildApp(options:AppOptions) {
       const submission=(await tx.query('INSERT INTO submissions(id,task_id,version,submitted_by,title,description,evidence_url,attachment_ids) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *',[randomUUID(),id,version,user.id,submissionTitle(input.title,input.description),input.description,input.evidenceUrl||null,attachmentIds])).rows[0];
       await tx.query('UPDATE tasks SET version=version+1,submission_version=$2,status=$3,board_status=$4,board_done_at=NULL,updated_at=now(),updated_by=$5 WHERE id=$1',[id,version,'submitted','review',user.id]);
       await audit(tx,user,'submission.created',id,{submissionVersion:version,previousReviewInvalidated:true},task.owner_id);
-      await pushInbox(tx,{orgId:task.org_id,recipients:[task.reviewer_id,task.assigned_by,task.created_by],actorId:user.id,kind:'submission',taskId:id,title:task.title,body:input.description});return {submission,taskVersion:task.version+1};
-    });return reply.code(201).send(result);
+      await pushInbox(tx,{orgId:task.org_id,recipients:[task.reviewer_id,task.assigned_by,task.created_by],actorId:user.id,kind:'submission',taskId:id,title:task.title,body:input.description});if(task.reviewer_id&&task.reviewer_id!==user.id)waitingReviewer={id:task.reviewer_id,title:task.title};return {submission,taskVersion:task.version+1};
+    });
+    // After commit, and not awaited: a slow DingTalk or email call must not hold up or fail the submission. The bell item is already saved.
+    if(waitingReviewer&&notify){const w=waitingReviewer as {id:string,title:string};void notify(w.id,`【WorkOS】${user.display_name} 提交了「${w.title}」的成果，等你验收。3 天内没有确认或退回，系统会自动通过。`).catch(()=>{});}
+    return reply.code(201).send(result);
   });
   app.post<{Params:{id:string}}>('/tasks/:id/reviews',async(req,reply)=>{
     const user=actor(req),input=reviewInput.parse(req.body),id=identifier.parse(req.params.id);

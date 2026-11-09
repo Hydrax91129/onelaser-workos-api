@@ -153,10 +153,54 @@ test('half-yearly login, authoritative upfront price, referral commission and si
  await recordVerifiedCaldockPayment(db,{eventId:'half-yearly-verified-paid',orderId:row.id,type:'paid',amountCents:91260,currency:'USD'});
  const ledger=(await db.query('SELECT amount_cents FROM caldock_commissions WHERE order_id=$1',[row.id])).rows[0];assert.equal(ledger.amount_cents,18252);
  const paid=(await send(customer,'GET','/orders/'+row.id)).json();
+ const beforeDelivery=(await send(owner,'GET','/admin/customers')).json().items.find((u:any)=>u.id===row.customer_id);const beforeDeliveryExpected=(await db.query("SELECT paid_at,paid_at+interval '6 months' AS ends_at FROM caldock_orders WHERE id=$1",[row.id])).rows[0];assert.equal(new Date(beforeDelivery.service_starts_at).getTime(),new Date(beforeDeliveryExpected.paid_at).getTime());assert.equal(new Date(beforeDelivery.service_ends_at).getTime(),new Date(beforeDeliveryExpected.ends_at).getTime());
  const provisioning=(await send(owner,'PATCH','/admin/orders/'+row.id,{status:'provisioning',expectedVersion:paid.version})).json();
  const delivered=await send(owner,'PATCH','/admin/orders/'+row.id,{status:'active',expectedVersion:provisioning.version});assert.equal(delivered.statusCode,200,delivered.body);
  assert.equal((await db.query("SELECT billing_ends_at=paid_at+interval '6 months' AS correct_term FROM caldock_orders WHERE id=$1",[row.id])).rows[0].correct_term,true);
+ const afterDelivery=(await send(owner,'GET','/admin/customers')).json().items.find((u:any)=>u.id===row.customer_id);const afterDeliveryExpected=(await db.query("SELECT paid_at,paid_at+interval '6 months' AS ends_at FROM caldock_orders WHERE id=$1",[row.id])).rows[0];assert.equal(new Date(afterDelivery.service_starts_at).getTime(),new Date(afterDeliveryExpected.paid_at).getTime());assert.equal(new Date(afterDelivery.service_ends_at).getTime(),new Date(afterDeliveryExpected.ends_at).getTime());
 });
 test('logout revokes the server session and clears the cookie',async()=>{
  assert.equal((await send(other,'DELETE','/session')).statusCode,200);assert.equal((await send(other,'GET','/me')).statusCode,401);
+});
+test('profile answers are optional, validated, editable by the customer and visible to admins only',async()=>{
+ const customer=await login('profile-answers-customer','google',undefined,'month');
+ assert.deepEqual(customer.user.profile_answers,{});
+ assert.equal((await send(customer,'PATCH','/profile/answers',{appleId:'maybe'})).statusCode,400);
+ assert.equal((await send(customer,'PATCH','/profile/answers',{password:'x'})).statusCode,400);
+ assert.equal((await send(customer,'PATCH','/profile/answers',{source:'friend',sourceDetail:'chatgpt'})).statusCode,400);
+ assert.equal((await send(customer,'PATCH','/profile/answers',{uses:['coding','coding']})).statusCode,400);
+ const saved=await send(customer,'PATCH','/profile/answers',{appleId:'yes',source:'social',sourceDetail:'xiaohongshu',sourceNote:'  a post  ',uses:['coding','content'],wechat:'wodemac_test'});assert.equal(saved.statusCode,200,saved.body);
+ const expected={appleId:'yes',email:null,card:null,source:'social',sourceDetail:'xiaohongshu',sourceNote:'a post',uses:['coding','content'],teamSize:null,wechat:'wodemac_test'};
+ assert.deepEqual(saved.json().profile_answers,expected);
+ assert.deepEqual((await send(customer,'GET','/me')).json().user.profile_answers,expected);
+ const row=(await send(customer,'POST','/orders',{interval:'month',requestKey:randomUUID()})).json();
+ assert.deepEqual((await send(owner,'GET','/admin/orders?search='+row.id)).json().items[0].customer_answers,expected);
+ assert.deepEqual((await send(owner,'GET','/admin/customers')).json().items.find((u:any)=>u.id===customer.user.id).profile_answers,expected);
+ assert.equal((await send(customer,'GET','/admin/customers')).statusCode,403);
+ const audit=(await db.query("SELECT details FROM caldock_audit WHERE action='profile.answers' AND object_id=$1",[customer.user.id])).rows[0];assert.ok(!JSON.stringify(audit.details).includes('wodemac_test'));
+ const cleared=await send(customer,'PATCH','/profile/answers',{});assert.equal(cleared.statusCode,200);assert.equal(cleared.json().profile_answers.source,null);
+});
+test('answers saved on an order before the move are copied to the account once',async()=>{
+ const legacy=await login('order-answers-legacy');
+ const row=(await send(legacy,'POST','/orders',{interval:'month',requestKey:randomUUID()})).json();
+ await db.query(`UPDATE caldock_orders SET setup_answers='{"appleId":"yes","email":null,"card":"no"}',setup_updated_at=now() WHERE id=$1`,[row.id]);
+ await db.exec(caldockSchema);await db.exec(caldockSchema);
+ assert.deepEqual((await send(legacy,'GET','/me')).json().user.profile_answers,{appleId:'yes',email:null,card:'no'});
+ assert.equal((await send(legacy,'PATCH','/profile/answers',{card:'yes'})).statusCode,200);
+ await db.exec(caldockSchema);
+ assert.equal((await send(legacy,'GET','/me')).json().user.profile_answers.card,'yes');
+});
+test('admins see one customer in full; customers cannot',async()=>{
+ const code=(await send(affiliate,'GET','/affiliate')).json().affiliate.code;
+ const customer=await login('detail-customer','apple',code,'year');
+ await send(customer,'PATCH','/profile/answers',{source:'friend',sourceNote:'Alice',wechat:'detail_wx'});
+ const row=(await send(customer,'POST','/orders',{interval:'year',requestKey:randomUUID()})).json();
+ assert.equal((await send(customer,'GET','/admin/customers/'+customer.user.id)).statusCode,403);
+ assert.equal((await send(owner,'GET','/admin/customers/'+randomUUID())).statusCode,404);
+ const detail=await send(owner,'GET','/admin/customers/'+customer.user.id);assert.equal(detail.statusCode,200,detail.body);
+ const d=detail.json();
+ assert.equal(d.user.email,'detail-customer@example.test');assert.deepEqual(d.signInMethods,['apple']);assert.ok(d.lastSignIn);
+ assert.equal(d.user.profile_answers.wechat,'detail_wx');assert.equal(d.referredBy.code,code);
+ assert.equal(d.orders[0].id,row.id);assert.equal(d.paidCents,0);assert.equal(d.affiliate,null);
+ const partner=(await send(owner,'GET','/admin/customers/'+affiliate.user.id)).json();assert.equal(partner.affiliate.code,code);assert.ok(partner.affiliate.registrations>=1);
 });

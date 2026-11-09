@@ -1,7 +1,9 @@
 /* In-app inbox: a red dot for anything new that concerns me.
  *   inbox_items  task interactions (new task, progress update, submission, review, completion)
  *   task_nudges  reminders and assignments already recorded by the follow-up engine (assign.ts, okr-cycle.ts)
- * GET /inbox merges both, newest first, with an unread count; POST /inbox/read marks items read. */
+ * GET /inbox merges both, newest first, with an unread count; POST /inbox/read marks items read.
+ * Each item is either an action (the reader has to do something: review a result, pick up a new task, rework, a reminder)
+ * or an update (for information only). An action stays open until it is handled, e.g. the result is reviewed. */
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
@@ -38,13 +40,26 @@ export async function registerInboxRoutes(app: FastifyInstance, db: Database) {
       FROM inbox_items i WHERE i.org_id=$1 AND i.user_id=$2 AND i.created_at>$3 ORDER BY i.created_at DESC LIMIT 60`, [u.org_id, u.id, since])).rows;
     const nudges = (await db.query(`SELECT n.*, t.title AS task_title FROM task_nudges n LEFT JOIN tasks t ON t.id=n.task_id
       WHERE n.org_id=$1 AND t.archived_at IS NULL AND n.user_id=$2 AND n.created_at>$3 ORDER BY n.created_at DESC LIMIT 60`, [u.org_id, u.id, since])).rows;
+    // Task state decides whether an action item is still open (reviewed, picked up, reworked, deleted).
+    const taskIds = [...new Set([...own, ...nudges].map((r: any) => r.task_id).filter((x: any) => x && !String(x).includes(':')))];
+    const tasks = new Map((taskIds.length ? (await db.query('SELECT id,status,board_status,owner_id,reviewer_id,archived_at FROM tasks WHERE org_id=$1 AND id=ANY($2::text[])', [u.org_id, taskIds])).rows : []).map((t: any) => [t.id, t]));
+    const classify = (kind: string, taskId: string | null, read: boolean) => {
+      const t: any = taskId ? tasks.get(taskId) : null, gone = !!taskId && !String(taskId).includes(':') && (!t || t.archived_at);
+      const reviewer = t?.reviewer_id === u.id, owner = t?.owner_id === u.id;
+      if ((kind === 'submission' || kind === 'completion') && reviewer) return { action: true, done: gone || t.status === 'accepted' || (kind === 'submission' && t.status !== 'submitted') };
+      if ((kind === 'task_new' || kind === 'assigned') && owner) return { action: true, done: gone || t.status === 'accepted' || t.board_status !== 'not_started' };
+      if (kind === 'review_revise' && owner) return { action: true, done: gone || t.status !== 'revision' };
+      if (['nudge', 'okr', 'hr_reminder', 'it_reminder', 'quality'].includes(kind)) return { action: true, done: gone || read };
+      return { action: false, done: true };
+    };
     const items = [
       ...own.map((r: any) => ({ id: r.id, source: 'inbox', kind: r.kind, taskId: r.task_id, title: r.title, body: r.body, actorName: r.actor_name, actorNames: r.actor_names, createdAt: r.created_at, read: !!r.read_at })),
       ...nudges.map((r: any) => { const okr = String(r.kind).startsWith('okr_') || String(r.task_id).startsWith('okr:');
         if (String(r.task_id).startsWith('quality:')) return { id: r.id, source: 'nudge', kind: 'quality', taskId: null, issueId: String(r.task_id).slice(8), title: '', body: r.message, actorName: null, actorNames: null, createdAt: r.created_at, read: !!r.read_at };
         return { id: r.id, source: 'nudge', kind: okr ? 'okr' : r.kind === 'assigned' ? 'assigned' : 'nudge', taskId: okr ? null : r.task_id, title: r.task_title || '', body: r.message, actorName: null, actorNames: null, createdAt: r.created_at, read: !!r.read_at }; }),
-    ].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, 60);
-    return { items, unread: items.filter(i => !i.read).length };
+    ].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, 60)
+      .map((i: any) => ({ ...i, ...classify(i.kind, i.taskId, i.read) }));
+    return { items, unread: items.filter(i => !i.read).length, actionOpen: items.filter(i => i.action && !i.done).length, updatesUnread: items.filter(i => !i.action && !i.read).length };
   });
   app.post('/inbox/read', async req => {
     const u = actorOf(req), v = z.object({ ids: z.array(z.string().min(1).max(100)).max(200).optional(), all: z.boolean().optional() }).strict().parse(req.body);

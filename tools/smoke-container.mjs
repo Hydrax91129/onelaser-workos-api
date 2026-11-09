@@ -71,13 +71,14 @@ assert.equal(health.database, 'postgres');
 const capabilities = await (await fetch(origin + '/api/capabilities')).json();
 const onSite=(path)=>new Promise((done,fail)=>{const u=new URL(origin+path);const r=httpRequest({hostname:u.hostname,port:u.port,path,headers:{host:'wodemac.com'}},res=>{let body='';res.setEncoding('utf8');res.on('data',c=>{body+=c;});res.on('end',()=>done({status:res.statusCode,headers:res.headers,body}));});r.on('error',fail);r.end();});
 const caldockPage=await onSite('/?view=login&lang=zh');
-assert.equal(caldockPage.status,200);assert.match(caldockPage.body,/wodeMac/);
+assert.equal(caldockPage.status,200);assert.match(caldockPage.body,/WodeMac/);
 assert.equal(caldockPage.headers['cache-control'],'no-store');
 assert.match(caldockPage.headers['content-security-policy'],/connect-src 'self'/);
 assert.match(caldockPage.headers['content-security-policy'],/frame-ancestors 'none'/);
 const caldockBuild=JSON.parse((await onSite('/build-info.json')).body);
 assert.equal(caldockBuild.caldockCommit,(await readFile(new URL('../deploy/caldock-revision.txt',import.meta.url),'utf8')).trim());
 assert.equal((await onSite('/api/caldock/capabilities')).status,200);
+for(const route of ['/decision-studio/','/decision-studio/studio.js','/api/caldock/studio/state']){assert.equal((await onSite(route)).status,404);assert.equal((await fetch(origin+route,{redirect:'manual'})).status,404);}
 assert.equal((await onSite('/healthz')).status,200);
 for(const closed of ['/api/health','/api/tasks','/wiki/','/caldock/.env'])assert.equal((await onSite(closed)).status,404,closed);
 const legacyRedirect=await fetch(origin+'/caldock/?view=login&lang=zh',{redirect:'manual'});assert.equal(legacyRedirect.status,308);assert.equal(legacyRedirect.headers.get('location'),'https://wodemac.com/?view=login&lang=zh');
