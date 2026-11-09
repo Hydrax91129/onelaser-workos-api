@@ -55,12 +55,18 @@ CalDock uses Stripe Checkout subscriptions: monthly $199, quarterly $507 every 3
 
 Activation (the Stripe account owner or an operator with Render access; never paste keys into GitHub, chat or the frontend):
 
-1. In Stripe **test mode**, Developers → API keys: create a **restricted key** with write access to Checkout Sessions and Subscriptions and read access to Customers and Invoices (a standard `sk_test_` key also works).
+1. In Stripe **test mode**, Developers → API keys: create a **restricted key** with write access to Checkout Sessions, Subscriptions and Coupons (5+ yearly Macs get a fixed coupon) and read access to Customers and Invoices (a standard `sk_test_` key also works).
 2. Developers → Webhooks → Add endpoint: `https://craftos.app/api/caldock/stripe/webhook`. Events: `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `invoice.paid`, `invoice.payment_failed`, `customer.subscription.updated`, `customer.subscription.deleted`, `charge.refunded`. Copy its signing secret (`whsec_…`).
 3. Render private environment variables: `CALDOCK_STRIPE_SECRET_KEY` and `CALDOCK_STRIPE_WEBHOOK_SECRET`, then redeploy.
 4. Check `https://craftos.app/api/caldock/capabilities`: `"payments":true,"paymentMode":"test"`.
 
 Live money needs a separate decision: replace both values with live-mode ones **and** set `CALDOCK_STRIPE_ALLOW_LIVE=true`. A live key without that switch, or any malformed value, disables CalDock payments only (logged at startup); Work OS keeps running.
+
+Switching to another Stripe account (subscriptions already paid on the old one keep working):
+1. In the new account, repeat steps 1–2 (same webhook URL and events) and put its key and signing secret in `CALDOCK_STRIPE_SECRET_KEY` / `CALDOCK_STRIPE_WEBHOOK_SECRET`.
+2. Move the old account's two values to `CALDOCK_STRIPE_PREVIOUS_SECRET_KEY` / `CALDOCK_STRIPE_PREVIOUS_WEBHOOK_SECRET`, and leave the old account's webhook endpoint in place.
+3. New payment pages always open on the new account. Webhooks are accepted when signed by either account. Stopping renewal, delivery and closing a payment page try the new account first and, on "not found", the old one.
+4. Both accounts must be in the same mode; a half-set or mismatched previous account disables CalDock payments (logged at startup). Remove both `PREVIOUS` values once the old account has no live subscriptions.
 
 Behaviour:
 - `POST /caldock/orders/:id/checkout` (signed-in owner, Origin + CSRF) returns one hosted Checkout URL per pending order and reuses it while open. The frontend only navigates to `https://checkout.stripe.com`.

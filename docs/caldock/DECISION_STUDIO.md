@@ -1,5 +1,7 @@
 # Decision Studio V4
 
+**Not public since 2026-11-08 (owner decision).** Caddy answers 404 for the page and for `/api/caldock/studio/*` on every host, and the release no longer fetches its files. Shared data stays in the database. The rest of this page describes the earlier public setup.
+
 User decision on 2026-11-01: viewing is public for everyone. Shared writes require a valid existing CalDock session and an explicit `caldock_studio_members` role. Work OS sessions, commerce admin rights and first visits grant no studio editing privileges.
 
 The page is built from the pinned `Yonge6/mac-mini-rental` revision and mounted independently at `/decision-studio/`. The public GitHub Pages calculator uses browser-local storage and links here; it does not send browser-local edits to the shared state at sign-in. Commerce pricing and orders are untouched.

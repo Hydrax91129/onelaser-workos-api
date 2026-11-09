@@ -123,4 +123,12 @@ ALTER TABLE caldock_settings ADD COLUMN IF NOT EXISTS month_commission_bps integ
 ALTER TABLE caldock_settings ADD COLUMN IF NOT EXISTS quarter_commission_bps integer NOT NULL DEFAULT 750 CHECK(quarter_commission_bps BETWEEN 0 AND 10000);
 ALTER TABLE caldock_settings ADD COLUMN IF NOT EXISTS half_commission_bps integer NOT NULL DEFAULT 1000 CHECK(half_commission_bps BETWEEN 0 AND 10000);
 ALTER TABLE caldock_settings ADD COLUMN IF NOT EXISTS year_commission_bps integer NOT NULL DEFAULT 1500 CHECK(year_commission_bps BETWEEN 0 AND 10000);
+-- Customer's own answers before setup (US Apple ID, US email, US credit card). All optional; customer and admins can change them.
+ALTER TABLE caldock_orders ADD COLUMN IF NOT EXISTS setup_answers jsonb NOT NULL DEFAULT '{}';
+ALTER TABLE caldock_orders ADD COLUMN IF NOT EXISTS setup_updated_at timestamptz;
+-- Customer questionnaire on the account (setup readiness, how they found us, use, team size, WeChat). All optional and editable by the customer.
+-- Supersedes the per-order setup_answers above, which new code no longer writes; answers already given there are copied once.
+ALTER TABLE caldock_users ADD COLUMN IF NOT EXISTS profile_answers jsonb NOT NULL DEFAULT '{}';
+ALTER TABLE caldock_users ADD COLUMN IF NOT EXISTS profile_updated_at timestamptz;
+UPDATE caldock_users u SET profile_answers=o.setup_answers,profile_updated_at=o.setup_updated_at FROM (SELECT DISTINCT ON (customer_id) customer_id,setup_answers,setup_updated_at FROM caldock_orders WHERE setup_answers<>'{}' ORDER BY customer_id,setup_updated_at DESC NULLS LAST) o WHERE o.customer_id=u.id AND u.profile_answers='{}';
 `;
