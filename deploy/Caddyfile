@@ -53,17 +53,17 @@ http://:{$PORT:10000} {
         reverse_proxy 127.0.0.1:3001
     }
     handle_path /api/* {
+        # Decision Studio is not public; see the page block below.
+        @closed_studio_api path /caldock/studio /caldock/studio/*
+        respond @closed_studio_api 404
         reverse_proxy 127.0.0.1:3001
     }
     handle /api {
         redir * /api/ 308
     }
-    handle /decision-studio {
-        redir * /decision-studio/?{http.request.uri.query} 308
-    }
-    handle_path /decision-studio/* {
-        root * /app/caldock/decision-studio
-        file_server
+    # Decision Studio is not public (owner decision, 2026-11-08).
+    handle /decision-studio* {
+        respond 404
     }
     # The storefront moved to its own domain; old links keep their path and query.
     handle /caldock {
@@ -121,7 +121,10 @@ http://wodemac.com:{$PORT:10000} {
         rewrite * /health
         reverse_proxy 127.0.0.1:3001
     }
-    @caldock_api path /api/caldock /api/caldock/*
+    @caldock_api {
+        path /api/caldock /api/caldock/*
+        not path /api/caldock/studio /api/caldock/studio/*
+    }
     handle @caldock_api {
         uri strip_prefix /api
         reverse_proxy 127.0.0.1:3001
@@ -130,7 +133,7 @@ http://wodemac.com:{$PORT:10000} {
         respond 404
     }
     handle /decision-studio* {
-        redir https://craftos.app{uri} 308
+        respond 404
     }
     handle {
         root * /app/caldock
