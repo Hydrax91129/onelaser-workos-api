@@ -16,7 +16,7 @@
 import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { buildApp } from '../src/app.js';
 import { createDatabase, schema, seedDemo } from '../src/db.js';
 import { issueSession } from '../src/auth.js';
@@ -123,6 +123,14 @@ const app = await buildApp({
     await call('POST', `/projects/${proj.id}/tasks`, { title, ownerId: owner, groupId: g.id, dueAt: day(d) });
   await call('POST', `/projects/${proj.id}/files`, { name: '活动方案（示例）.pdf', category: 'brief', dataBase64: Buffer.from('%PDF-1.4\n% fictional sample\n').toString('base64') });
   await call('POST', `/projects/${proj.id}/updates`, { health: 'on_track', body: '方案在评审，素材开始制作（示例）。' });
+  // Inbox samples for the main admin: one result to review and one new task (need you), progress updates (for information).
+  const as = async (who: string) => { const t = (await issueSession(db, who)).accessToken; return (method: string, url: string, payload?: unknown) => app.inject({ method: method as any, url, payload: payload as any, headers: { authorization: `Bearer ${t}` } }); };
+  const m2 = await as('m2'), m4 = await as('m4');
+  const t1 = (await call('POST', '/tasks', { title: '整理示例经销商价目表', description: '虚构示例任务，用来演示通知。', ownerId: 'm2', criteria: ['提交价目表文件'], dueAt: day(4) })).json();
+  await m2('POST', `/tasks/${t1.id}/updates`, { requestId: randomUUID(), body: '价目表初稿已完成，正在核对（示例）。' });
+  const v1 = (await m2('GET', `/tasks/${t1.id}`)).json().version;
+  await m2('POST', `/tasks/${t1.id}/submissions`, { expectedVersion: v1, description: '价目表已上传，请验收（示例）。' });
+  await m4('POST', '/tasks/assign', { assigneeId: 'm1', title: '确认示例新员工入职资料', description: '虚构示例任务，用来演示“去领取”。', criteria: ['资料确认完毕'], dueAt: day(6) });
 }
 
 const TYPES: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.otf': 'font/otf', '.woff2': 'font/woff2', '.png': 'image/png', '.json': 'application/json', '.webp': 'image/webp', '.ico': 'image/x-icon' };
