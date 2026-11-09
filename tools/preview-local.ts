@@ -131,9 +131,9 @@ const app = await buildApp({
   const item = (await db.query("SELECT sku FROM wms_items WHERE org_id=$1 ORDER BY sku LIMIT 1", [ORG])).rows[0];
   if (item) {
     const ago = (n: number) => new Date(Date.now() - n * 864e5).toISOString().slice(0, 10), png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]).toString('base64');
-    const make = async (serial: string, days: number, reason: string) => (await call('POST', '/rma', { sku: 'REF-' + item.sku, serial, productClass: 'machine', repairable: 'yes', reason, condition: '外箱有压痕，配件齐全（示例）', receivedAt: ago(days), channel: 'website' })).json().id;
+    const make = async (serial: string, days: number, reason: string) => (await call('POST', '/rma', { sku: 'REF-' + item.sku, serial, productClass: 'machine', reason, condition: '外箱有压痕，配件齐全（示例）', receivedAt: ago(days), channel: 'website' })).json().id;
     const repair = async (id: string) => {
-      await call('POST', `/rma/${id}/update`, { technicianId: 'm1', diagnosis: '示例诊断：电源板接触不良' });
+      await call('POST', `/rma/${id}/update`, { technicianId: 'm1', repairable: 'yes', diagnosis: '示例诊断：电源板接触不良' });
       await call('POST', `/rma/${id}/photos`, { kind: 'repaired', name: 'after.png', mime: 'image/png', dataBase64: png });
       await call('POST', `/rma/${id}/repaired`, {});
     };
