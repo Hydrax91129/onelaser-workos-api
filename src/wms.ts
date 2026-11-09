@@ -72,6 +72,16 @@ const sku = z.string().trim().min(1).max(80).regex(/^[A-Za-z0-9][A-Za-z0-9._\-/ 
 const uid = z.string().min(1).max(100);
 const nameOf = (u: any) => u ? (u.display_name || u.name_zh || u.name_en || u.id) : '';
 
+/** A returned-goods SKU (RE-…) that is not in the item list yet: the returns desk adds it when registering the return.
+ * WMS stays the only writer of wms_items; the caller passes its transaction. Returns the stored SKU. */
+export async function ensureReturnItem(tx: Queryable, org: string, actorId: string, s: string) {
+  const found = (await tx.query('SELECT sku FROM wms_items WHERE org_id=$1 AND lower(sku)=lower($2)', [org, s])).rows[0];
+  if (found) return found.sku as string;
+  const base = s.replace(/^RE-/i, ''), baseItem = (await tx.query('SELECT name FROM wms_items WHERE org_id=$1 AND lower(sku)=lower($2)', [org, base])).rows[0];
+  await tx.query('INSERT INTO wms_items(org_id,sku,name,type,created_by) VALUES($1,$2,$3,$4,$5)', [org, s, `退货 · ${baseItem?.name || base}`, 'return', actorId]);
+  return s;
+}
+
 export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: { isAdmin: (u: User) => boolean }) {
   const actorOf = (req: FastifyRequest): User => req.actor || deny(401, 'UNAUTHENTICATED', 'Authentication is required');
   const grantsOf = (u: any): string[] => Array.isArray(u.grants) ? u.grants : [];

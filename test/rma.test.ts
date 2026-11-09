@@ -16,9 +16,9 @@ test('returns & repairs: register, diagnose, photos, repaired, restock into refu
   await call('m1','POST','/wms/import',{asOf:'2026-10-31',rows:[{sku:'DEMO-A',name:'Demo machine A',type:'整机',qty:{us:5}}]});
   await db.query("INSERT INTO product_catalog(org_id,sku,msrp) SELECT org_id,'DEMO-A',4000 FROM users WHERE id='m1'");
   assert.equal((await call('m2','GET','/rma')).statusCode,403,'no warehouse access');
-  assert.equal((await call('m1','POST','/rma',{sku:'NOPE',kind:'return',reason:'坏了',receivedAt:'2026-11-01'})).statusCode,400,'SKUs are never created here');
-  assert.equal((await call('m1','POST','/rma',{sku:'DEMO-A',kind:'return',reason:'坏了',receivedAt:'2026-12-30'})).statusCode,400,'no future dates');
-  const c=await call('m1','POST','/rma',{sku:'demo-a',serial:'SN123',kind:'warranty',channel:'website',customer:'John',orderRef:'#1001',reason:'开机不出光',receivedAt:'2026-11-01'});
+  assert.equal((await call('m1','POST','/rma',{sku:'NOPE',serial:'S1',productClass:'machine',repairable:'yes',condition:'外观完好',reason:'坏了',receivedAt:'2026-11-01'})).statusCode,400,'unknown SKUs that are not RE- are refused');
+  assert.equal((await call('m1','POST','/rma',{sku:'DEMO-A',serial:'S1',productClass:'machine',repairable:'yes',condition:'外观完好',reason:'坏了',receivedAt:'2026-12-30'})).statusCode,400,'no future dates');
+  const c=await call('m1','POST','/rma',{sku:'demo-a',serial:'SN123',kind:'warranty',productClass:'machine',repairable:'yes',condition:'外观完好',channel:'website',customer:'John',orderRef:'#1001',reason:'开机不出光',receivedAt:'2026-11-01'});
   assert.equal(c.statusCode,201,c.body);assert.equal(c.json().number,'RMA-2026-0001');const id=c.json().id;
   // technicians need warehouse access; m3 gets view, then can work on this case only
   assert.equal((await call('m1','POST',`/rma/${id}/update`,{technicianId:'m2'})).statusCode,400,'m2 has no warehouse access');
@@ -47,9 +47,38 @@ test('returns & repairs: register, diagnose, photos, repaired, restock into refu
   const img=await call('m1','GET',`/rma/${id}/photos/${d.photos[0].id}`);assert.equal(img.headers['content-type'],'image/png');
   assert.equal((await call('m1','POST',`/rma/${id}/update`,{diagnosis:'y'})).statusCode,409,'closed');
   // second case scrapped
-  const c2=(await call('m1','POST','/rma',{sku:'DEMO-A',qty:2,kind:'return',reason:'外壳破损',receivedAt:'2026-11-09'})).json();
+  const c2=(await call('m1','POST','/rma',{sku:'DEMO-A',qty:2,productClass:'accessory',repairable:'no',condition:'外壳破损',reason:'外壳破损',receivedAt:'2026-11-09'})).json();
   assert.equal(c2.number,'RMA-2026-0002');
   assert.equal((await call('m1','POST',`/rma/${c2.id}/close`,{outcome:'scrap'})).statusCode,200);
   const list=(await call('m1','GET','/rma')).json();assert.equal(list.items.length,2);assert.equal(list.items[0].status,'scrapped');
+ }finally{await app.close();}
+});
+
+async function setupRma(){
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ const clock=()=>new Date('2026-11-10T18:00:00Z').getTime();
+ const app=await buildApp({db,integrations:{executiveUserIds:['m1']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0,clock});
+ const tokens:Record<string,string>={};
+ const call=async(who:string,method:'GET'|'POST',url:string,payload?:any)=>{tokens[who]??=(await issueSession(db,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who]}});};
+ await call('m1','POST','/wms/import',{asOf:'2026-10-31',rows:[{sku:'DEMO-A',name:'Demo machine A',type:'整机',qty:{us:5}}]});
+ return {db,app,call};
+}
+
+test('register a return: item class, serial required for machines, repairable, discount, and a new RE- SKU is added to WMS',async()=>{
+ const {db,app,call}=await setupRma();
+ try{
+  const base={qty:1,reason:'客户退货，已退款 $3,499（示例）',condition:'外观轻微划痕，配件齐全',receivedAt:'2026-11-01',repairable:'yes'};
+  const noSn=await call('m1','POST','/rma',{...base,sku:'DEMO-A',productClass:'machine'});assert.equal(noSn.statusCode,400);assert.match(noSn.body,/serial/i);
+  assert.equal((await call('m1','POST','/rma',{...base,sku:'DEMO-A',productClass:'accessory'})).statusCode,201,'accessories need no serial');
+  assert.equal((await call('m1','POST','/rma',{...base,sku:'DEMO-A',productClass:'machine',serial:'SN9',discountPct:15})).statusCode,400,'discount is 10, 20 or 30');
+  const r=await call('m1','POST','/rma',{...base,sku:'re-demo-a',productClass:'machine',serial:'SN9',discountPct:20,repairable:'no'});assert.equal(r.statusCode,201,r.body);
+  const c=(await call('m1','GET',`/rma/${r.json().id}`)).json();
+  assert.equal(c.sku,'RE-demo-a');assert.equal(c.productClass,'machine');assert.equal(c.repairable,'no');assert.equal(c.discountPct,20);
+  const org=(await db.query(`SELECT org_id FROM users WHERE id='m1'`)).rows[0].org_id;
+  const it=(await db.query(`SELECT name,type FROM wms_items WHERE org_id=$1 AND sku='RE-demo-a'`,[org])).rows[0];assert.equal(it.type,'return');assert.match(it.name,/退货/);
+  assert.equal((await call('m1','POST','/rma',{...base,sku:'RE-demo-a',productClass:'accessory'})).statusCode,201,'the second return reuses the RE- SKU');
+  assert.equal((await db.query(`SELECT count(*)::int n FROM wms_items WHERE org_id=$1 AND lower(sku)='re-demo-a'`,[org])).rows[0].n,1);
+  const ph=await call('m1','POST',`/rma/${r.json().id}/photos`,{kind:'listing',name:'front.png',mime:'image/png',dataBase64:Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,1,2,3]).toString('base64')});
+  assert.ok([200,201].includes(ph.statusCode),ph.body);
  }finally{await app.close();}
 });
