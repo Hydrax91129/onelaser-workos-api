@@ -153,9 +153,11 @@ test('half-yearly login, authoritative upfront price, referral commission and si
  await recordVerifiedCaldockPayment(db,{eventId:'half-yearly-verified-paid',orderId:row.id,type:'paid',amountCents:91260,currency:'USD'});
  const ledger=(await db.query('SELECT amount_cents FROM caldock_commissions WHERE order_id=$1',[row.id])).rows[0];assert.equal(ledger.amount_cents,18252);
  const paid=(await send(customer,'GET','/orders/'+row.id)).json();
+ const beforeDelivery=(await send(owner,'GET','/admin/customers')).json().items.find((u:any)=>u.id===row.customer_id);const beforeDeliveryExpected=(await db.query("SELECT paid_at,paid_at+interval '6 months' AS ends_at FROM caldock_orders WHERE id=$1",[row.id])).rows[0];assert.equal(new Date(beforeDelivery.service_starts_at).getTime(),new Date(beforeDeliveryExpected.paid_at).getTime());assert.equal(new Date(beforeDelivery.service_ends_at).getTime(),new Date(beforeDeliveryExpected.ends_at).getTime());
  const provisioning=(await send(owner,'PATCH','/admin/orders/'+row.id,{status:'provisioning',expectedVersion:paid.version})).json();
  const delivered=await send(owner,'PATCH','/admin/orders/'+row.id,{status:'active',expectedVersion:provisioning.version});assert.equal(delivered.statusCode,200,delivered.body);
  assert.equal((await db.query("SELECT billing_ends_at=paid_at+interval '6 months' AS correct_term FROM caldock_orders WHERE id=$1",[row.id])).rows[0].correct_term,true);
+ const afterDelivery=(await send(owner,'GET','/admin/customers')).json().items.find((u:any)=>u.id===row.customer_id);const afterDeliveryExpected=(await db.query("SELECT paid_at,paid_at+interval '6 months' AS ends_at FROM caldock_orders WHERE id=$1",[row.id])).rows[0];assert.equal(new Date(afterDelivery.service_starts_at).getTime(),new Date(afterDeliveryExpected.paid_at).getTime());assert.equal(new Date(afterDelivery.service_ends_at).getTime(),new Date(afterDeliveryExpected.ends_at).getTime());
 });
 test('logout revokes the server session and clears the cookie',async()=>{
  assert.equal((await send(other,'DELETE','/session')).statusCode,200);assert.equal((await send(other,'GET','/me')).statusCode,401);
