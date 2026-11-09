@@ -43,7 +43,8 @@ test('returns & repairs: register, diagnose, photos, repaired, restock into refu
   assert.equal((await call('m1','POST',`/rma/${id}/price`,{discountPct:20})).statusCode,200,'the discount can be chosen once repaired');
   assert.equal((await call('m1','POST',`/rma/${id}/price`,{listing:'listed'})).statusCode,409,'listing only after restock');
   assert.equal((await call('m3','POST',`/rma/${id}/close`,{outcome:'restock'})).statusCode,403,'only warehouse managers close');
-  assert.equal((await call('m1','POST',`/rma/${id}/close`,{outcome:'restock',grade:'A'})).statusCode,200);
+  assert.equal((await call('m1','POST',`/rma/${id}/close`,{outcome:'restock',grade:'B'})).statusCode,200);
+  assert.equal((await call('m1','GET',`/rma/${id}`)).json().discountPct,10,'B 品 = 10% off');
   const sum=(await call('m1','GET','/wms/summary')).json();
   assert.equal(sum.items.find((i:any)=>i.sku==='DEMO-A').qty.refurb,1,'refurbished stock +1');
   assert.ok(sum.movements.some((m:any)=>m.reference==='RMA-2026-0001'&&m.location==='refurb'&&m.qty===1),'WMS movement explains it');
@@ -53,7 +54,14 @@ test('returns & repairs: register, diagnose, photos, repaired, restock into refu
   assert.equal(d.salePrice,3200);assert.equal(d.listing,'pending');assert.equal(d.stage,'restocked');
   assert.equal((await call('m1','POST',`/rma/${id}/price`,{listing:'listed'})).statusCode,200);assert.equal((await call('m1','GET',`/rma/${id}`)).json().stage,'listed');
   assert.equal((await call('m1','POST',`/rma/${id}/price`,{listing:'sold'})).statusCode,200);assert.equal((await call('m1','GET',`/rma/${id}`)).json().stage,'sold');
-  await call('m1','POST',`/rma/${id}/price`,{listing:'pending'});assert.equal(d.repairDays,5);assert.equal(d.photos.length,1);assert.equal(d.grade,'A');
+  let wms=(await call('m1','GET','/wms/summary')).json();
+  assert.equal(wms.items.find((i:any)=>i.sku==='DEMO-A').qty.refurb,0,'售出 takes it out of refurbished stock');
+  assert.ok(wms.movements.some((m:any)=>m.reference==='RMA-2026-0001'&&m.type==='out'&&m.qty===-1),'goods-out with the RMA number');
+  assert.equal((await call('m1','POST',`/rma/${id}/price`,{listing:'sold'})).statusCode,200,'marking sold again changes nothing');
+  assert.equal((await call('m1','GET','/wms/summary')).json().items.find((i:any)=>i.sku==='DEMO-A').qty.refurb,0);
+  await call('m1','POST',`/rma/${id}/price`,{listing:'pending'});
+  wms=(await call('m1','GET','/wms/summary')).json();
+  assert.equal(wms.items.find((i:any)=>i.sku==='DEMO-A').qty.refurb,1,'undoing 售出 puts it back');assert.equal(d.repairDays,5);assert.equal(d.photos.length,1);assert.equal(d.grade,'B');
   assert.ok(d.events.length>=5);
   const img=await call('m1','GET',`/rma/${id}/photos/${d.photos[0].id}`);assert.equal(img.headers['content-type'],'image/png');
   assert.equal((await call('m1','POST',`/rma/${id}/update`,{diagnosis:'y'})).statusCode,409,'closed');
@@ -91,5 +99,17 @@ test('register a return: item class, serial required for machines, repairable, n
   assert.equal((await db.query(`SELECT count(*)::int n FROM wms_items WHERE org_id=$1 AND lower(sku)='ref-demo-a'`,[org])).rows[0].n,1);
   const ph=await call('m1','POST',`/rma/${r.json().id}/photos`,{kind:'listing',name:'front.png',mime:'image/png',dataBase64:Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,1,2,3]).toString('base64')});
   assert.ok([200,201].includes(ph.statusCode),ph.body);
+ }finally{await app.close();}
+});
+
+test('grade sets the discount: A untouched goes back as new stock, B 10% off, C 20% off',async()=>{
+ const {app,call}=await setupRma();
+ try{
+  const base={sku:'DEMO-A',qty:1,productClass:'accessory',repairable:'yes',reason:'示例退货',condition:'示例外观',receivedAt:'2026-11-01'};
+  const a=(await call('m1','POST','/rma',base)).json().id;
+  assert.equal((await call('m1','POST',`/rma/${a}/close`,{outcome:'restock',grade:'A'})).statusCode,200,'A needs no repair');
+  const ca=(await call('m1','GET',`/rma/${a}`)).json();assert.equal(ca.discountPct,0);assert.equal(ca.restockLocation,'us');
+  const c=(await call('m1','POST','/rma',base)).json().id;
+  assert.equal((await call('m1','POST',`/rma/${c}/close`,{outcome:'restock',grade:'C'})).statusCode,400,'B and C must be repaired first');
  }finally{await app.close();}
 });

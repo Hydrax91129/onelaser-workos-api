@@ -5,7 +5,9 @@
  *   - restocked: back into stock (normally the refurbished location) through a WMS goods-in movement,
  *     so stock and its history stay in the warehouse system;
  *   - scrapped, or returned to the customer (no stock change).
- * A restocked refurbished unit can get a discount and a listing status for selling on the website.
+ * A restocked refurbished unit can get a discount and a listing status for selling on the website;
+ * the grade chosen when restocking sets the discount (A untouched, sold as new, B 10% off, C 20% off);
+ * marking it sold writes a WMS goods-out from its restock location (undoing 售出 writes it back).
  *
  * Access: anyone who can view warehouse stock can view cases; warehouse managers register and close
  * cases; the assigned technician can update diagnosis, photos and mark the repair done; prices are set
@@ -50,6 +52,8 @@ const KINDS = ['return', 'warranty', 'repair', 'exchange'] as const;
 const CHANNELS = ['website', 'amazon', 'dealer', 'other'] as const;
 const PHOTO_KINDS = ['received', 'diagnosis', 'repaired', 'listing'] as const;
 const CLASSES = ['machine', 'accessory', 'material', 'other'] as const;
+/* Grade sets the refurbished discount: A = untouched, sold as new stock (no discount); B = 10% off; C = 20% off. */
+export const GRADE_DISCOUNT: Record<string, number> = { A: 0, B: 10, C: 20 };
 const PHOTO_MIME = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 const MAX_PHOTO = 5 * 1024 * 1024, MAX_PHOTOS = 40;
 const LOC_IDS = LOCATIONS.map(l => l.id) as [string, ...string[]];
@@ -208,13 +212,14 @@ export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: {
       const c = await caseOf(tx, u, caseId, true);
       if (!OPEN.includes(c.status)) deny(409, 'RMA_CLOSED', 'This case is closed');
       if (v.outcome === 'restock') {
-        if (c.status !== 'repaired' && v.grade !== 'new') deny(400, 'RMA_NOT_REPAIRED', 'Mark the repair as done before putting it back into stock');
-        const loc = v.location || (v.grade === 'new' ? 'us' : 'refurb');
+        const grade = v.grade === 'new' ? 'A' : (v.grade || 'B'), pct = GRADE_DISCOUNT[grade];
+        if (c.status !== 'repaired' && grade !== 'A') deny(400, 'RMA_NOT_REPAIRED', 'Mark the repair as done before putting it back into stock');
+        const loc = v.location || (grade === 'A' ? 'us' : 'refurb');
         const have = Number((await tx.query('SELECT qty FROM wms_stock WHERE org_id=$1 AND sku=$2 AND location=$3 FOR UPDATE', [u.org_id, c.sku, loc])).rows[0]?.qty ?? 0);
         await tx.query('INSERT INTO wms_stock(org_id,sku,location,qty) VALUES($1,$2,$3,$4) ON CONFLICT(org_id,sku,location) DO UPDATE SET qty=$4', [u.org_id, c.sku, loc, have + Number(c.qty)]);
         await tx.query(`INSERT INTO wms_movements(id,org_id,type,sku,location,qty,reason,reference,status,created_by) VALUES($1,$2,'in',$3,$4,$5,$6,$7,'done',$8)`,
-          [randomUUID(), u.org_id, c.sku, loc, Number(c.qty), `退货维修入库${v.grade && v.grade !== 'new' ? `（${v.grade} 品）` : ''}${c.serial ? ` · SN ${c.serial}` : ''}`, c.number, u.id]);
-        await tx.query(`UPDATE rma_cases SET status='restocked',outcome='restock',restock_location=$2,grade=$3,closed_at=now(),updated_at=now() WHERE id=$1`, [caseId, loc, v.grade || 'B']);
+          [randomUUID(), u.org_id, c.sku, loc, Number(c.qty), `退货维修入库（${grade} 品${grade === 'A' ? '，当新货' : `，${pct}% off`}）${c.serial ? ` · SN ${c.serial}` : ''}`, c.number, u.id]);
+        await tx.query(`UPDATE rma_cases SET status='restocked',outcome='restock',restock_location=$2,grade=$3,discount_pct=$4,sale_price=NULL,closed_at=now(),updated_at=now() WHERE id=$1`, [caseId, loc, grade, pct]);
       } else {
         await tx.query(`UPDATE rma_cases SET status=$2,outcome=$3,closed_at=now(),updated_at=now() WHERE id=$1`, [caseId, v.outcome === 'scrap' ? 'scrapped' : 'returned', v.outcome]);
       }
@@ -237,6 +242,15 @@ export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: {
       if (v.discountPct !== undefined) { vals.push(v.discountPct); sets.push(`discount_pct=$${vals.length}`); }
       if (v.salePrice !== undefined) { vals.push(v.salePrice); sets.push(`sale_price=$${vals.length}`); }
       if (v.listing) { vals.push(v.listing); sets.push(`listing=$${vals.length}`); }
+      // 售出 takes the unit out of stock (WMS goods-out with the RMA number); undoing 售出 puts it back.
+      if (v.listing && (v.listing === 'sold') !== (c.listing === 'sold')) {
+        const sold = v.listing === 'sold', loc = c.restock_location || 'refurb', qty = Number(c.qty);
+        const have = Number((await tx.query('SELECT qty FROM wms_stock WHERE org_id=$1 AND sku=$2 AND location=$3 FOR UPDATE', [u.org_id, c.sku, loc])).rows[0]?.qty ?? 0);
+        if (sold && have < qty) deny(409, 'WMS_NEGATIVE_STOCK', `Not enough stock of ${c.sku} at ${loc}: ${have} on hand, ${qty} needed`, `${c.sku} 在该库位库存不足：现有 ${have} 件，需要 ${qty} 件`);
+        await tx.query('INSERT INTO wms_stock(org_id,sku,location,qty) VALUES($1,$2,$3,$4) ON CONFLICT(org_id,sku,location) DO UPDATE SET qty=$4', [u.org_id, c.sku, loc, have + (sold ? -qty : qty)]);
+        await tx.query(`INSERT INTO wms_movements(id,org_id,type,sku,location,qty,reason,reference,status,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'done',$9)`,
+          [randomUUID(), u.org_id, sold ? 'out' : 'in', c.sku, loc, sold ? -qty : qty, `${sold ? '翻新品售出' : '撤销售出，退回库存'}${c.serial ? ` · SN ${c.serial}` : ''}`, c.number, u.id]);
+      }
       await tx.query(`UPDATE rma_cases SET ${sets.join(',')},updated_at=now() WHERE id=$1`, vals);
       await event(tx, u, caseId, 'priced', [v.discountPct != null && `-${v.discountPct}%`, v.salePrice != null && `$${v.salePrice}`, v.listing && `listing:${v.listing}`].filter(Boolean).join(' '));
       await audit(tx, u, 'rma.priced', caseId, v);

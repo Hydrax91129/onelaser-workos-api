@@ -149,11 +149,11 @@ const app = await buildApp({
     await make('DEMO-SN-001', 2, '示例：开机不出光；已全额退款');
     const parts = await make('DEMO-SN-002', 6, '示例：雕刻偏移；已部分退款');
     await call('POST', `/rma/${parts}/update`, { technicianId: 'm1', status: 'waiting_parts', waitingFor: '示例同步带 ×1' });
-    const fixed = await make('DEMO-SN-003', 9, '示例：风扇异响；已全额退款'); await repair(fixed); await call('POST', `/rma/${fixed}/price`, { discountPct: 20 });
-    for (const [serial, listing] of [['DEMO-SN-004', 'listed'], ['DEMO-SN-005', 'sold']] as const) {
+    const fixed = await make('DEMO-SN-003', 9, '示例：风扇异响；已全额退款'); await repair(fixed);
+    for (const [serial, listing, grade] of [['DEMO-SN-004', 'listed', 'B'], ['DEMO-SN-005', 'sold', 'C']] as const) {
       const id = await make(serial, 14, '示例：客户七天无理由退货'); await repair(id);
-      await call('POST', `/rma/${id}/close`, { outcome: 'restock', grade: 'A' });
-      await call('POST', `/rma/${id}/price`, { discountPct: 10, listing });
+      await call('POST', `/rma/${id}/close`, { outcome: 'restock', grade });
+      await call('POST', `/rma/${id}/price`, { listing });
     }
   }
 }
