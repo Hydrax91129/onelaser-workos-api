@@ -79,12 +79,15 @@ test('AI completion cannot attach an old version after a new submission',async()
   releaseAssessment();blockAssessment=false;assert.equal((await pending).statusCode,409);
 });
 test('explicit manager notifications are owner-scoped, idempotent and distinguish queued from delivered',async()=>{
+  // Submissions earlier in this file already told the reviewer by DingTalk; this test is about messages to the task owner.
+  assert.ok(sent.some(m=>m.users.includes('manager')&&/等你验收/.test(m.content)),'the reviewer heard about the submission on DingTalk');
+  const toOwner=()=>sent.filter(m=>m.users.includes('employee'));
   const key=randomUUID(),payload={taskIds:[taskId],idempotencyKey:key};
   assert.equal((await request(employeeCookie,employeeCsrf,'POST','/notifications/send',payload)).statusCode,403);
-  const first=await request(managerCookie,managerCsrf,'POST','/notifications/send',payload);assert.equal(first.statusCode,200,first.body);assert.equal(first.json().status,'queued');assert.equal(first.json().sent,false);assert.equal(sent.length,1);assert.deepEqual(sent[0].users,['employee']);
-  const second=await request(managerCookie,managerCsrf,'POST','/notifications/send',payload);assert.equal(second.json().status,'queued');assert.equal(sent.length,1);
+  const first=await request(managerCookie,managerCsrf,'POST','/notifications/send',payload);assert.equal(first.statusCode,200,first.body);assert.equal(first.json().status,'queued');assert.equal(first.json().sent,false);assert.equal(toOwner().length,1);
+  const second=await request(managerCookie,managerCsrf,'POST','/notifications/send',payload);assert.equal(second.json().status,'queued');assert.equal(toOwner().length,1);
   const other=await request(managerCookie,managerCsrf,'POST','/tasks',{title:'A second reminder task',description:'Independent task',ownerId:employeeId,criteria:['Check'],dueAt:'2026-11-02T18:00:00+08:00'});
-  assert.equal((await request(managerCookie,managerCsrf,'POST','/notifications/send',{taskIds:[other.json().id],idempotencyKey:key})).statusCode,409);assert.equal(sent.length,1);
+  assert.equal((await request(managerCookie,managerCsrf,'POST','/notifications/send',{taskIds:[other.json().id],idempotencyKey:key})).statusCode,409);assert.equal(toOwner().length,1);
 });
 test('capability setup reports missing configuration names without exposing secrets or opening dev login',()=>{
   const config=integrationOptionsFromEnv({NODE_ENV:'production',RENDER_EXTERNAL_URL:origin,DINGTALK_CLIENT_ID:'public-id-only'});
