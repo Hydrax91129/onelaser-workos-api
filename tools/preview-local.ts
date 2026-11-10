@@ -27,7 +27,8 @@ const ORIGIN = (process.env.RENDER_EXTERNAL_URL || process.env.PREVIEW_PUBLIC_UR
 const DIST = resolve(process.env.FRONTEND_DIST || resolve(import.meta.dirname, '..', '..', 'onelaser-workos', 'dist'));
 const FRONTEND_COMMIT = (await readFile(process.env.PREVIEW_FRONTEND_COMMIT_FILE || '/nonexistent', 'utf8').catch(() => 'local')).trim();
 // A strip on every page so nobody mistakes the test site for craftos.app.
-const BANNER = `<div style="position:fixed;left:50%;bottom:10px;transform:translateX(-50%);z-index:9999;background:#a15c00;color:#fff;font:600 12px system-ui;padding:5px 12px;border-radius:999px;box-shadow:0 4px 14px #0003;pointer-events:none">测试站 · 虚构数据，每次部署都会重置 · Test site, fictional data · ${FRONTEND_COMMIT.slice(0, 7)}</div>`;
+// A strip on every page so nobody mistakes the test site for craftos.app, with one-click role switching (no password).
+const BANNER = `<div style="position:fixed;left:50%;bottom:10px;transform:translateX(-50%);z-index:9999;display:flex;gap:8px;align-items:center;background:#a15c00;color:#fff;font:600 12px system-ui;padding:5px 12px;border-radius:999px;box-shadow:0 4px 14px #0003;white-space:nowrap">测试站 · 虚构数据，每次部署都会重置 · ${FRONTEND_COMMIT.slice(0, 7)} · 切换身份：<a style="color:#fff" href="/preview-enter?as=owner">主管理员</a><a style="color:#fff" href="/preview-enter?as=hr">HR</a><a style="color:#fff" href="/preview-enter?as=staff">普通员工</a></div>`;
 const PASSWORD = process.env.PREVIEW_PASSWORD || 'workos-preview', ORG = 'demo';
 if (process.env.RENDER && !process.env.PREVIEW_PASSWORD) throw new Error('Set PREVIEW_PASSWORD on the hosted test site; the default password is public.');
 
@@ -171,6 +172,17 @@ createServer(async (req, res) => {
     const url = new URL(req.url || '/', 'http://preview.local'), method = req.method || 'GET';
     res.setHeader('x-robots-tag', 'noindex, nofollow');
     if (url.pathname === '/healthz') { res.writeHead(200, { 'content-type': 'text/plain' }); return res.end('ok'); }
+    // No login on the test site: /preview-enter signs in as one of the fictional accounts and goes to the app.
+    if (url.pathname === '/preview-enter') {
+      const who = ({ owner: 'owner', hr: 'hr', staff: 'staff' } as Record<string, string>)[url.searchParams.get('as') || 'owner'] || 'owner';
+      const r = await app.inject({ method: 'POST', url: '/auth/password', payload: { email: `${who}@workos.test`, password: PASSWORD }, headers: { origin: ORIGIN } });
+      res.writeHead(302, { location: '/', 'set-cookie': r.headers['set-cookie'] as any, 'cache-control': 'no-store' }); return res.end();
+    }
+    // Opening the site with no session, or with one from before the last reset (every deploy wipes the data), goes straight in.
+    const signedIn = async () => !!req.headers.cookie && (await app.inject({ method: 'GET', url: '/me', headers: { cookie: String(req.headers.cookie) } })).statusCode === 200;
+    if ((url.pathname === '/' || url.pathname === '/index.html') && !(await signedIn())) {
+      res.writeHead(302, { location: '/preview-enter?as=owner', 'cache-control': 'no-store' }); return res.end();
+    }
     if (url.pathname.startsWith('/api/')) {
       const chunks: Buffer[] = []; for await (const c of req) chunks.push(c as Buffer);
       const headers = { ...req.headers }; delete headers['content-length']; delete headers.host;
