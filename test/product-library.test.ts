@@ -24,25 +24,13 @@ async function setup(){
  return {db,app,call};
 }
 
-test('requirement matrix: five families, core fields stay required, everything else is optional outside 主机',()=>{
- assert.equal(minReq('nameZh','rrrrr'),'rrrrr');assert.equal(minReq('hsCode','rrrno'),'roono');
+test('requirement matrix: nothing in the product library is required; 不适用 stays as it was',()=>{
+ assert.equal(minReq('nameZh','rrrrr'),'ooooo');assert.equal(minReq('hsCode','rrrno'),'ooono');
  const code=(k:string)=>FIELD.get(k)!.code;
- for(const k of CORE_REQUIRED){const f=FIELD.get(k)!;for(const fam of ['main','acc','cons','soft'])assert.equal(famCode(f.code,fam),'req',`${k} is required for ${fam}`);}
- assert.equal(famCode(code('status'),'mat'),'opt','状态 is optional for 内部物料 (rrrro)');
- assert.equal(famCode(code('series'),'main'),'req');assert.equal(famCode(code('series'),'acc'),'opt');assert.equal(famCode(code('series'),'mat'),'na');
- assert.equal(famCode(code('model'),'main'),'req');assert.equal(famCode(code('model'),'acc'),'opt');assert.equal(famCode(code('model'),'cons'),'na');
- assert.equal(famCode(code('laserClass'),'main'),'req');assert.equal(famCode(code('laserClass'),'cons'),'na');
- assert.equal(famCode(code('msrp'),'soft'),'opt');assert.equal(famCode(code('msrp'),'mat'),'na');
- assert.equal(famCode(code('landed'),'mat'),'opt');assert.equal(famCode(code('netWeight'),'soft'),'na');
- for(const f of FIELDS)for(const fam of ['acc','cons','soft','mat'])if(!CORE_REQUIRED.has(f.key))assert.notEqual(famCode(f.code,fam),'req',`${f.key} must not be required for ${fam}`);
- assert.equal(famCode(SLOTS.find(s=>s.key==='warrantyCert')!.code,'main'),'req');assert.equal(famCode(SLOTS.find(s=>s.key==='warrantyCert')!.code,'acc'),'opt');
- // completeness counts only what the viewer can see
- const vAll=viewerOf([],false),vCost=viewerOf(['products','product_cost_detail'],false);
- const rec={values:{family:'main',goodsType:'bulk',nameZh:'示例',nameEn:'Sample',status:'dev',sku:'X'},files:{}};
- const a=completeness(rec,vAll),b=completeness(rec,vCost);
- assert.ok(b.need>a.need,'cost access adds HS code, suppliers, landed cost and file slots');assert.ok(!a.missing.includes('supplier'));assert.ok(b.missing.includes('supplier'));
- assert.ok(b.missing.includes('file:manual'));
- const refb=completeness({values:{...rec.values,goodsType:'refb'}},vAll);assert.ok(refb.missing.includes('refbSku'),'return SKU is required for 退货');
+ for(const f of FIELDS)for(const fam of ['main','acc','cons','soft','mat'])assert.notEqual(famCode(f.code,fam),'req',`${f.key} must not be required for ${fam}`);
+ assert.equal(famCode(code('series'),'main'),'opt');assert.equal(famCode(code('series'),'mat'),'na');
+ assert.equal(famCode(code('model'),'cons'),'na');assert.equal(famCode(code('laserClass'),'cons'),'na');assert.equal(famCode(code('msrp'),'mat'),'na');
+ assert.deepEqual([...CORE_REQUIRED],['sku']);
 });
 
 test('value rules: SKU, REFB, enums by label, dates, numbers with units, clear marker',()=>{
@@ -90,8 +78,11 @@ test('product library: visibility on every response, editing rights, SKU and REF
   assert.equal((await call('m3','PATCH','/products/library/ODL-DEMO-1',{values:{supplier:'示例工厂'}})).statusCode,400);
   const s=await call('m5','PATCH','/products/library/odl-demo-1',{values:{supplier:'示例工厂',landed:1000,lastMile:100,hsCode:'0000.00.0000'}});assert.equal(s.statusCode,200,s.body);
   assert.equal((await call('m1','PATCH','/products/library/ODL-DEMO-1',{values:{msrp:2000,map:1900}})).statusCode,200);
-  // Core fields cannot be cleared; REFB rules
-  assert.equal((await call('m3','PATCH','/products/library/ODL-DEMO-1',{values:{nameZh:null}})).statusCode,400);
+  // Nothing is required: a name can be cleared (and filled in again); return SKU rules
+  assert.equal((await call('m3','PATCH','/products/library/ODL-DEMO-1',{values:{nameZh:null}})).statusCode,200,'nothing is required');
+  assert.equal((await call('m3','PATCH','/products/library/ODL-DEMO-1',{values:{nameZh:'示例主机'}})).statusCode,200);
+  assert.equal((await call('m3','PATCH','/products/library/ODL-DEMO-1',{values:{goodsType:'退货'}})).statusCode,200,'a returned product without a return SKU is fine');
+  assert.equal((await call('m3','PATCH','/products/library/ODL-DEMO-1',{values:{goodsType:'大货'}})).statusCode,200);
   assert.equal((await call('m3','PATCH','/products/library/ODL-DEMO-1',{values:{refbSku:'REF-ODL-DEMO-1'}})).statusCode,400,'only 退货 products carry a return SKU');
   assert.equal((await call('m3','PATCH','/products/library/ODL-DEMO-1',{values:{goodsType:'退货',refbSku:'ODL-1'}})).statusCode,400,'REF- prefix');
   // Status changes follow the lifecycle and need a reason into clearance

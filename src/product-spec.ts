@@ -45,9 +45,9 @@ export const GROUPS: Group[] = [
   { no: '5', zh: '定价（批发）', en: 'Pricing (wholesale)' }, { no: '6', zh: '包装与物流', en: 'Packaging & logistics' },
   { no: '7', zh: '采购与供应商', en: 'Purchasing & suppliers' }, { no: '8', zh: '售后与库存控制', en: 'After-sales & stock control' },
 ];
-/** Core fields stay required for every family; for families other than 主机 every other 必填 becomes 选填. */
-export const CORE_REQUIRED = new Set(['sku', 'goodsType', 'family', 'nameZh', 'nameEn', 'status']);
-export const minReq = (key: string, code: string) => CORE_REQUIRED.has(key) ? code : code[0] + code.slice(1).replace(/r/g, 'o');
+/** Nothing in the product library is required (only the SKU itself identifies a product): every 必填 is 选填. */
+export const CORE_REQUIRED = new Set(['sku']);
+export const minReq = (_key: string, code: string) => code.replace(/r/g, 'o');
 
 const F = (group: string, key: string, zh: string, en: string, ph: string, code: string, vis: Vis, type: FieldType, store: Store, extra: Partial<Field> = {}): Field =>
   ({ group, key, zh, en, ph, code: minReq(key, code), vis, type, store, ...extra });
@@ -250,10 +250,10 @@ const filled = (v: any) => v != null && v !== '' && !(Array.isArray(v) && !v.len
 export function completeness(rec: { values: Record<string, any>; files?: Record<string, number> }, v: Viewer, fields: Field[] = FIELDS) {
   const family = rec.values.family, missing: string[] = [];
   let need = 0, got = 0;
-  if (!family) return { need: 1, got: 0, missing: ['family'], done: false };
+  if (!family) return { need: 0, got: 0, missing, done: true };
   for (const f of fields) {
     if (!canSee(v, f.vis)) continue;
-    const req = f.key === 'refbSku' ? rec.values.goodsType === 'refb' : famCode(f.code, family) === 'req';
+    const req = f.key !== 'refbSku' && famCode(f.code, family) === 'req';
     if (!req) continue;
     need++;
     if (filled(rec.values[f.key])) got++; else missing.push(f.key);
