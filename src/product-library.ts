@@ -181,7 +181,6 @@ export function validateValues(v: Viewer, raw: Record<string, unknown>, ws: Work
 /** Rules that look at the whole record after the change (return SKU). */
 export function recordIssues(after: Record<string, any>): Issue[] {
   const out: Issue[] = [];
-  if (after.goodsType === 'refb' && !after.refbSku) out.push({ key: 'refbSku', zh: '退货产品必须填退货 SKU（REF- 开头）', en: 'A returned product needs a returned-goods SKU starting with REF-' });
   if (after.goodsType !== 'refb' && after.refbSku) out.push({ key: 'refbSku', zh: '只有退货产品才填退货 SKU', en: 'Only returned products have a returned-goods SKU' });
   return out;
 }
