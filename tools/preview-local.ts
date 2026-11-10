@@ -110,7 +110,7 @@ const previewAi = { model: 'preview-sample', json: async (_system: string, user:
 
 const app = await buildApp({
   db, environment: 'development', mailer: null, completionModel: null, translationModel: null, okrDraftModel: previewAi, nudgeIntervalMs: 0,
-  integrations: { appPublicUrl: ORIGIN, executiveUserIds: ['m1'] },
+  integrations: { appPublicUrl: ORIGIN, executiveUserIds: ['m1'], mcpUserIds: ['m1'] }, // the owner may try the WorkOS MCP server here
   hr: { dataKey: randomBytes(32).toString('base64') }, // a throwaway key: sensitive HR fields work, and vanish with the process
 });
 
@@ -183,10 +183,10 @@ createServer(async (req, res) => {
     if ((url.pathname === '/' || url.pathname === '/index.html') && !(await signedIn())) {
       res.writeHead(302, { location: '/preview-enter?as=owner', 'cache-control': 'no-store' }); return res.end();
     }
-    if (url.pathname.startsWith('/api/')) {
+    if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/.well-known/')) {
       const chunks: Buffer[] = []; for await (const c of req) chunks.push(c as Buffer);
       const headers = { ...req.headers }; delete headers['content-length']; delete headers.host;
-      const r = await app.inject({ method: method as any, url: url.pathname.slice(4) + url.search, payload: chunks.length ? Buffer.concat(chunks) : undefined, headers: headers as any });
+      const r = await app.inject({ method: method as any, url: (url.pathname.startsWith('/api/') ? url.pathname.slice(4) : url.pathname) + url.search, payload: chunks.length ? Buffer.concat(chunks) : undefined, headers: headers as any });
       const out: Record<string, any> = {}; for (const [k, v] of Object.entries(r.headers)) if (k !== 'content-length' && k !== 'transfer-encoding' && v !== undefined) out[k] = v;
       res.writeHead(r.statusCode, out); return res.end(r.rawPayload);
     }
