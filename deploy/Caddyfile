@@ -124,6 +124,12 @@ http://wodemac.com:{$PORT:10000} {
     }
     @public_assets path /assets/*
     header @public_assets Cache-Control "public, max-age=86400"
+    # Account/checkout views share the landing HTML. Tell crawlers before JS runs.
+    @caldock_private_views {
+        path / /index.html /en.html
+        query view=*
+    }
+    header @caldock_private_views X-Robots-Tag "noindex, follow"
     # Render's health check can arrive on this host; it must reach the API or deploys fail.
     handle /healthz {
         rewrite * /health

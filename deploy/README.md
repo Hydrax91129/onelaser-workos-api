@@ -52,6 +52,8 @@ Bot 触发和回写的具体步骤见 [Bot 接入说明](../docs/integrations/GR
 
 可使用真实 Caddy 2 二进制验证切换前后路由、健康检查和 Host/来源注入防护：`CADDY_BIN=/absolute/path/to/caddy node --import tsx --test test/caddy-redirect.test.ts`。本地没有 `CADDY_BIN` 时该集成测试会明确跳过；CI 在构建生产镜像后提取其中的 Caddy 并设置 `CADDY_BIN`，必须执行这些测试，再运行原有同源 smoke test。用于提取二进制的临时容器在成功或失败后都会清理。
 
+WodeMac 的 `/`、`/index.html`、`/en.html` 带有 `view` 参数时，Caddy 返回 `X-Robots-Tag: noindex, follow`，让不执行 JavaScript 的搜索抓取也能识别账号和付款视图。空值和裸 `view` 键同样处理；纯语言/付款周期参数、指南页和其他主机保持原索引行为。此规则只设置响应头，页面、参数和 API 路由仍按原方式处理。真实 Caddy 集成测试及生产容器 smoke check 均覆盖该边界。
+
 ### 私有仓库的下载令牌（`GITHUB_FETCH_TOKEN`）
 
 Docker 构建会下载固定版本的前端（`Hydrax91129/onelaser-workos`）和 Wiki（`Hydrax91129/onelaser-support-center`）。仓库公开时匿名下载即可；改成私有前，必须先配好只读令牌。
