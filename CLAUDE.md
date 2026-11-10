@@ -34,6 +34,7 @@
 | 质量追踪 | quality.ts | quality.js | quality_issues、quality_plans |
 | KOL ROI | — | kol.js | （待补充） |
 | Bug 与建议、版本记录 | feedback.ts | feedback.js, changelog.js | feedback |
+| AI 连接（WorkOS MCP） | mcp.ts | mcp-connect.js | mcp_clients、mcp_auth_codes、mcp_tokens、mcp_calls。`https://craftos.app/api/mcp` 给老板自己的 Claude（OAuth）或 Composio（个人令牌）用；只有 `WORKOS_MCP_USER_IDS` 里、同时是主管理员的人能连，见第 3 节第 10 条 |
 | CalDock（Mac mini 托管） | caldock*.ts | 独立前端仓库 | caldock_*，与 WorkOS 用户完全隔离 |
 
 ## 3. 共享数据规则（最重要）
@@ -65,6 +66,9 @@
    评分是可选的：验收人、派任务的人、直属领导或管理员 24 小时内可打 0–10 分，没人打分时由 AI 评分；
    人打分低于 5 分（completions.ts 的 `LOW_SCORE`）任务退回未完成（status `revision`），负责人改完再点完成。
    旧的“提交 / 验收”接口（submissions、reviews）保留给机器人和老数据用，网页不再用它来完成任务。
+10. **WorkOS MCP 只读、只给一个人**：只有 `WORKOS_MCP_USER_IDS`（部署配置）里、同时在 `WORKOS_EXECUTIVE_USER_IDS` 的人能用，每次调用都重新检查。
+   工具一律只读，以这个人的身份调用现有 GET 接口（权限、汇报线、已删除任务规则照旧），再**只挑 mcp.ts 里列明的字段**返回，不能把接口结果原样转出：
+   成本、到岸价、MAP / 促销底价和渠道价、供应商、报关信息、人事和薪资、客户资料（退货的客户、订单号，客服工单）都不给，因为返回的内容会离开 WorkOS 交给 AI 服务商。加写入工具前先问用户。
 
 ## 4. 开发规则（所有改动都走 PR）
 

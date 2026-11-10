@@ -20,6 +20,7 @@ import { registerHrRoutes, type HrOptions } from './hr.js';
 import { registerItRoutes, type ItOptions } from './it-accounts.js';
 import { registerQualityRoutes, qualityFactoryOf, factoryPathAllowed, type QualityOptions } from './quality.js';
 import { registerProductRoutes } from './products.js';
+import { registerMcpRoutes, MCP_PUBLIC_PATHS } from './mcp.js';
 import { registerProductLibraryRoutes } from './product-library.js';
 import { registerProductImportRoutes } from './product-import.js';
 import { registerInboxRoutes, pushInbox, taskFollowers } from './inbox.js';
@@ -127,6 +128,8 @@ export async function buildApp(options:AppOptions) {
   // This exact endpoint has its own worker-only bearer authentication, never a user session.
   const publicPaths=new Set(['/health','/capabilities','/auth/dev-login','/auth/dingtalk/start','/auth/dingtalk/callback','/integrations/grok-bot/mcp','/support/ingest']);
   for(const path of PUBLIC_WIKI_PATHS)publicPaths.add(path);
+  // The WorkOS MCP server authenticates with its own tokens (mcp.ts); its OAuth pages read the session cookie themselves.
+  for(const path of MCP_PUBLIC_PATHS)publicPaths.add(path);
   for(const path of [...BOT_OAUTH_WELL_KNOWN,...['/register','/authorize','/token','/revoke','/consent.css'].map(path=>BOT_OAUTH_PREFIX+path)])publicPaths.add(path);
   app.addHook('onRequest',async(req,reply)=>{
     req.language=languageFrom(req.headers['accept-language']);
@@ -185,7 +188,7 @@ export async function buildApp(options:AppOptions) {
   });
   app.delete('/auth/session',async(req,reply)=>{await db.query('DELETE FROM sessions WHERE token_hash=$1',[hash(req.sessionToken!)]);reply.header('Set-Cookie',cookie(sessionCookieName(integrations.secureCookies),'',integrations.secureCookies,0));return {revoked:true};});
   const isExecutive=(user:User)=>integrations.executiveUserIds?.includes(user.id)===true;
-  app.get('/me',async req=>({...actor(req),isAdmin:isOrgAdmin(actor(req) as any,{executiveUserIds:integrations.executiveUserIds||[]}),executiveAccess:isExecutive(actor(req)),supportAccess:supportPermissions(actor(req),options.support||{},integrations.executiveUserIds||[]),qualityFactory:(req as any).qualityFactory||null}));
+  app.get('/me',async req=>({...actor(req),isAdmin:isOrgAdmin(actor(req) as any,{executiveUserIds:integrations.executiveUserIds||[]}),executiveAccess:isExecutive(actor(req)),mcpAccess:isExecutive(actor(req))&&(integrations.mcpUserIds||[]).includes(actor(req).id),supportAccess:supportPermissions(actor(req),options.support||{},integrations.executiveUserIds||[]),qualityFactory:(req as any).qualityFactory||null}));
   app.get('/executive/summary',async req=>{const user=actor(req);if(!isExecutive(user))deny(403,'FORBIDDEN','Executive access is required');return db.transaction(tx=>executiveSummary(tx,user.org_id,integrations.teamMode));});
   registerSupportRoutes(app,db,options.support,integrations.executiveUserIds);
   await registerOkrPublish(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
@@ -320,6 +323,7 @@ export async function buildApp(options:AppOptions) {
   await registerQualityRoutes(app,db,{...options.quality,notify,intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0),isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),now:options.clock});
   await registerItRoutes(app,db,{...options.it,quality:options.quality,executiveIds:integrations.executiveUserIds||[],now:options.clock,intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0)});
   await registerInboxRoutes(app,db);
+  await registerMcpRoutes(app,db,{userIds:integrations.mcpUserIds||[],executiveUserIds:integrations.executiveUserIds||[],publicUrl:integrations.appPublicUrl,secureCookies:integrations.secureCookies,extraRedirectUris:integrations.mcpRedirectUris||[],taskScope:scope});
   const productHelpers=await registerProductRoutes(app,db,{isAdmin:isExecutive /* sensitive ERP data: only deployment-configured executives bypass grants; in-app admins need grants */});
   await registerProductLibraryRoutes(app,db,{isAdmin:isExecutive,requestPrice:productHelpers.requestPrice,audit:productHelpers.audit});
   await registerProductImportRoutes(app,db,{isAdmin:isExecutive,requestPrice:productHelpers.requestPrice,audit:productHelpers.audit});
