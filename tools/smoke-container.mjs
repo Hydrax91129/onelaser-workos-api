@@ -73,8 +73,14 @@ const onSite=(path)=>new Promise((done,fail)=>{const u=new URL(origin+path);cons
 const caldockPage=await onSite('/?view=login&lang=zh');
 assert.equal(caldockPage.status,200);assert.match(caldockPage.body,/WodeMac/);
 assert.equal(caldockPage.headers['cache-control'],'no-store');
+assert.equal(caldockPage.headers['x-robots-tag'],'noindex, follow');
 assert.match(caldockPage.headers['content-security-policy'],/connect-src 'self'/);
 assert.match(caldockPage.headers['content-security-policy'],/frame-ancestors 'none'/);
+const caldockPublicPage=await onSite('/?interval=month&lang=zh');
+assert.equal(caldockPublicPage.status,200);assert.equal(caldockPublicPage.headers['x-robots-tag'],undefined);
+const caldockCheckoutPage=await onSite('/?interval=quarter&lang=zh&view=checkout');
+assert.equal(caldockCheckoutPage.status,200);assert.equal(caldockCheckoutPage.headers['x-robots-tag'],'noindex, follow');
+assert.match(caldockCheckoutPage.body,/WodeMac/);
 const caldockBuild=JSON.parse((await onSite('/build-info.json')).body);
 assert.equal(caldockBuild.caldockCommit,(await readFile(new URL('../deploy/caldock-revision.txt',import.meta.url),'utf8')).trim());
 assert.equal((await onSite('/api/caldock/capabilities')).status,200);
