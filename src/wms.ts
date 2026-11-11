@@ -51,9 +51,11 @@ const returnSkuDenied = (skus: string[]) => deny(400, 'WMS_RETURN_SKU', `Returne
   `REF- 开头的退货 SKU 在“退货维修”里管理，不进常规库存：${skus.slice(0, 10).join('、')}`);
 const LOC_IDS = LOCATIONS.map(l => l.id) as [string, ...string[]];
 
-export const ERP_GRANTS = ['products_manage', 'pricing_msrp', 'supply', 'supply_manage', 'warehouse', 'warehouse_manage', 'dealers', 'dealers_manage'] as const;
+export const ERP_GRANTS = ['products_manage', 'products_import', 'pricing_msrp', 'supply', 'supply_manage', 'warehouse', 'warehouse_manage', 'dealers', 'dealers_manage'] as const;
 const AREAS: Record<string, Record<string, string[]>> = {
   products: { none: [], view: ['products'], manage: ['products', 'products_manage'] },
+  /** 批量更新（SKU 与价格）: upload, preview, confirm and undo bulk updates of the product library. Main admins choose who. */
+  import: { none: [], allow: ['products_import'] },
   pricing: { none: [], msrp: ['pricing_msrp'], full: ['product_cost_detail'] },
   supply: { none: [], view: ['supply'], manage: ['supply', 'supply_manage'] },
   warehouse: { none: [], view: ['warehouse'], manage: ['warehouse', 'warehouse_manage'] },
@@ -321,7 +323,7 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     };
   });
 
-  const accessInput = z.object({ userId: uid, area: z.enum(['products', 'pricing', 'supply', 'warehouse', 'dealers']), level: z.string().min(1).max(20) }).strict();
+  const accessInput = z.object({ userId: uid, area: z.enum(['products', 'import', 'pricing', 'supply', 'warehouse', 'dealers']), level: z.string().min(1).max(20) }).strict();
   app.post('/erp/access', async req => {
     const u = actorOf(req), v = accessInput.parse(req.body), admin = o.isAdmin(u);
     if (!(v.level in AREAS[v.area])) deny(400, 'INVALID_ACCESS_LEVEL', 'Choose a valid access level');
@@ -337,7 +339,10 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
       // Keep the product-hub dependency consistent: the full price build-up needs product access,
       // and removing product access removes the full price build-up.
       if (v.area === 'pricing' && v.level === 'full' && !next.includes('products')) next.push('products');
-      if (v.area === 'products' && v.level === 'none') next = next.filter(g => g !== 'product_cost_detail');
+      if (v.area === 'products' && v.level === 'none') next = next.filter(g => g !== 'product_cost_detail' && g !== 'products_import');
+      // Bulk update of SKUs and prices comes with what it changes: product data (manage) and retail prices (MSRP, MAP, promotion floor).
+      // Cost columns still need the full price build-up (价格组成 + 修改).
+      if (v.area === 'import' && v.level === 'allow') next.push('products', 'products_manage', 'pricing_msrp');
       next = [...new Set(next)];
       await tx.query('UPDATE users SET grants=$2 WHERE id=$1', [p.id, JSON.stringify(next)]);
       await tx.query('INSERT INTO audit_events(id,org_id,department_id,owner_id,actor_id,action,object_id,details) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',

@@ -224,7 +224,7 @@ export async function registerProductLibraryRoutes(app: FastifyInstance, db: Dat
     const sens = canSee(v, 'sens');
     return {
       spec: specFor(v, ws.settings.whTiers),
-      viewer: { levels: [...v.levels], editCatalog: v.editCatalog, editCost: v.editCost, editPrices: v.editPrices, admin: v.admin, canImport: v.admin, canEditSettings: v.admin },
+      viewer: { levels: [...v.levels], editCatalog: v.editCatalog, editCost: v.editCost, editPrices: v.editPrices, admin: v.admin, canImport: v.admin || (Array.isArray((u as any).grants) && (u as any).grants.includes('products_import')), canEditSettings: v.admin },
       settings: sens ? { ...ws.settings, updatedAt: ws.updatedAt, configured: ws.configured }
         : { whTiers: ws.settings.whTiers.filter(t => !t.floor).map(t => ({ name: t.name, discount: t.discount })), configured: ws.configured },
       items: [...recs.values()].map(r => ({ ...recordFor(v, r, ws.settings, dupes), ...(pending.get(r.sku) ? { pendingPrices: pending.get(r.sku) } : {}) })),

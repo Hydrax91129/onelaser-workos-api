@@ -17,7 +17,7 @@ import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
 import { deny } from './errors.js';
 import {
-  FAMILIES, FIELD, GROUPS, CLEAR, CORE_REQUIRED, VIS_NAMES, allFields, canSee, canWrite, completeness, enumLabel, famCode, parseValue, viewerOf, relationIssues,
+  FAMILIES, FIELD, GROUPS, CLEAR, CORE_REQUIRED, fieldOf, VIS_NAMES, allFields, canSee, canWrite, completeness, enumLabel, famCode, parseValue, viewerOf, relationIssues,
   type Field, type Viewer,
 } from './product-spec.js';
 import { worksheet, type Worksheet } from './product-worksheet.js';
@@ -177,6 +177,12 @@ export function diffUpload(v: Viewer, ws: Worksheet, recs: Map<string, Rec>, par
     const rec = findRec(recs, rawSku) || null;
     if (rec) res.sku = rec.sku;
     const raw = { ...cells }; delete raw.sku;
+    // A column this person may not change is fine when it is left as it is (for example MSRP in the downloaded template).
+    for (const key of Object.keys(raw)) {
+      const f = fieldOf(key, ws.whTiers); if (!f || canWrite(v, f)) continue;
+      const p = parseValue(f, raw[key]);
+      if (p.ok && same((p.value ?? null) as any, (rec ? rec.values[key] ?? null : null) as any)) delete raw[key];
+    }
     const { values, errors } = validateValues(v, raw, ws);
     for (const e of errors) err(e.key, e.zh, e.en);
     const before = rec ? rec.values : {};
@@ -259,7 +265,9 @@ export async function registerProductImportRoutes(app: FastifyInstance, db: Data
 }) {
   const actorOf = (req: FastifyRequest): User => req.actor || deny(401, 'UNAUTHENTICATED', 'Authentication is required');
   const viewer = (u: User) => viewerOf(Array.isArray((u as any).grants) ? (u as any).grants : [], o.isAdmin(u));
-  const adminOnly = (u: User) => { if (!o.isAdmin(u)) deny(403, 'PRODUCT_IMPORT_FORBIDDEN', 'Only the main administrators can bulk-update products'); };
+  /** Main admins, and the people they allow in 供应链权限管理 (grant products_import). Which columns each person can change still follows their field access. */
+  const canImport = (u: User) => o.isAdmin(u) || (Array.isArray((u as any).grants) && (u as any).grants.includes('products_import'));
+  const adminOnly = (u: User) => { if (!canImport(u)) deny(403, 'PRODUCT_IMPORT_FORBIDDEN', 'Only people allowed to bulk-update products can do this', '只有主管理员授权的人可以批量更新 SKU 和价格。'); };
   const stamp = () => new Date().toISOString().slice(0, 10);
 
   // Anyone who can open the product library may download what they can see; the columns follow their level.
@@ -366,6 +374,7 @@ export async function registerProductImportRoutes(app: FastifyInstance, db: Data
       const imp = (await tx.query(`SELECT * FROM product_imports WHERE org_id=$1 AND id=$2 AND kind='library' FOR UPDATE`, [u.org_id, String((req.params as any).id)])).rows[0]
         || deny(404, 'IMPORT_NOT_FOUND', 'This import does not exist');
       if (imp.undone_at) deny(409, 'IMPORT_ALREADY_UNDONE', 'This import has already been undone');
+      if (!o.isAdmin(u) && imp.created_by !== u.id) deny(403, 'IMPORT_UNDO_OWN', 'You can undo only your own bulk updates', '只能撤销自己做的批量更新。');
       const ws = (await worksheetOf(tx, u.org_id)).settings;
       const log = (imp.changes || []) as { sku: string; created: boolean; changes: Change[] }[];
       const recs = await loadRecords(tx, u.org_id, log.map(l => l.sku), true);
