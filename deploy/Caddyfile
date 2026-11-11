@@ -39,7 +39,7 @@ http://:{$PORT:10000} {
     # Stored files (project, task, product, RMA, HR and feedback files) open in the WorkOS preview
     # window (dist/file-preview.js): only the app itself may frame them, and the file response runs
     # no script. object-src 'self' lets Chrome show a PDF. Everything else stays DENY.
-    @stored_file path_regexp ^/api/(projects/files/[^/]+|tasks/[^/]+/attachments/[^/]+|products/library/files/[^/]+|rma/[^/]+/photos/[^/]+|hr/people/[^/]+/documents/[^/]+|feedback/[^/]+/images/[^/]+)$
+    @stored_file path_regexp ^/api/(projects/files/[^/]+|tasks/[^/]+/attachments/[^/]+|products/library/files/[^/]+|rma/[^/]+/photos/[^/]+|finance/receivables/[^/]+/files/[^/]+|hr/people/[^/]+/documents/[^/]+|feedback/[^/]+/images/[^/]+)$
     header @stored_file {
         X-Frame-Options SAMEORIGIN
         Content-Security-Policy "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; object-src 'self'; frame-ancestors 'self'"

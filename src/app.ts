@@ -21,6 +21,7 @@ import { registerItRoutes, type ItOptions } from './it-accounts.js';
 import { registerQualityRoutes, qualityFactoryOf, factoryPathAllowed, type QualityOptions } from './quality.js';
 import { registerProductRoutes } from './products.js';
 import { registerMcpRoutes, MCP_PUBLIC_PATHS } from './mcp.js';
+import { registerFinanceRoutes, financeAccessOf } from './finance.js';
 import { registerProductLibraryRoutes } from './product-library.js';
 import { registerProductImportRoutes } from './product-import.js';
 import { registerInboxRoutes, pushInbox, taskFollowers } from './inbox.js';
@@ -188,7 +189,7 @@ export async function buildApp(options:AppOptions) {
   });
   app.delete('/auth/session',async(req,reply)=>{await db.query('DELETE FROM sessions WHERE token_hash=$1',[hash(req.sessionToken!)]);reply.header('Set-Cookie',cookie(sessionCookieName(integrations.secureCookies),'',integrations.secureCookies,0));return {revoked:true};});
   const isExecutive=(user:User)=>integrations.executiveUserIds?.includes(user.id)===true;
-  app.get('/me',async req=>({...actor(req),isAdmin:isOrgAdmin(actor(req) as any,{executiveUserIds:integrations.executiveUserIds||[]}),executiveAccess:isExecutive(actor(req)),mcpAccess:isExecutive(actor(req))&&(integrations.mcpUserIds||[]).includes(actor(req).id),supportAccess:supportPermissions(actor(req),options.support||{},integrations.executiveUserIds||[]),qualityFactory:(req as any).qualityFactory||null}));
+  app.get('/me',async req=>({...actor(req),isAdmin:isOrgAdmin(actor(req) as any,{executiveUserIds:integrations.executiveUserIds||[]}),executiveAccess:isExecutive(actor(req)),mcpAccess:isExecutive(actor(req))&&(integrations.mcpUserIds||[]).includes(actor(req).id),financeAccess:await financeAccessOf(db,actor(req),isExecutive(actor(req))),supportAccess:supportPermissions(actor(req),options.support||{},integrations.executiveUserIds||[]),qualityFactory:(req as any).qualityFactory||null}));
   app.get('/executive/summary',async req=>{const user=actor(req);if(!isExecutive(user))deny(403,'FORBIDDEN','Executive access is required');return db.transaction(tx=>executiveSummary(tx,user.org_id,integrations.teamMode));});
   registerSupportRoutes(app,db,options.support,integrations.executiveUserIds);
   await registerOkrPublish(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
@@ -318,6 +319,7 @@ export async function buildApp(options:AppOptions) {
   await registerOkrCycle(app,db,{now:options.clock,notify,timeZone:process.env.OKR_TIMEZONE||'America/Los_Angeles',intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0),isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
   await registerProjectRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),model:options.okrDraftModel===undefined?(aiModel(()=>jsonModel({apiKey:process.env.AI_PROVIDER_API_KEY||process.env.XAI_API_KEY,model:process.env.AI_OKR_MODEL_ID||process.env.AI_MODEL_ID||process.env.AI_TRANSLATION_MODEL_ID||process.env.AI_SCORING_MODEL_ID,baseUrl:process.env.AI_PROVIDER_BASE_URL}))||null):options.okrDraftModel});
   await registerWmsRoutes(app,db,{isAdmin:isExecutive /* sensitive ERP data: only deployment-configured executives bypass grants; in-app admins need grants */});
+  await registerFinanceRoutes(app,db,{isAdmin:isExecutive /* finance is sensitive: only deployment-configured main admins bypass grants */,now:options.clock});
   await registerRmaRoutes(app,db,{isAdmin:isExecutive /* sensitive ERP data: only deployment-configured executives bypass grants; in-app admins need grants */,now:options.clock});
   await registerHrRoutes(app,db,{...options.hr,executiveUserIds:integrations.executiveUserIds||[],quality:options.quality,now:options.clock,intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0)});
   await registerQualityRoutes(app,db,{...options.quality,notify,intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0),isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),now:options.clock});
