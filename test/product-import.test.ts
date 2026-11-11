@@ -70,7 +70,7 @@ test('upload preview: statuses, old → new, errors with row/column/reason, anal
   const same=await preview(call,'same.xlsx',writeXlsx([{name:'产品资料',rows:t}]));assert.equal(same.statusCode,200,same.body);
   assert.deepEqual(same.json().analysis.totals,{rows:2,new:0,update:0,same:2,error:0,fieldChanges:0,warnings:same.json().analysis.totals.warnings});
   const g=grid(t);
-  const a=g.find(r=>r[0]==='ODL-A1')!;a[col('msrp')]=2200;a[col('status')]='上新中';a[col('series')]='';a[col('model')]='XRF-T';
+  const a=g.find(r=>r[0]==='ODL-A1')!;a[col('msrp')]=2200;a[col('status')]='上新中';a[col('series')]='';a[col('gtin')]='012345678905';
   const bRow=g.find(r=>r[0]==='ODL-B1')!;bRow[col('landed')]=95;bRow[col('series')]='[清空]';
   const row=(vals:Record<string,any>)=>keys.map(k=>vals[k]??'');
   g.push(row({sku:'odl-a1',nameZh:'重复'}));                                   // duplicate SKU in the file (case-insensitive)
@@ -83,7 +83,7 @@ test('upload preview: statuses, old → new, errors with row/column/reason, anal
   const p=await preview(call,'update.xlsx',file);assert.equal(p.statusCode,200,p.body);
   const pv=p.json(),R=(sku:string)=>pv.results.find((r:any)=>r.sku===sku);
   assert.equal(R('ODL-A1').status,'update');
-  assert.deepEqual(R('ODL-A1').changes.map((c:any)=>c.key).sort(),['model','msrp','status']);
+  assert.deepEqual(R('ODL-A1').changes.map((c:any)=>c.key).sort(),['gtin','msrp','status']);
   assert.deepEqual(R('ODL-A1').changes.find((c:any)=>c.key==='msrp'),{key:'msrp',from:2000,to:2200});
   assert.equal(R('ODL-B1').changes.find((c:any)=>c.key==='series'),undefined,'series was empty already');
   assert.deepEqual(R('ODL-B1').changes.find((c:any)=>c.key==='landed'),{key:'landed',from:30,to:95});
