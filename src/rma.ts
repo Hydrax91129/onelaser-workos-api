@@ -2,12 +2,12 @@
  *
  * One case per returned unit (or batch of identical units): when it arrived, why, who diagnosed and
  * repaired it, photos at receipt / diagnosis / after repair, and how long it took. A case ends in one of:
- *   - restocked: back into stock (normally the refurbished location) through a WMS goods-in movement,
- *     so stock and its history stay in the warehouse system;
- *   - scrapped, or returned to the customer (no stock change).
+ *   - restocked: put away for sale as a refurbished unit (已入库待上架 → 完成上架 → 售出);
+ *   - scrapped, or returned to the customer.
+ * Returns and repairs are their own stock (owner, 2026-11-11): nothing here writes regular WMS stock, and WMS
+ * never lists REF- SKUs or has a returns warehouse. The case's stage is the unit's stock state.
  * A restocked refurbished unit can get a discount and a listing status for selling on the website;
- * the grade chosen when restocking sets the discount (A untouched, sold as new, B 10% off, C 20% off);
- * marking it sold writes a WMS goods-out from its restock location (undoing 售出 writes it back).
+ * the grade chosen when restocking sets the discount (A untouched, sold as new, B 10% off, C 20% off).
  *
  * Access: anyone who can view warehouse stock can view cases; warehouse managers register and close
  * cases; the assigned technician can update diagnosis, photos and mark the repair done; prices are set
@@ -15,14 +15,14 @@
  * material, other; machines need a serial), the reason and condition, and photos on receipt; whether it can be repaired
  * and who repairs it are decided in the repair step. Waiting for parts needs the parts named (waiting_for);
  * the refurbished discount can be chosen only once the repair is done. A return SKU
- * starting with REF- that is not in the item list yet is added to WMS (ensureReturnItem); other SKUs must already exist. */
+ * starting with REF- that is not in the item list yet is added as a name entry (ensureReturnItem); other SKUs must already exist. */
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
 import { deny } from './errors.js';
-import { LOCATIONS, warehouseLevelFor, ensureReturnItem } from './wms.js';
+import { warehouseLevelFor, ensureReturnItem } from './wms.js';
 
 export const rmaSchema = `
 CREATE TABLE IF NOT EXISTS rma_cases(id text PRIMARY KEY, org_id text NOT NULL, number text NOT NULL, sku text NOT NULL, serial text NOT NULL DEFAULT '',
@@ -58,7 +58,6 @@ const CLASSES = ['machine', 'accessory', 'material', 'other'] as const;
 export const GRADE_DISCOUNT: Record<string, number> = { A: 0, B: 10, C: 20 };
 const PHOTO_MIME = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 const MAX_PHOTO = 5 * 1024 * 1024, MAX_PHOTOS = 40;
-const LOC_IDS = LOCATIONS.map(l => l.id) as [string, ...string[]];
 const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use a date like 2026-11-02');
 const id = z.string().min(1).max(100).regex(/^[A-Za-z0-9_-]+$/);
 const sku = z.string().trim().min(1).max(80);
@@ -116,7 +115,7 @@ export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: {
     const rows = (await db.query('SELECT * FROM rma_cases WHERE org_id=$1 ORDER BY received_at DESC, created_at DESC LIMIT 1000', [u.org_id])).rows;
     const technicians = [...ppl.values()].filter((p: any) => p.active && !p.disabled_at && level(p) !== 'none').map((p: any) => ({ id: p.id, name: nameOf(p) })).sort((a, b) => a.name.localeCompare(b.name));
     return {
-      items: rows.map((c: any) => shape(c, ppl, items, msrp, counts.get(c.id) || 0)), technicians, locations: LOCATIONS,
+      items: rows.map((c: any) => shape(c, ppl, items, msrp, counts.get(c.id) || 0)), technicians,
       skus: [...items.values()].map((i: any) => ({ sku: i.sku, name: i.name })),
       canOperate: level(u) === 'manage', canPrice: canPrice(u), me: u.id,
     };
@@ -142,6 +141,7 @@ export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: {
   app.post('/rma', async (req, reply) => {
     const u = actorOf(req), v = createInput.parse(req.body); requireManage(u);
     if (v.receivedAt > new Date(now() + 86400000).toISOString().slice(0, 10)) deny(400, 'RMA_FUTURE_DATE', 'The received date cannot be in the future');
+    if (v.receivedAt < '2000-01-01') deny(400, 'RMA_OLD_DATE', 'Check the received date: it is before 2000', '收货日期早于 2000 年，请检查是否填错。');
     if (v.productClass === 'machine' && !v.serial) deny(400, 'RMA_SERIAL_REQUIRED', 'A machine needs its serial number');
     const row = await db.transaction(async tx => {
       let item = (await tx.query('SELECT sku FROM wms_items WHERE org_id=$1 AND lower(sku)=lower($2)', [u.org_id, v.sku])).rows[0];
@@ -166,6 +166,7 @@ export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: {
     diagnosis: z.string().trim().max(5000).optional(), technicianId: id.nullable().optional(), repairNotes: z.string().trim().max(5000).optional(),
     partsUsed: z.string().trim().max(2000).optional(), waitingFor: z.string().trim().max(500).optional(), repairable: z.enum(['yes', 'no']).optional(), status: z.enum(['received', 'diagnosing', 'waiting_parts', 'repairing']).optional(),
     serial: z.string().trim().max(80).optional(), customer: z.string().trim().max(120).optional(), orderRef: z.string().trim().max(80).optional(), condition: z.string().trim().max(1000).optional(),
+    receivedAt: day.optional(),
   }).strict().refine(v => Object.keys(v).length > 0, 'Nothing to change');
   app.post<{ Params: { id: string } }>('/rma/:id/update', async req => {
     const u = actorOf(req), v = updateInput.parse(req.body), caseId = id.parse(req.params.id);
@@ -173,11 +174,12 @@ export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: {
       const c = await caseOf(tx, u, caseId, true);
       if (!canWork(u, c)) deny(403, 'RMA_WORK_ONLY', 'Only warehouse managers or the assigned technician can update this case');
       if (!OPEN.includes(c.status)) deny(409, 'RMA_CLOSED', 'This case is closed');
-      if ((v.technicianId !== undefined || v.serial !== undefined || v.customer !== undefined || v.orderRef !== undefined) && level(u) !== 'manage') deny(403, 'RMA_MANAGE_ONLY', 'Only warehouse managers can do this');
+      if ((v.technicianId !== undefined || v.serial !== undefined || v.customer !== undefined || v.orderRef !== undefined || v.receivedAt !== undefined) && level(u) !== 'manage') deny(403, 'RMA_MANAGE_ONLY', 'Only warehouse managers can do this');
       if (v.technicianId && !(await technicianOk(tx, u.org_id, v.technicianId))) deny(400, 'RMA_TECHNICIAN', 'Choose an active colleague with warehouse access as technician');
+      if (v.receivedAt !== undefined) { if (v.receivedAt > new Date(now() + 86400000).toISOString().slice(0, 10)) deny(400, 'RMA_FUTURE_DATE', 'The received date cannot be in the future'); if (v.receivedAt < '2000-01-01') deny(400, 'RMA_OLD_DATE', 'Check the received date: it is before 2000', '收货日期早于 2000 年，请检查是否填错。'); }
       const nextStatus = v.status ?? (c.status === 'repaired' && (v.diagnosis !== undefined || v.repairNotes !== undefined) ? 'repairing' : c.status);
       if (nextStatus === 'waiting_parts' && !(v.waitingFor ?? c.waiting_for ?? '').trim()) deny(400, 'RMA_PARTS_NEEDED', 'Say which parts you are waiting for');
-      const col: Record<string, string> = { diagnosis: 'diagnosis', technicianId: 'technician_id', repairNotes: 'repair_notes', partsUsed: 'parts_used', waitingFor: 'waiting_for', repairable: 'repairable', status: 'status', serial: 'serial', customer: 'customer', orderRef: 'order_ref', condition: 'condition' };
+      const col: Record<string, string> = { receivedAt: 'received_at', diagnosis: 'diagnosis', technicianId: 'technician_id', repairNotes: 'repair_notes', partsUsed: 'parts_used', waitingFor: 'waiting_for', repairable: 'repairable', status: 'status', serial: 'serial', customer: 'customer', orderRef: 'order_ref', condition: 'condition' };
       const sets: string[] = [], vals: unknown[] = [caseId];
       for (const [k, val] of Object.entries(v)) { vals.push(val); sets.push(`${col[k]}=$${vals.length}`); }
       if (v.status === undefined && c.status === 'received' && (v.technicianId || v.diagnosis)) sets.push("status='diagnosing'");
@@ -207,7 +209,7 @@ export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: {
     });
   });
 
-  const closeInput = z.object({ outcome: z.enum(['restock', 'scrap', 'return_customer']), location: z.enum(LOC_IDS).optional(), grade: z.enum(['A', 'B', 'C', 'new']).optional(), note: z.string().trim().max(1000).optional() }).strict();
+  const closeInput = z.object({ outcome: z.enum(['restock', 'scrap', 'return_customer']), location: z.string().max(20).optional() /* ignored: returns are not regular stock */, grade: z.enum(['A', 'B', 'C', 'new']).optional(), note: z.string().trim().max(1000).optional() }).strict();
   app.post<{ Params: { id: string } }>('/rma/:id/close', async req => {
     const u = actorOf(req), v = closeInput.parse(req.body), caseId = id.parse(req.params.id); requireManage(u);
     return db.transaction(async tx => {
@@ -216,12 +218,7 @@ export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: {
       if (v.outcome === 'restock') {
         const grade = v.grade === 'new' ? 'A' : (v.grade || 'B'), pct = GRADE_DISCOUNT[grade];
         if (c.status !== 'repaired' && grade !== 'A') deny(400, 'RMA_NOT_REPAIRED', 'Mark the repair as done before putting it back into stock');
-        const loc = v.location || (grade === 'A' ? 'us' : 'refurb');
-        const have = Number((await tx.query('SELECT qty FROM wms_stock WHERE org_id=$1 AND sku=$2 AND location=$3 FOR UPDATE', [u.org_id, c.sku, loc])).rows[0]?.qty ?? 0);
-        await tx.query('INSERT INTO wms_stock(org_id,sku,location,qty) VALUES($1,$2,$3,$4) ON CONFLICT(org_id,sku,location) DO UPDATE SET qty=$4', [u.org_id, c.sku, loc, have + Number(c.qty)]);
-        await tx.query(`INSERT INTO wms_movements(id,org_id,type,sku,location,qty,reason,reference,status,created_by) VALUES($1,$2,'in',$3,$4,$5,$6,$7,'done',$8)`,
-          [randomUUID(), u.org_id, c.sku, loc, Number(c.qty), `退货维修入库（${grade} 品${grade === 'A' ? '，当新货' : `，${pct}% off`}）${c.serial ? ` · SN ${c.serial}` : ''}`, c.number, u.id]);
-        await tx.query(`UPDATE rma_cases SET status='restocked',outcome='restock',restock_location=$2,grade=$3,discount_pct=$4,sale_price=NULL,closed_at=now(),updated_at=now() WHERE id=$1`, [caseId, loc, grade, pct]);
+        await tx.query(`UPDATE rma_cases SET status='restocked',outcome='restock',restock_location=NULL,grade=$2,discount_pct=$3,sale_price=NULL,closed_at=now(),updated_at=now() WHERE id=$1`, [caseId, grade, pct]);
       } else {
         await tx.query(`UPDATE rma_cases SET status=$2,outcome=$3,closed_at=now(),updated_at=now() WHERE id=$1`, [caseId, v.outcome === 'scrap' ? 'scrapped' : 'returned', v.outcome]);
       }
@@ -244,15 +241,7 @@ export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: {
       if (v.discountPct !== undefined) { vals.push(v.discountPct); sets.push(`discount_pct=$${vals.length}`); }
       if (v.salePrice !== undefined) { vals.push(v.salePrice); sets.push(`sale_price=$${vals.length}`); }
       if (v.listing) { vals.push(v.listing); sets.push(`listing=$${vals.length}`); }
-      // 售出 takes the unit out of stock (WMS goods-out with the RMA number); undoing 售出 puts it back.
-      if (v.listing && (v.listing === 'sold') !== (c.listing === 'sold')) {
-        const sold = v.listing === 'sold', loc = c.restock_location || 'refurb', qty = Number(c.qty);
-        const have = Number((await tx.query('SELECT qty FROM wms_stock WHERE org_id=$1 AND sku=$2 AND location=$3 FOR UPDATE', [u.org_id, c.sku, loc])).rows[0]?.qty ?? 0);
-        if (sold && have < qty) deny(409, 'WMS_NEGATIVE_STOCK', `Not enough stock of ${c.sku} at ${loc}: ${have} on hand, ${qty} needed`, `${c.sku} 在该库位库存不足：现有 ${have} 件，需要 ${qty} 件`);
-        await tx.query('INSERT INTO wms_stock(org_id,sku,location,qty) VALUES($1,$2,$3,$4) ON CONFLICT(org_id,sku,location) DO UPDATE SET qty=$4', [u.org_id, c.sku, loc, have + (sold ? -qty : qty)]);
-        await tx.query(`INSERT INTO wms_movements(id,org_id,type,sku,location,qty,reason,reference,status,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'done',$9)`,
-          [randomUUID(), u.org_id, sold ? 'out' : 'in', c.sku, loc, sold ? -qty : qty, `${sold ? '翻新品售出' : '撤销售出，退回库存'}${c.serial ? ` · SN ${c.serial}` : ''}`, c.number, u.id]);
-      }
+      // 售出 is a stage of the case only: returns are not regular stock, so nothing is written to WMS.
       await tx.query(`UPDATE rma_cases SET ${sets.join(',')},updated_at=now() WHERE id=$1`, vals);
       await event(tx, u, caseId, 'priced', [v.discountPct != null && `-${v.discountPct}%`, v.salePrice != null && `$${v.salePrice}`, v.listing && `listing:${v.listing}`].filter(Boolean).join(' '));
       await audit(tx, u, 'rma.priced', caseId, v);
