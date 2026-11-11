@@ -3,7 +3,7 @@
  * Source: the owner's spec 「OneLaser 产品资料库」 (PIM 字段勾选表 2026-11-03, regrouped 2026-11-04).
  * Every field carries a five-letter family code, one letter per family in FAMILIES order
  * (主机 main, 配件/备件 acc, 耗材 cons, 软件/服务 soft, 内部物料 mat): r 必填, o 选填, n 不适用.
- * For every family except 主机 only the core fields stay required (minReq below).
+ * Which fields are required is the owner's call (2026-11-11), the same for every family where the field applies (minReq below).
  *
  * Visibility levels map onto the existing grants (CLAUDE.md rule 4, no new permission system):
  *   all    全员            every signed-in employee (factory contacts are blocked by the server anyway)
@@ -45,9 +45,13 @@ export const GROUPS: Group[] = [
   { no: '5', zh: '定价（批发）', en: 'Pricing (wholesale)' }, { no: '6', zh: '包装与物流', en: 'Packaging & logistics' },
   { no: '7', zh: '采购与供应商', en: 'Purchasing & suppliers' }, { no: '8', zh: '售后与库存控制', en: 'After-sales & stock control' },
 ];
-/** Nothing in the product library is required (only the SKU itself identifies a product): every 必填 is 选填. */
-export const CORE_REQUIRED = new Set(['sku']);
-export const minReq = (_key: string, code: string) => code.replace(/r/g, 'o');
+/** Required (owner, 2026-11-11): every basic field except UPC / EAN / GTIN and the main image, plus landed cost and last-mile
+ *  freight. The return SKU is required for returned goods only (completeness). Everything else is optional.
+ *  A field stays 不适用 (n) for families it does not apply to. */
+export const REQUIRED = new Set(['sku', 'goodsType', 'family', 'series', 'nameZh', 'nameEn', 'brand', 'landed', 'lastMile']);
+/** Core fields cannot be cleared once set. */
+export const CORE_REQUIRED = new Set(['sku', 'goodsType', 'family', 'nameZh', 'nameEn']);
+export const minReq = (key: string, code: string) => REQUIRED.has(key) ? code.replace(/o/g, 'r') : code.replace(/r/g, 'o');
 
 const F = (group: string, key: string, zh: string, en: string, ph: string, code: string, vis: Vis, type: FieldType, store: Store, extra: Partial<Field> = {}): Field =>
   ({ group, key, zh, en, ph, code: minReq(key, code), vis, type, store, ...extra });
@@ -62,7 +66,6 @@ export const FIELDS: Field[] = [
   F('1', 'nameZh', '中文名', 'Chinese name', 'XRF 38W 桌面激光机', 'rrrrr', 'all', 'text', { t: 'col', col: 'name_zh' }, { max: 200 }),
   F('1', 'nameEn', '英文名', 'English name', 'XRF 38W Desktop Laser', 'rrrrr', 'all', 'text', { t: 'col', col: 'name_en' }, { max: 200 }),
   F('1', 'brand', '品牌', 'Brand', 'OneLaser', 'rrron', 'all', 'list', attr, { opts: ['OneLaser'] }),
-  F('1', 'model', '型号', 'Model', 'XRF-38', 'ronnn', 'all', 'text', attr),
   F('1', 'gtin', 'UPC / EAN / GTIN', 'UPC / EAN / GTIN', 'UPC 12 位 / EAN 13 位', 'ooonn', 'all', 'text', attr),
   F('1', 'mainImage', '产品主图', 'Main image', '', 'oooon', 'all', 'image', { t: 'file' }),
   F('2', 'status', '状态', 'Status', '', 'rrrro', 'all', 'enum', { t: 'col', col: 'status' }, { opts: STATUSES }),
@@ -254,10 +257,10 @@ const filled = (v: any) => v != null && v !== '' && !(Array.isArray(v) && !v.len
 export function completeness(rec: { values: Record<string, any>; files?: Record<string, number> }, v: Viewer, fields: Field[] = FIELDS) {
   const family = rec.values.family, missing: string[] = [];
   let need = 0, got = 0;
-  if (!family) return { need: 0, got: 0, missing, done: true };
+  if (!family) return { need: 1, got: 0, missing: ['family'], done: false };
   for (const f of fields) {
     if (!canSee(v, f.vis)) continue;
-    const req = f.key !== 'refbSku' && famCode(f.code, family) === 'req';
+    const req = f.key === 'refbSku' ? rec.values.goodsType === 'refb' : famCode(f.code, family) === 'req';
     if (!req) continue;
     need++;
     if (filled(rec.values[f.key])) got++; else missing.push(f.key);

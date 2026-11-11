@@ -24,7 +24,7 @@
 | 账号、组织、权限 | auth.ts, org.ts, members.ts | people.js, erp-access.js | users（含第一领导 manager_id、第二领导 second_manager_id，两者权限相同）、departments、grants（功能权限） |
 | 任务、OKR、项目 | app.ts, task-board.ts, completions.ts, assign.ts, okr*.ts, projects.ts | task-board.js, okr-board.js, projects.js, reports.js | tasks、submissions、reviews、objectives、key_results、projects、project_files（项目附件）、project_activity（项目动态） |
 | 消息红点 | inbox.ts | inbox.js | inbox_items（其他模块只调用 `pushInbox()`，不要自建通知表） |
-| PIM 与定价 | products.ts, product-spec.ts（产品资料库字段模型）, product-library.ts, product-worksheet.ts（定价工作表）, product-import.ts（标准模板、上传预览、确认、撤销）, xlsx.ts | products.js, product-library.js | product_catalog（SKU 主数据、MSRP；产品族 family、大货/退货 goods_type、退货 SKU refb_sku（以 REF- 开头，和退货登记 RMA 用同一规则），其余规格字段在 attrs）、product_pricing（成本输入；供应商在 attrs）、pricing_rules（公司计价规则；价格参数在 worksheet 列，仓库里不放真实数值）、product_channel_prices（各渠道价格及审批；MAP=map、官网促销底价=promo_floor、大促价=promo_major、小促价=promo_minor、清货价=clearance、批发档手动价=wh0…；MSRP 运费在 product_catalog.ship_fee）、product_files（产品主图和文件栏位）、product_imports / product_import_previews（批量更新记录与预览，只有主管理员能上传和确认） |
+| PIM 与定价 | products.ts, product-spec.ts（产品资料库字段模型）, product-library.ts, product-worksheet.ts（定价工作表）, product-import.ts（标准模板、上传预览、确认、撤销）, xlsx.ts | products.js, product-library.js | product_catalog（SKU 主数据、MSRP；必填 = 产品基本参数里除 UPC/EAN/GTIN 和产品主图以外的字段，加上到岸价、尾程运费（product-spec.ts 的 `REQUIRED`、`minReq`），退货产品必填退货 SKU，其余选填；“型号”字段已去掉；产品资料只有“产品资料”和“批量更新”两个子页；产品族 family、大货/退货 goods_type、退货 SKU refb_sku（以 REF- 开头，和退货登记 RMA 用同一规则），其余规格字段在 attrs）、product_pricing（成本输入；供应商在 attrs）、pricing_rules（公司计价规则；价格参数在 worksheet 列，仓库里不放真实数值）、product_channel_prices（各渠道价格及审批；MAP=map、官网促销底价=promo_floor、批发档手动价=wh0…）、product_files（产品主图和文件栏位）、product_imports / product_import_previews（批量更新记录与预览，只有主管理员能上传和确认） |
 | WMS 库存 | wms.ts | wms.js | WMS 库位与出入库流水 |
 | 退货维修 RMA | rma.ts | rma.js | rma_cases（登记退货只记录退货和收货照片，是否可维修、维修人员在维修环节填；翻新机入库走 WMS；状态：等待维修 → 等待配件（填等待什么配件）→ 完成维修 → 已入库待上架 → 完成上架 → 售出，见 rma.ts 的 `stageOf`；入库时按成色定折扣：A 品原封不动当新货、不打折，B 品 10% off，C 品 20% off（`GRADE_DISCOUNT`）；标记售出自动写 WMS 出库，撤销售出写回） |
 | 经销商下单 portal | dealer.ts, dealer-admin.ts | dealers.js | dealer_accounts、dealer_orders（价格读 product_channel_prices 的 dealer 渠道，发货走 WMS 出库） |
@@ -88,7 +88,7 @@
   登录：owner@workos.test（主管理员）、hr@workos.test（中国 / 海外 HR）、staff@workos.test（普通员工），密码 workos-preview。
   改了页面的 PR，合并前先用它跑一遍、截图给用户确认；新模块要用的示例数据也加在这个文件里。
 - **测试站**：用户在 Render 上另建的服务（和正式服务 onelaser-workos-migration、正式数据库完全分开），用 `Dockerfile.preview`
-  构建 `claude/preview` 分支：只有虚构数据（独立的测试库 `PREVIEW_DATABASE_URL`，每次部署清空重建），打开即以主管理员进入、不用登录，页面底部的“测试站”条可一键切换主管理员 / HR / 普通员工（`/preview-enter?as=`）。
+  构建 `claude/preview` 分支：只有内存里的虚构数据，登录密码是那个服务上的 `PREVIEW_PASSWORD`（不写进仓库），页面底部有“测试站”标记。
   给用户预览时：把后端 PR 的提交推到 `claude/preview`，要预览的前端提交写进 `deploy/preview-frontend-revision.txt`。
   `claude/preview` 永远不合进 `main`；第 5 节对正式服务的规则不变。
 

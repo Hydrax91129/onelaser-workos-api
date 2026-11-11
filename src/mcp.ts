@@ -132,13 +132,13 @@ const tools: { name: string; title: string; description: string; inputSchema: ob
   {
     name: 'workos_search_products', title: '产品资料',
     description: 'Search the product library (SKU master data). Returns company-wide fields only: names, family, status, specs, packaging, MSRP. Never costs, suppliers or channel prices. 产品资料查询（仅全员可见字段）。',
-    inputSchema: props({ query: { type: 'string', description: 'SKU, model or name' }, status: { type: 'string' }, limit: limitProp }),
+    inputSchema: props({ query: { type: 'string', description: 'SKU or name' }, status: { type: 'string' }, limit: limitProp }),
     args: z.object({ query: z.string().max(100).optional(), status: z.string().max(20).optional(), limit: z.number().int().min(1).max(100).default(50) }).strict(),
     run: async ({ get }, a) => {
       const lib = await get('/products/library');
       // Company-wide fields only; MAP and the website promotion floor stay inside WorkOS.
       const keys = (lib.spec?.fields || []).filter((f: any) => f.vis === 'all' && !['mainImage', 'map', 'promoFloor'].includes(f.key)).map((f: any) => [f.key, f.zh] as const);
-      const items = (lib.items || []).filter((i: any) => like(a.query, i.sku, i.values?.nameZh, i.values?.nameEn, i.values?.model) && (!a.status || i.values?.status === a.status)).slice(0, a.limit);
+      const items = (lib.items || []).filter((i: any) => like(a.query, i.sku, i.values?.nameZh, i.values?.nameEn) && (!a.status || i.values?.status === a.status)).slice(0, a.limit);
       return { fields: Object.fromEntries(keys), count: items.length, items: items.map((i: any) => Object.fromEntries(keys.map(([k]: readonly [string, string]) => [k, i.values?.[k] ?? null]).filter(([, v]: [string, unknown]) => v !== null && v !== ''))) };
     }
   },
