@@ -37,13 +37,18 @@ CREATE INDEX IF NOT EXISTS wms_movements_pending ON wms_movements(org_id,created
 CREATE TABLE IF NOT EXISTS wms_imports(id text PRIMARY KEY, org_id text NOT NULL, as_of date NOT NULL, rows integer NOT NULL, created_by text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
 `;
 
+/** Regular stock locations. Returns and repairs (REF- SKUs) are not regular stock: they live only in the
+ * returns module (rma.ts), so there is no returns warehouse here and REF- SKUs never show or move in WMS. */
 export const LOCATIONS = [
-  { id: 'us', zh: '美国仓', en: 'US warehouse' },
+  { id: 'us', zh: '美国LA仓', en: 'US LA warehouse' },
   { id: 'dg', zh: '东莞工厂仓', en: 'Dongguan factory' },
   { id: 'jn', zh: '济南工厂仓', en: 'Jinan factory' },
-  { id: 'transit', zh: '在途', en: 'In transit' },
-  { id: 'refurb', zh: '美国仓·翻新品', en: 'US refurbished' },
+  { id: 'transit', zh: '在途运输中', en: 'In transit' },
 ] as const;
+export const isReturnSku = (s: string) => /^REF-/i.test(String(s || '').trim());
+const notReturns = (col = 'sku') => `lower(${col}) NOT LIKE 'ref-%'`;
+const returnSkuDenied = (skus: string[]) => deny(400, 'WMS_RETURN_SKU', `Returned-goods SKUs (REF-…) are handled in Returns & repairs, not in regular stock: ${skus.slice(0, 10).join(', ')}`,
+  `REF- 开头的退货 SKU 在“退货维修”里管理，不进常规库存：${skus.slice(0, 10).join('、')}`);
 const LOC_IDS = LOCATIONS.map(l => l.id) as [string, ...string[]];
 
 export const ERP_GRANTS = ['products_manage', 'pricing_msrp', 'supply', 'supply_manage', 'warehouse', 'warehouse_manage', 'dealers', 'dealers_manage'] as const;
@@ -72,8 +77,9 @@ const sku = z.string().trim().min(1).max(80).regex(/^[A-Za-z0-9][A-Za-z0-9._\-/ 
 const uid = z.string().min(1).max(100);
 const nameOf = (u: any) => u ? (u.display_name || u.name_zh || u.name_en || u.id) : '';
 
-/** A returned-goods SKU (REF-…) that is not in the item list yet: the returns desk adds it when registering the return.
- * WMS stays the only writer of wms_items; the caller passes its transaction. Returns the stored SKU. */
+/** A returned-goods SKU (REF-…) that is not in the item list yet: the returns desk adds it when registering the return,
+ * only as a name entry (type 'return'); regular stock never lists or moves it. WMS stays the only writer of wms_items;
+ * the caller passes its transaction. Returns the stored SKU. */
 export async function ensureReturnItem(tx: Queryable, org: string, actorId: string, s: string) {
   const found = (await tx.query('SELECT sku FROM wms_items WHERE org_id=$1 AND lower(sku)=lower($2)', [org, s])).rows[0];
   if (found) return found.sku as string;
@@ -131,14 +137,15 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
 
   app.get('/wms/summary', async req => {
     const u = actorOf(req); requireView(u);
-    const items = (await db.query('SELECT sku,name,type FROM wms_items WHERE org_id=$1 ORDER BY sku', [u.org_id])).rows;
-    const stock = (await db.query('SELECT sku,location,qty FROM wms_stock WHERE org_id=$1', [u.org_id])).rows;
+    const items = (await db.query(`SELECT sku,name,type FROM wms_items WHERE org_id=$1 AND type<>'return' AND ${notReturns()} ORDER BY sku`, [u.org_id])).rows;
+    const locIds = LOCATIONS.map(l => l.id);
+    const stock = (await db.query('SELECT sku,location,qty FROM wms_stock WHERE org_id=$1', [u.org_id])).rows.filter((r: any) => locIds.includes(r.location));
     const qty = new Map<string, Record<string, number>>();
     for (const r of stock) { if (!qty.has(r.sku)) qty.set(r.sku, {}); qty.get(r.sku)![r.location] = Number(r.qty); }
-    const moves = (await db.query('SELECT * FROM wms_movements WHERE org_id=$1 ORDER BY created_at DESC, id DESC LIMIT 500', [u.org_id])).rows;
+    const moves = (await db.query(`SELECT * FROM wms_movements WHERE org_id=$1 AND ${notReturns()} AND location<>'refurb' ORDER BY created_at DESC, id DESC LIMIT 500`, [u.org_id])).rows;
     // Pending adjustments older than the latest 500 movements still need a decision, so they are always included.
     const recent = new Set(moves.map((m: any) => m.id));
-    const pendingOld = (await db.query(`SELECT * FROM wms_movements WHERE org_id=$1 AND status='pending' ORDER BY created_at`, [u.org_id])).rows.filter((m: any) => !recent.has(m.id));
+    const pendingOld = (await db.query(`SELECT * FROM wms_movements WHERE org_id=$1 AND status='pending' AND ${notReturns()} ORDER BY created_at`, [u.org_id])).rows.filter((m: any) => !recent.has(m.id));
     const people = await peopleOf(u.org_id);
     const lastImport = (await db.query('SELECT as_of,created_at FROM wms_imports WHERE org_id=$1 ORDER BY created_at DESC LIMIT 1', [u.org_id])).rows[0];
     const movements = [...moves, ...pendingOld].map(movementOut(u, people));
@@ -155,6 +162,7 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
   app.get('/wms/movements', async req => {
     const u = actorOf(req); requireView(u);
     const v = historyQuery.parse(req.query);
+    if (isReturnSku(v.sku)) returnSkuDenied([v.sku]);
     const rows = (await db.query('SELECT * FROM wms_movements WHERE org_id=$1 AND lower(sku)=lower($2) ORDER BY created_at DESC, id DESC LIMIT $3', [u.org_id, v.sku, v.limit ?? 1000])).rows;
     return { sku: v.sku, movements: rows.map(movementOut(u, await peopleOf(u.org_id))) };
   });
@@ -162,6 +170,7 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
   const itemInput = z.object({ sku, name: z.string().trim().min(1).max(200), type: z.string().trim().max(60).optional() }).strict();
   app.post('/wms/items', async (req, reply) => {
     const u = actorOf(req), v = itemInput.parse(req.body); requireManage(u);
+    if (isReturnSku(v.sku)) returnSkuDenied([v.sku]);
     const row = await db.transaction(async tx => {
       if ((await tx.query('SELECT 1 FROM wms_items WHERE org_id=$1 AND lower(sku)=lower($2)', [u.org_id, v.sku])).rows.length) deny(409, 'WMS_SKU_EXISTS', 'This SKU already exists');
       const it = (await tx.query('INSERT INTO wms_items(org_id,sku,name,type,created_by) VALUES($1,$2,$3,$4,$5) RETURNING sku,name,type', [u.org_id, v.sku, v.name, v.type || '', u.id])).rows[0];
@@ -179,6 +188,7 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
   }).strict();
   app.post('/wms/movements', async (req, reply) => {
     const u = actorOf(req), v = moveInput.parse(req.body); requireManage(u);
+    if (isReturnSku(v.sku)) returnSkuDenied([v.sku]);
     if (v.type === 'adjust' ? v.counted === undefined : v.qty === undefined) deny(400, 'WMS_QTY_REQUIRED', 'Enter the quantity');
     if (v.type === 'out' && !v.reference) deny(400, 'WMS_REFERENCE_REQUIRED', 'Goods out needs an order or reference number');
     if (v.type === 'transfer' && (!v.toLocation || v.toLocation === v.location)) deny(400, 'WMS_TRANSFER_TARGET', 'Choose a different destination location');
@@ -214,6 +224,7 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     const u = actorOf(req), v = batchInput.parse(req.body); requireManage(u);
     if (v.type === 'transfer' && (!v.toLocation || v.toLocation === v.location)) deny(400, 'WMS_TRANSFER_TARGET', 'Choose a different destination location');
     const merged = new Map<string, number>();
+    const ref = v.lines.map(l => l.sku).filter(isReturnSku); if (ref.length) returnSkuDenied(ref);
     for (const l of v.lines) merged.set(l.sku.toLowerCase(), (merged.get(l.sku.toLowerCase()) || 0) + l.qty);
     const out = await db.transaction(async tx => {
       const items = (await tx.query('SELECT sku FROM wms_items WHERE org_id=$1', [u.org_id])).rows as { sku: string }[];
@@ -265,6 +276,7 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     if (!o.isAdmin(u)) deny(403, 'WMS_IMPORT_ADMIN_ONLY', 'Only administrators can import opening stock');
     const v = importInput.parse(req.body);
     const seen = new Set<string>();
+    const refRows = v.rows.map(r => r.sku).filter(isReturnSku); if (refRows.length) returnSkuDenied(refRows);
     for (const r of v.rows) { const k = r.sku.toLowerCase(); if (seen.has(k)) deny(400, 'WMS_DUPLICATE_SKU', `SKU ${r.sku} appears more than once in the file`); seen.add(k); }
     return db.transaction(async tx => {
       let created = 0, changed = 0;

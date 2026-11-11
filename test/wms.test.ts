@@ -84,11 +84,11 @@ test('WMS re-import sets quantities and logs the difference; SKU history goes pa
  const tokens:Record<string,string>={};
  const call=async(who:string,method:'GET'|'POST',url:string,payload?:any)=>{tokens[who]??=(await issueSession(db,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who]}});};
  try{
-  assert.equal((await call('m1','POST','/wms/import',{asOf:'2026-10-01',rows:[{sku:'R-1',name:'Refurb unit',qty:{us:4,refurb:2}}]})).json().changed,2);
-  const again=await call('m1','POST','/wms/import',{asOf:'2026-10-31',rows:[{sku:'r-1',qty:{us:1,refurb:2,dg:3}}]});assert.equal(again.statusCode,200,again.body);
-  assert.deepEqual(again.json(),{rows:1,created:0,changed:2},'case-insensitive SKU match; unchanged refurb is skipped');
+  assert.equal((await call('m1','POST','/wms/import',{asOf:'2026-10-01',rows:[{sku:'R-1',name:'Refurb unit',qty:{us:4,transit:2}}]})).json().changed,2);
+  const again=await call('m1','POST','/wms/import',{asOf:'2026-10-31',rows:[{sku:'r-1',qty:{us:1,transit:2,dg:3}}]});assert.equal(again.statusCode,200,again.body);
+  assert.deepEqual(again.json(),{rows:1,created:0,changed:2},'case-insensitive SKU match; unchanged transit is skipped');
   const it=(await call('m1','GET','/wms/summary')).json().items.find((i:any)=>i.sku==='R-1');
-  assert.deepEqual(it.qty,{us:1,refurb:2,dg:3});assert.equal(it.name,'Refurb unit','an empty name keeps the old one');
+  assert.deepEqual(it.qty,{us:1,transit:2,dg:3});assert.equal(it.name,'Refurb unit','an empty name keeps the old one');
   await db.query(`INSERT INTO wms_movements(id,org_id,type,sku,location,qty,reason,created_by,created_at) SELECT 'f'||g,(SELECT org_id FROM users WHERE id='m1'),'in','OTHER','us',1,'filler','m1',now()+interval '1 minute' FROM generate_series(1,501) g`);
   assert.equal((await call('m1','GET','/wms/summary')).json().movements.filter((m:any)=>m.sku==='R-1').length,0,'R-1 is outside the latest 500');
   const hist=await call('m1','GET','/wms/movements?sku=r-1');assert.equal(hist.statusCode,200,hist.body);
