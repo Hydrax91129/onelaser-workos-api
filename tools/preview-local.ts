@@ -96,6 +96,8 @@ for (const [sku, name, type, status, msrp, dealer, qty] of products) {
   await db.query('INSERT INTO wms_items(org_id,sku,name,type) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING', [ORG, sku, name, type]);
   if (qty) await db.query("INSERT INTO wms_stock(org_id,sku,location,qty) VALUES($1,$2,'us',$3) ON CONFLICT DO NOTHING", [ORG, sku, qty]);
 }
+// Only in the product library (as after a bulk import): Inventory lists it at zero and can receive it.
+await db.query("INSERT INTO product_catalog(org_id,sku,name_zh,name_en,type,status,msrp) VALUES($1,'DEMO-H7-PRO','示例 H7 Pro 主机','Demo H7 Pro','主机','live',11999) ON CONFLICT DO NOTHING", [ORG]);
 
 // Sample AI for the test site: "AI 拆任务" splits the text at sentence breaks and hands the pieces round the members,
 // so the draft-and-confirm flow can be tried without an AI account. Other AI features stay off here.
