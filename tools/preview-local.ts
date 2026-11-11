@@ -180,7 +180,8 @@ const app = await buildApp({
     ['m2', 'Demo Woodshop', 2, 'PO', '3115', 4577.49, false, 'check', []],
   ];
   for (const [owner, customer, days, kind, order, amount, shipped, method, pays] of rows) {
-    const r = (await call('POST', '/finance/receivables', { responsibleId: owner, invoiceDate: ago(days), paymentTerm: 'net30', termDays: 30, customer, contact: '示例联系人', kind, orderRef: order, amount, dispatched: shipped, dispatchedOn: shipped ? ago(days - 1) : null, payMethod: method })).json();
+    const r = (await call('POST', '/finance/receivables', { responsibleId: owner, invoiceDate: ago(days), paymentTerm: 'net30', termDays: 30, customer, contact: '示例联系人', contactEmail: 'ap@example.com', contactPhone: '(626) 555-0' + String(100 + rows.findIndex(x => x[1] === customer)),
+      shipStreet: '100 Example Ave', shipCity: 'Pasadena', shipState: 'CA', shipZip: '91101', kind, orderRef: order, amount, dispatched: shipped, dispatchedOn: shipped ? ago(days - 1) : null, payMethod: method })).json();
     for (const [d, state, amt] of pays) await call('POST', `/finance/receivables/${r.id}/payments`, { receivedOn: ago(d), amount: amt, method, state });
   }
 }
