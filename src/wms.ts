@@ -90,6 +90,19 @@ export async function ensureReturnItem(tx: Queryable, org: string, actorId: stri
   return s;
 }
 
+/** Products in the product library (product_catalog) count as warehouse SKUs: the first stock movement of a
+ * library SKU that is not in wms_items yet adds it here, with the library's name and type. Until then the
+ * summary lists it at zero. Returned-goods SKUs (REF-…) are never adopted. */
+export async function adoptCatalogItems(tx: Queryable, org: string, actorId: string, skus: string[]) {
+  const want = [...new Set(skus.map(s => String(s || '').trim().toLowerCase()).filter(s => s && !isReturnSku(s)))];
+  if (!want.length) return;
+  await tx.query(`INSERT INTO wms_items(org_id,sku,name,type,created_by)
+    SELECT c.org_id, c.sku, COALESCE(NULLIF(c.name_zh,''),NULLIF(c.name_en,''),c.sku), c.type, $3 FROM product_catalog c
+    WHERE c.org_id=$1 AND lower(c.sku) = ANY($2::text[])
+      AND NOT EXISTS (SELECT 1 FROM wms_items w WHERE w.org_id=c.org_id AND lower(w.sku)=lower(c.sku))
+    ON CONFLICT DO NOTHING`, [org, want, actorId]);
+}
+
 export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: { isAdmin: (u: User) => boolean }) {
   const actorOf = (req: FastifyRequest): User => req.actor || deny(401, 'UNAUTHENTICATED', 'Authentication is required');
   const grantsOf = (u: any): string[] => Array.isArray(u.grants) ? u.grants : [];
@@ -111,8 +124,9 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     if (have + delta < 0) deny(409, 'WMS_NEGATIVE_STOCK', 'Stock cannot go below zero');
     await tx.query('INSERT INTO wms_stock(org_id,sku,location,qty) VALUES($1,$2,$3,$4) ON CONFLICT(org_id,sku,location) DO UPDATE SET qty=$4', [org, s, loc, have + delta]);
   };
-  const itemOf = async (tx: Queryable, org: string, s: string) => {
-    const it = (await tx.query('SELECT * FROM wms_items WHERE org_id=$1 AND sku=$2', [org, s])).rows[0];
+  const itemOf = async (tx: Queryable, org: string, s: string, actorId: string) => {
+    await adoptCatalogItems(tx, org, actorId, [s]);
+    const it = (await tx.query('SELECT * FROM wms_items WHERE org_id=$1 AND lower(sku)=lower($2) ORDER BY sku=$2 DESC LIMIT 1', [org, s])).rows[0];
     if (!it) deny(404, 'WMS_UNKNOWN_SKU', 'This SKU does not exist yet; add it first');
     return it;
   };
@@ -129,7 +143,11 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
 
   app.get('/wms/summary', async req => {
     const u = actorOf(req); requireView(u);
-    const items = (await db.query(`SELECT sku,name,type FROM wms_items WHERE org_id=$1 AND type<>'return' AND ${notReturns()} ORDER BY sku`, [u.org_id])).rows;
+    // Library SKUs not moved yet are listed at zero (see adoptCatalogItems).
+    const items = (await db.query(`SELECT sku,name,type FROM wms_items WHERE org_id=$1 AND type<>'return' AND ${notReturns()}
+      UNION ALL SELECT c.sku, COALESCE(NULLIF(c.name_zh,''),NULLIF(c.name_en,''),c.sku), c.type FROM product_catalog c WHERE c.org_id=$1 AND ${notReturns('c.sku')}
+        AND NOT EXISTS (SELECT 1 FROM wms_items w WHERE w.org_id=c.org_id AND lower(w.sku)=lower(c.sku))
+      ORDER BY sku`, [u.org_id])).rows;
     const locIds = LOCATIONS.map(l => l.id);
     const stock = (await db.query('SELECT sku,location,qty FROM wms_stock WHERE org_id=$1', [u.org_id])).rows.filter((r: any) => locIds.includes(r.location));
     const qty = new Map<string, Record<string, number>>();
@@ -185,7 +203,7 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     if (v.type === 'out' && !v.reference) deny(400, 'WMS_REFERENCE_REQUIRED', 'Goods out needs an order or reference number');
     if (v.type === 'transfer' && (!v.toLocation || v.toLocation === v.location)) deny(400, 'WMS_TRANSFER_TARGET', 'Choose a different destination location');
     const m = await db.transaction(async tx => {
-      const it = await itemOf(tx, u.org_id, v.sku);
+      const it = await itemOf(tx, u.org_id, v.sku, u.id);
       const id = randomUUID();
       let qty = v.qty || 0, status = 'done', system: number | null = null;
       if (v.type === 'in') await addStock(tx, u.org_id, it.sku, v.location, qty);
@@ -219,6 +237,7 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     const ref = v.lines.map(l => l.sku).filter(isReturnSku); if (ref.length) returnSkuDenied(ref);
     for (const l of v.lines) merged.set(l.sku.toLowerCase(), (merged.get(l.sku.toLowerCase()) || 0) + l.qty);
     const out = await db.transaction(async tx => {
+      await adoptCatalogItems(tx, u.org_id, u.id, [...merged.keys()]);
       const items = (await tx.query('SELECT sku FROM wms_items WHERE org_id=$1', [u.org_id])).rows as { sku: string }[];
       const known = new Map(items.map(i => [i.sku.toLowerCase(), i.sku]));
       const missing = [...merged.keys()].filter(k => !known.has(k));

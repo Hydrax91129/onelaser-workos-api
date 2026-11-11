@@ -13,7 +13,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
 import { deny } from './errors.js';
-import { LOCATIONS } from './wms.js';
+import { LOCATIONS, adoptCatalogItems } from './wms.js';
 import { accountOut, CARRIERS, money, ORDER_STATUSES, orderLines, orderOut, sendMail, setStatus, profileComplete, type DealerOptions } from './dealer.js';
 
 const uuid = z.string().uuid();
@@ -159,6 +159,7 @@ export async function registerDealerAdminRoutes(app: FastifyInstance, db: Databa
         order.status === 'processing' ? 'ACH 款项还没到账，不能发货' : '这个订单当前的状态不能发货');
       const lines = (await orderLines(tx, [order.id])).get(order.id) || [];
       if (v.deductStock) {
+        await adoptCatalogItems(tx, orgId!, u.id, lines.map((l: any) => l.sku));
         for (const l of lines) {
           const item = (await tx.query('SELECT sku FROM wms_items WHERE org_id=$1 AND lower(sku)=lower($2)', [orgId, l.sku])).rows[0];
           if (!item) deny(409, 'DEALER_SKU_NOT_IN_WMS', `${l.sku} is not in the warehouse system`, `${l.sku} 不在库存系统里，请先在库存管理新增，或选择不扣库存`);

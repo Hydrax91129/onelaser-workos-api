@@ -97,3 +97,29 @@ test('WMS re-import sets quantities and logs the difference; SKU history goes pa
   assert.equal((await call('m1','GET','/wms/movements')).statusCode,400,'sku is required');
  }finally{await app.close();}
 });
+
+test('WMS: SKUs in the product library are warehouse SKUs without adding them again',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ const app=await buildApp({db,integrations:{executiveUserIds:['m1']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
+ const token=(await issueSession(db,'m1')).accessToken;
+ const call=(method:'GET'|'POST',url:string,payload?:any)=>app.inject({method,url,payload,headers:{authorization:'Bearer '+token}});
+ const item=async(s:string)=>(await call('GET','/wms/summary')).json().items.find((i:any)=>i.sku===s);
+ try{
+  const org=(await db.query(`SELECT org_id FROM users WHERE id='m1'`)).rows[0].org_id;
+  for(const [s,zh,en,type] of [['LIB-HOST-01','示例主机','Demo host','主机'],['LIB-PART-02','','Demo part','配件'],['REF-LIB-HOST-01','退货主机','','主机']])
+   await db.query('INSERT INTO product_catalog(org_id,sku,name_zh,name_en,type) VALUES($1,$2,$3,$4,$5)',[org,s,zh,en,type]);
+  const host=await item('LIB-HOST-01');assert.equal(host.name,'示例主机');assert.equal(host.type,'主机');assert.deepEqual(host.qty,{});
+  assert.equal((await item('LIB-PART-02')).name,'Demo part','English name when there is no Chinese name');
+  assert.equal(await item('REF-LIB-HOST-01'),undefined,'returned-goods SKUs stay out of regular stock');
+  assert.equal((await db.query(`SELECT 1 FROM wms_items WHERE sku LIKE 'LIB-%'`)).rows.length,0,'listing does not write');
+
+  const one=await call('POST','/wms/movements',{type:'in',sku:'LIB-HOST-01',location:'us',qty:1,reason:'采购到货'});assert.equal(one.statusCode,201,one.body);
+  assert.equal((await item('LIB-HOST-01')).qty.us,1);
+  const batch=await call('POST','/wms/movements/batch',{type:'in',location:'us',reason:'采购到货',lines:[{sku:'lib-part-02',qty:4},{sku:'LIB-HOST-01',qty:2}]});
+  assert.equal(batch.statusCode,201,batch.body);
+  assert.equal((await item('LIB-PART-02')).qty.us,4);assert.equal((await item('LIB-HOST-01')).qty.us,3);
+  assert.equal((await call('GET','/wms/summary')).json().items.filter((i:any)=>i.sku.startsWith('LIB-')).length,2,'listed once after the first movement');
+  assert.equal((await call('POST','/wms/movements/batch',{type:'in',location:'us',reason:'采购到货',lines:[{sku:'NOT-IN-LIBRARY',qty:1}]})).statusCode,400);
+  assert.equal((await call('POST','/wms/movements',{type:'in',sku:'NOT-IN-LIBRARY',location:'us',qty:1,reason:'采购到货'})).statusCode,404);
+ }finally{await app.close();}
+});
