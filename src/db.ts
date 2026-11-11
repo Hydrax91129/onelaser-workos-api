@@ -15,6 +15,7 @@ import { productSchema } from './products.js';
 import { productLibrarySchema } from './product-library.js';
 import { productImportSchema } from './product-import.js';
 import { inboxSchema } from './inbox.js';
+import { mcpSchema } from './mcp.js';
 import { feedbackSchema } from './feedback.js';
 import { okrPublishSchema } from './okr-publish.js';
 import { caldockSchema } from './caldock-schema.js';
@@ -226,7 +227,7 @@ ALTER TABLE reviews ALTER COLUMN quality_scale SET DEFAULT 10;
 ALTER TABLE reviews DROP CONSTRAINT IF EXISTS reviews_quality_0_10;
 ALTER TABLE reviews ADD CONSTRAINT reviews_quality_0_10 CHECK(quality IS NULL OR quality BETWEEN 0 AND 10);
 `;
-export const schema = coreSchema + boardSchema + supportSchema + okrImportSchema + okrCollabSchema + orgSchema + memberSchema + translationSchema + completionSchema + assignSchema + okrScoreSchema + projectSchema + wmsSchema + rmaSchema + qualitySchema + dealerSchema + productSchema + productLibrarySchema + productImportSchema + inboxSchema + feedbackSchema + publicWikiSchema + caldockSchema + studioSchema + okrPublishSchema + hrSchema + itSchema;
+export const schema = coreSchema + boardSchema + supportSchema + okrImportSchema + okrCollabSchema + orgSchema + memberSchema + translationSchema + completionSchema + assignSchema + okrScoreSchema + projectSchema + wmsSchema + rmaSchema + qualitySchema + dealerSchema + productSchema + productLibrarySchema + productImportSchema + inboxSchema + feedbackSchema + publicWikiSchema + caldockSchema + studioSchema + okrPublishSchema + hrSchema + itSchema + mcpSchema;
 
 export async function seedDemo(db: Database) {
   const users = [

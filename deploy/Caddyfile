@@ -60,6 +60,11 @@ http://:{$PORT:10000} {
     handle @bot_oauth_metadata {
         reverse_proxy 127.0.0.1:3001
     }
+    # WorkOS MCP server (src/mcp.ts): OAuth discovery for https://craftos.app/api/mcp.
+    @mcp_oauth_metadata path /.well-known/oauth-protected-resource/api/mcp /.well-known/oauth-authorization-server/api/mcp/oauth /.well-known/openid-configuration/api/mcp/oauth
+    handle @mcp_oauth_metadata {
+        reverse_proxy 127.0.0.1:3001
+    }
     handle_path /api/* {
         # Decision Studio is not public; see the page block below.
         @closed_studio_api path /caldock/studio /caldock/studio/*
