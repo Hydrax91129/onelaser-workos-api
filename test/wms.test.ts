@@ -223,3 +223,18 @@ test('WMS bins hold quantities: goods in go to the chosen bin, goods out pick bi
   assert.ok((await call('GET','/wms/summary')).json().movements.some((m:any)=>m.type==='move'&&/移库：未分库位 → A-01/.test(m.reason)));
  }finally{await app.close();}
 });
+
+test('WMS stock value per warehouse: MSRP for everyone with stock access, landed cost only for cost access',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ const org=(await db.query("SELECT org_id FROM users WHERE id='m1'")).rows[0].org_id;
+ await db.query(`INSERT INTO product_catalog(org_id,sku,msrp) VALUES($1,'V-1',100)`,[org]);await db.query(`INSERT INTO product_pricing(org_id,sku,landed_usd) VALUES($1,'V-1',40)`,[org]);
+ await db.query(`UPDATE users SET grants='["warehouse"]' WHERE id='m2'`);
+ const app=await buildApp({db,integrations:{executiveUserIds:['m1']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
+ const tokens:Record<string,string>={};
+ const call=async(who:string,method:'GET'|'POST',url:string,payload?:any)=>{tokens[who]??=(await issueSession(db,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who]}});};
+ try{
+  await call('m1','POST','/wms/import',{asOf:'2026-10-31',rows:[{sku:'V-1',qty:{us:3,dg:2}}]});
+  const a=(await call('m1','GET','/wms/summary')).json().values;assert.equal(a.msrp.us,300);assert.equal(a.msrp.dg,200);assert.equal(a.cost.us,120);
+  const b=(await call('m2','GET','/wms/summary')).json().values;assert.equal(b.msrp.us,300);assert.equal(b.cost,undefined,'no cost without cost access');
+ }finally{await app.close();}
+});
