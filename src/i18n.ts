@@ -207,6 +207,7 @@ const zh:Record<string,string>={
   'Stock cannot go below zero':'库存不能扣成负数，请先核对这个库位的数量。',
   'This SKU does not exist yet; add it first':'这个 SKU 还不存在，请先新增 SKU。',
   'This SKU already exists':'这个 SKU 已经存在。',
+  'Use at most two decimals for a price, e.g. 27.09':'价格最多两位小数，例如 27.09。',
   'Use letters, digits, dot, dash, slash or underscore in the SKU':'SKU 只能包含字母、数字和 . - / _ 等符号。',
   'Enter the quantity':'请填写数量。',
   'Goods out needs an order or reference number':'出库必须填写订单号或单号。',

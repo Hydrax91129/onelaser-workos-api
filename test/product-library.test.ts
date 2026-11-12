@@ -54,6 +54,17 @@ test('value rules: SKU, REFB, enums by label, dates, numbers with units, clear m
  assert.deepEqual(p('series','[清空]'),{ok:true,value:null});assert.equal(p('gtin','12345').ok,false);assert.deepEqual(p('gtin','0123 4567 8905'),{ok:true,value:'012345678905'});
 });
 
+test('prices take at most two decimals; spreadsheet float noise still counts as cents',()=>{
+  const p=(k:string,v:unknown)=>parseValue(FIELD.get(k)!,v);
+  for(const k of ['msrp','landed','lastMile','map','promoFloor']){
+    assert.deepEqual(p(k,'27.09'),{ok:true,value:27.09},k);
+    assert.deepEqual(p(k,'$1,299.5'),{ok:true,value:1299.5},k);
+    assert.deepEqual(p(k,27.089999999999),{ok:true,value:27.09},k);
+    const r:any=p(k,'27.095'); assert.equal(r.ok,false,k); assert.match(r.zh,/两位小数/);
+  }
+  assert.deepEqual(p('dtcRate','12.345'),{ok:true,value:12.345},'rates are not prices');
+});
+
 test('price worksheet follows the spec formulas (fictional numbers)',()=>{
  assert.equal(r99(1692.3),1699);assert.equal(r99(6036),5999);assert.equal(r99(40),99);assert.equal(r99(null),null);
  const ws=worksheet({landed:1000,lastMile:100,msrp:2000},SETTINGS as any);

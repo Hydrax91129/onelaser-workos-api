@@ -12,7 +12,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
 import { deny } from './errors.js';
-import { FIELD, canSee, viewerOf } from './product-spec.js';
+import { FIELD, canSee, viewerOf, toCents } from './product-spec.js';
 import { normalizeWorksheet, dtcRate, whRate, skuRate, type Worksheet } from './product-worksheet.js';
 
 export const productSchema = `
@@ -123,6 +123,8 @@ export function worksheetPriceCheck(ws: Worksheet, cat: any, pr: any, target: Pr
 }
 const sku = z.string().trim().min(1).max(80).regex(/^[A-Za-z0-9][A-Za-z0-9._\-/ ]*$/, 'Use letters, digits, dot, dash, slash or underscore in the SKU');
 const num = z.number().min(0).max(10_000_000).nullable().optional();
+/** A price in dollars or yuan: at most two decimals (owner, 2026-11-12). */
+const money = z.number().min(0).max(10_000_000).refine(n => toCents(n) != null, 'Use at most two decimals for a price, e.g. 27.09').transform(n => toCents(n)!).nullable().optional();
 const text = (max: number) => z.string().trim().max(max).optional();
 const num_ = (v: any) => v == null ? null : Number(v);
 
@@ -240,7 +242,7 @@ export async function registerProductRoutes(app: FastifyInstance, db: Database, 
   const editable = {
     nameZh: z.string().trim().max(200), nameEn: z.string().trim().max(200), type: z.string().trim().max(60),
     gross: num, dims: z.array(z.number().min(0).max(10_000)).length(3).nullable(), lead: z.string().trim().max(60), moq: z.number().int().min(0).max(1_000_000).nullable(),
-    low: num, shipFee: num, best: z.string().trim().max(80), note: z.string().trim().max(500),
+    low: money, shipFee: money, best: z.string().trim().max(80), note: z.string().trim().max(500),
   };
   const COLS: Record<string, string> = { nameZh: 'name_zh', nameEn: 'name_en', type: 'type', gross: 'gross', dims: 'dims', lead: 'lead', moq: 'moq', low: 'low', shipFee: 'ship_fee', best: 'best', note: 'note' };
   const PRICE_FIELDS = new Set(['low', 'shipFee']);
@@ -258,7 +260,7 @@ export async function registerProductRoutes(app: FastifyInstance, db: Database, 
   // A new product starts in development; its first MSRP is recorded in the price history.
   app.post('/products', async (req, reply) => {
     const u = actorOf(req);
-    const v = z.object({ sku, ...Object.fromEntries(Object.entries(editable).map(([k, s]) => [k, s.optional()])), msrp: num }).strict().parse(req.body) as any;
+    const v = z.object({ sku, ...Object.fromEntries(Object.entries(editable).map(([k, s]) => [k, s.optional()])), msrp: money }).strict().parse(req.body) as any;
     if (!canEditCatalog(u)) deny(403, 'CATALOG_EDIT_FORBIDDEN', 'Only product managers or administrators can add products');
     if (v.msrp != null && !canEditMsrp(u)) deny(403, 'MSRP_EDIT_FORBIDDEN', 'You cannot change retail prices');
     const out = await db.transaction(async tx => {
@@ -276,7 +278,7 @@ export async function registerProductRoutes(app: FastifyInstance, db: Database, 
 
   app.patch('/products/:sku', async req => {
     const u = actorOf(req);
-    const v = z.object({ ...Object.fromEntries(Object.entries(editable).map(([k, s]) => [k, s.optional()])), msrp: num, reason: z.string().trim().max(300).optional() }).strict().parse(req.body) as any;
+    const v = z.object({ ...Object.fromEntries(Object.entries(editable).map(([k, s]) => [k, s.optional()])), msrp: money, reason: z.string().trim().max(300).optional() }).strict().parse(req.body) as any;
     checkFields(u, v);
     return db.transaction(async tx => {
       const cur = await catalogOf(tx, u.org_id, skuParam(req), true);
@@ -371,7 +373,7 @@ export async function registerProductRoutes(app: FastifyInstance, db: Database, 
     const u = actorOf(req);
     if (!canPricingEdit(u)) deny(403, 'CHANNEL_PRICE_FORBIDDEN', 'Only people with the full price build-up can set channel prices');
     const channel = z.enum(CHANNELS).parse((req.params as any).channel);
-    const v = z.object({ price: num, listed: z.boolean().optional(), reason: z.string().trim().max(300).optional() }).strict().parse(req.body);
+    const v = z.object({ price: money, listed: z.boolean().optional(), reason: z.string().trim().max(300).optional() }).strict().parse(req.body);
     return db.transaction(async tx => {
       const cur = await catalogOf(tx, u.org_id, skuParam(req));
       if (v.listed !== undefined) await tx.query(`INSERT INTO product_channel_prices(org_id,sku,channel,listed,updated_by,updated_at) VALUES($1,$2,$3,$4,$5,now())
@@ -385,7 +387,7 @@ export async function registerProductRoutes(app: FastifyInstance, db: Database, 
   const catalogRow = z.object({
     sku, nameZh: text(200), nameEn: text(200), type: text(60), status: z.enum(PRODUCT_STATUSES).optional(),
     gross: num, dims: z.array(z.number().min(0).max(10_000)).length(3).nullable().optional(), lead: text(60), moq: z.number().int().min(0).max(1_000_000).nullable().optional(),
-    msrp: num, low: num, shipFee: num, best: text(80), note: text(500),
+    msrp: money, low: money, shipFee: money, best: text(80), note: text(500),
   }).strict();
   const unique = (rows: { sku: string }[]) => {
     const seen = new Set<string>();
@@ -426,7 +428,7 @@ export async function registerProductRoutes(app: FastifyInstance, db: Database, 
     });
   });
 
-  const pricingRow = z.object({ sku, factoryRmb: num, factoryUsd: num, extraRmb: num, ddpRate: num, lastMileRmb: num }).strict();
+  const pricingRow = z.object({ sku, factoryRmb: money, factoryUsd: money, extraRmb: money, ddpRate: num, lastMileRmb: money }).strict();
   app.post('/products/pricing/import', async req => {
     const u = actorOf(req);
     if (!(o.isAdmin(u) || (canPricingEdit(u) && grants(u).includes('products_import')))) deny(403, 'PRICING_IMPORT_FORBIDDEN', 'Only people with the full price build-up can import cost data');
@@ -470,7 +472,7 @@ export async function registerProductRoutes(app: FastifyInstance, db: Database, 
 
   // One SKU's pricing inputs: product class (decides the MSRP target), landed-cost override, last mile and the actual selling price.
   // The actual selling price goes through the price history (and approval below the floor), after the cost inputs it is checked against.
-  const planBody = z.object({ priceClass: z.enum(PRICE_CLASSES).nullable().optional(), landedUsd: num, lastMileUsd: num, actualPrice: num, reason: z.string().trim().max(300).optional() }).strict();
+  const planBody = z.object({ priceClass: z.enum(PRICE_CLASSES).nullable().optional(), landedUsd: money, lastMileUsd: money, actualPrice: money, reason: z.string().trim().max(300).optional() }).strict();
   app.patch('/products/:sku/pricing-plan', async req => {
     const u = actorOf(req);
     if (!canPricingEdit(u)) deny(403, 'PRICING_PLAN_FORBIDDEN', 'Only people with the full price build-up can change pricing inputs');
