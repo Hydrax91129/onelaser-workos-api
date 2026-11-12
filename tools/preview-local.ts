@@ -167,6 +167,25 @@ const app = await buildApp({
   }
 }
 
+// Sample accounts receivable (fictional customers and amounts): paid, partly paid, a deposited check, shipped but unpaid and overdue.
+{
+  const token = (await issueSession(db, 'm1')).accessToken, call = (method: string, url: string, payload?: unknown) => app.inject({ method: method as any, url, payload: payload as any, headers: { authorization: `Bearer ${token}` } });
+  const ago = (n: number) => new Date(Date.now() - n * 864e5).toISOString().slice(0, 10);
+  const rows: [string, string, number, string, string, number, boolean, string, [number, string, number][]][] = [
+    ['m2', '示例激光工作室', 120, 'PO', '2901', 5014.45, true, 'check', [[100, 'cleared', 5014.45]]],
+    ['m2', 'Demo Sign Co.', 75, 'PO', '2955', 9077.02, true, 'check', [[40, 'cleared', 4000]]],
+    ['m4', '示例 KOL 合作', 45, 'KOL', '2977', 3685.5, true, 'quickbooks', []],
+    ['m5', 'Demo Makerspace', 20, 'PO', '3010', 13219.26, true, 'check', [[3, 'deposited', 13219.26]]],
+    ['m4', '示例镜片供应', 10, 'Lens', 'LD#34', 397.85, false, 'ach', []],
+    ['m2', 'Demo Woodshop', 2, 'PO', '3115', 4577.49, false, 'check', []],
+  ];
+  for (const [owner, customer, days, kind, order, amount, shipped, method, pays] of rows) {
+    const r = (await call('POST', '/finance/receivables', { responsibleId: owner, invoiceDate: ago(days), paymentTerm: 'net30', termDays: 30, customer, contact: '示例联系人', contactEmail: 'ap@example.com', contactPhone: '(626) 555-0' + String(100 + rows.findIndex(x => x[1] === customer)),
+      shipStreet: '100 Example Ave', shipCity: 'Pasadena', shipState: 'CA', shipZip: '91101', kind, orderRef: order, amount, dispatched: shipped, dispatchedOn: shipped ? ago(days - 1) : null, payMethod: method })).json();
+    for (const [d, state, amt] of pays) await call('POST', `/finance/receivables/${r.id}/payments`, { receivedOn: ago(d), amount: amt, method, state });
+  }
+}
+
 const TYPES: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.otf': 'font/otf', '.woff2': 'font/woff2', '.png': 'image/png', '.json': 'application/json', '.webp': 'image/webp', '.ico': 'image/x-icon' };
 createServer(async (req, res) => {
   try {
