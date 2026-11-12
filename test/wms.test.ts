@@ -190,3 +190,36 @@ test('returns and repairs have their own access: warehouse people keep it once, 
   assert.equal((await call('m4','POST','/erp/access',{userId:'m6',area:'pricing',level:'msrp'})).statusCode,403);
  }finally{await app.close();}
 });
+
+test('WMS bins hold quantities: goods in go to the chosen bin, goods out pick bins in order, counts take unassigned first, moves between bins are logged',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ const app=await buildApp({db,integrations:{executiveUserIds:['m1']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
+ const tok=(await issueSession(db,'m1')).accessToken;
+ const call=(method:'GET'|'POST',url:string,payload?:any)=>app.inject({method,url,payload,headers:{authorization:'Bearer '+tok,'accept-language':'zh-CN'}});
+ const it=async()=>(await call('GET','/wms/summary')).json().items.find((i:any)=>i.sku==='B-1');
+ const day='2026-11-06';
+ try{
+  await call('POST','/wms/import',{asOf:'2026-10-31',rows:[{sku:'B-1',qty:{us:10}}]});
+  assert.equal((await call('POST','/wms/bins',{sku:'B-1',location:'us',bins:['A-01','A-02','A-03']})).statusCode,200);
+  let x=await it();assert.deepEqual(x.binQty.us,[0,0,0],'opening stock is unassigned until it is put away');
+  // put 6 of the unassigned stock into A-01
+  const mv=await call('POST','/wms/bins/move',{sku:'B-1',location:'us',from:0,to:1,qty:6});assert.equal(mv.statusCode,201,mv.body);
+  assert.equal((await call('POST','/wms/bins/move',{sku:'B-1',location:'us',from:0,to:2,qty:9})).json().error.code,'WMS_BIN_SHORT','only 4 unassigned left');
+  // goods in: preferred bin by default, or the chosen one
+  await call('POST','/wms/movements/batch',{type:'in',location:'us',opDate:day,reason:'采购到货',lines:[{sku:'B-1',qty:2},{sku:'B-1',qty:3,slot:2}]});
+  x=await it();assert.equal(x.qty.us,15);assert.deepEqual(x.binQty.us,[8,3,0]);
+  // goods out: from the chosen bin (must hold enough) or from the bins in order
+  assert.equal((await call('POST','/wms/movements/batch',{type:'out',location:'us',opDate:day,reason:'销售发货',reference:'SO-1',lines:[{sku:'B-1',qty:4,slot:2}]})).json().error.code,'WMS_BIN_SHORT');
+  await call('POST','/wms/movements/batch',{type:'out',location:'us',opDate:day,reason:'销售发货',reference:'SO-2',lines:[{sku:'B-1',qty:10}]});
+  x=await it();assert.equal(x.qty.us,5);assert.deepEqual(x.binQty.us,[0,1,0],'8 from A-01, then 2 from A-02');
+  // a count that finds fewer takes the unassigned stock first (4 unassigned here)
+  const c=await call('POST','/wms/movements/batch',{type:'adjust',location:'us',opDate:day,reason:'盘点',lines:[{sku:'B-1',counted:2}]});
+  const pid=(await call('GET','/wms/summary')).json().movements.find((m:any)=>m.status==='pending').id;
+  assert.equal(c.statusCode,201);await call('POST',`/wms/movements/${pid}/approve`,{});
+  x=await it();assert.equal(x.qty.us,2);assert.deepEqual(x.binQty.us,[0,1,0]);
+  // clearing a bin puts its quantity back to unassigned; the move is in the log
+  await call('POST','/wms/bins',{sku:'B-1',location:'us',bins:['A-01','','']});
+  assert.deepEqual((await it()).binQty.us,[0,0,0]);
+  assert.ok((await call('GET','/wms/summary')).json().movements.some((m:any)=>m.type==='move'&&/移库：未分库位 → A-01/.test(m.reason)));
+ }finally{await app.close();}
+});
