@@ -243,6 +243,15 @@ const app = await buildApp({
   const po = (await call('POST', '/scm/orders', { supplier: '示例东莞工厂', orderedOn: ago(10), readyOn: ahead(15), note: '示例采购单', lines: skus.slice(0, 2).map((sku: string, i: number) => ({ sku, qty: [120, 60][i] })) })).json();
   if (po?.id && skus[0]) { await call('POST', `/scm/orders/${po.id}/issue`, {}); await call('POST', `/scm/orders/${po.id}/finish`, { opDate: ago(1), location: 'dg', lines: [{ sku: skus[0], qty: 40 }] }); }
   if (skus[2]) await call('POST', '/scm/orders', { supplier: '示例东莞工厂', orderedOn: ago(0), readyOn: ahead(25), note: '示例草稿：等工厂确认', lines: [{ sku: skus[2], qty: 50 }] });
+// Example pricing parameters (fictional rates, tiers and NPCR steps) and landed / last-mile costs, so 定价 shows the NPCR calculation.
+{
+  const token = (await issueSession(db, 'm1')).accessToken, call = (method: string, url: string, payload?: unknown) => app.inject({ method: method as any, url, payload: payload as any, headers: { authorization: `Bearer ${token}` } });
+  await call('PUT', '/products/worksheet-settings', { dtcItems: [{ name: '示例 · 广告', pct: 8 }, { name: '示例 · 平台与支付', pct: 5 }], whItems: [{ name: '示例 · 销售支持', pct: 4 }], mktExtra: 10,
+    retailTiers: [{ name: 'MSRP', cm: 40, use: '标价' }, { name: '日常', cm: 30, use: '日常调整' }, { name: '小促', cm: 22, use: '常规活动' }, { name: '大促', cm: 15, use: '每年最多 2 次' }],
+    whTiers: [{ name: '普通经销商', discount: 25, floor: false }, { name: '大经销商', discount: 30, floor: false }, { name: '底线档', discount: 35, floor: true }],
+    npcr: [10, 15, 20, 25, 30, 35, 40], dtcTarget: '30', dtcFloor: 12, whTarget: '15', whFloor: 8, dtcRateOverride: null, whRateOverride: null });
+  for (const [sku, landed, lastMile] of [['DEMO-AF-200', 210, 25], ['DEMO-F2-100W', 2400, 180], ['DEMO-F2-60W', 1650, 160], ['DEMO-H7-PRO', 4200, 260], ['DEMO-LENS-2', 9, 6], ['DEMO-RA-1', 120, 18]] as const)
+    await call('PATCH', `/products/library/${sku}`, { values: { landed, lastMile } });
 }
 
 const TYPES: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.otf': 'font/otf', '.woff2': 'font/woff2', '.png': 'image/png', '.json': 'application/json', '.webp': 'image/webp', '.ico': 'image/x-icon' };
