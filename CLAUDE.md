@@ -85,6 +85,7 @@
 - **不直接推 main**（分支保护会拒绝）：在 `claude/<简短描述>` 分支上开发，推送后开 PR 到 `main`。
   PR 必须基于最新 `main`、CI 通过才能合并；合并前如果 `main` 有新提交，先 `git pull --rebase origin main` 再推。
 - 前端改完运行 `node tools/stamp-assets.mjs`（更新资源版本号，CI 会检查），再 `npm ci && npm test`；后端 `npm test`（约 8 分钟）。
+- 后端 `npm test` 带 `--no-wasm-code-gc`：Node 24 的 V8 回收 WebAssembly 代码时有竞争 bug（nodejs/node#66366），PGlite 测试会随机中止（`Check failed: jit_page...`）。不要去掉它，也不要改成重跑或跳过测试；这个参数不能放进 `NODE_OPTIONS`。等 Node 24 有版本带上修复（nodejs/node#66376）再删，原因写在后端 `.github/workflows/ci.yml` 开头的注释里。
 - 后端所有报错文案都要在 i18n.ts 里有中文（有测试检查）。
 - 中英文都要能用（供应链 PIM / WMS / SCM 已全部核对过英文）：页面文字一律 `tr(中文, English)`，英文里用半角标点；服务器写进数据库的系统文字（WMS 流水原因如“移库 / 发柜 / 完工入库 / 到港入仓 / 期初导入”，SCM 发的站内通知）保持固定格式，由前端按语言翻译（wms.js 的 `reasonText`、inbox.js 的 `SYS`），改这些文字时两边一起改；产品资料模板按下载人的语言生成，上传时中英文表头、下拉值和清空标记（`[清空]` / `[clear]`）都认（product-import.ts）。
 - 上传文件统一用前端的 `dist/upload-zone.js`（`window.WorkOSUpload`）：一个框同时支持粘贴、拖拽、点击选择和“上传”按钮，
