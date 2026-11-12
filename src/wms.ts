@@ -111,6 +111,35 @@ export async function binsAfterChange(tx: Queryable, org: string, sku: string, l
   for (let i = 2; i >= 0 && sumQ(q) > total; i--) q[i] = Math.max(0, q[i] - (sumQ(q) - total)); // never more in bins than in the warehouse
   await tx.query('UPDATE wms_bins SET qty1=$4,qty2=$5,qty3=$6 WHERE org_id=$1 AND sku=$2 AND location=$3', [org, sku, loc, ...q]);
 }
+const stockAt = async (tx: Queryable, org: string, s: string, loc: string, lock = false) =>
+  Number((await tx.query('SELECT qty FROM wms_stock WHERE org_id=$1 AND sku=$2 AND location=$3' + (lock ? ' FOR UPDATE' : ''), [org, s, loc])).rows[0]?.qty ?? 0);
+const changeStock = async (tx: Queryable, org: string, s: string, loc: string, delta: number, bin: { slot?: number; mode?: 'pick' | 'count' } = {}) => {
+  const have = await stockAt(tx, org, s, loc, true);
+  if (have + delta < 0) deny(409, 'WMS_NEGATIVE_STOCK', `Not enough stock of ${s}: ${have} on hand`, `${s} 库存不足：现有 ${have} 件。`);
+  await tx.query('INSERT INTO wms_stock(org_id,sku,location,qty) VALUES($1,$2,$3,$4) ON CONFLICT(org_id,sku,location) DO UPDATE SET qty=$4', [org, s, loc, have + delta]);
+  await binsAfterChange(tx, org, s, loc, delta, have + delta, bin);
+};
+/** Stock movements for other modules (SCM shipments): goods in, or a transfer between warehouses, many SKUs, in the
+ *  caller's transaction, logged like the warehouse's own batch. WMS stays the only writer of stock. Returns the lines
+ *  with the stored SKU spelling. */
+export async function wmsMoveLines(tx: Queryable, u: User, v: { type: 'in' | 'transfer'; from: string; to: string; lines: { sku: string; qty: number }[]; reason: string; reference?: string; opDate: string }) {
+  const ref = v.lines.map(l => l.sku).filter(isReturnSku); if (ref.length) returnSkuDenied(ref);
+  const merged = new Map<string, number>(); for (const l of v.lines) merged.set(l.sku.toLowerCase(), (merged.get(l.sku.toLowerCase()) || 0) + l.qty);
+  await adoptCatalogItems(tx, u.org_id, u.id, [...merged.keys()]);
+  const known = new Map(((await tx.query('SELECT sku FROM wms_items WHERE org_id=$1', [u.org_id])).rows as { sku: string }[]).map(i => [i.sku.toLowerCase(), i.sku]));
+  const missing = [...merged.keys()].filter(k => !known.has(k));
+  if (missing.length) deny(400, 'WMS_UNKNOWN_SKUS', `These SKUs do not exist yet: ${missing.slice(0, 10).join(', ')}`, `这些 SKU 还不存在，请先在产品资料里新增：${missing.slice(0, 10).join('、')}`);
+  const out: { sku: string; qty: number }[] = [];
+  for (const [k, qty] of merged) {
+    const s = known.get(k)!;
+    if (v.type === 'in') await changeStock(tx, u.org_id, s, v.to, qty);
+    else { await changeStock(tx, u.org_id, s, v.from, -qty); await changeStock(tx, u.org_id, s, v.to, qty); }
+    await tx.query(`INSERT INTO wms_movements(id,org_id,type,sku,location,to_location,qty,reason,reference,status,created_by,op_date) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'done',$10,$11)`,
+      [randomUUID(), u.org_id, v.type, s, v.type === 'in' ? v.to : v.from, v.type === 'transfer' ? v.to : null, qty, v.reason.slice(0, 200), v.reference || null, u.id, v.opDate]);
+    out.push({ sku: s, qty });
+  }
+  return out;
+}
 /** Returns and repairs access: admins manage; otherwise from the returns grants; managers and product people can view. */
 export const returnsLevelFor = (u: any, admin: boolean) => {
   if (admin) return 'manage';
@@ -179,14 +208,7 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
   const audit = (tx: Queryable, u: User, action: string, objectId: string, details: unknown) =>
     tx.query('INSERT INTO audit_events(id,org_id,department_id,owner_id,actor_id,action,object_id,details) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',
       [randomUUID(), u.org_id, u.department_id, u.id, u.id, action, objectId, JSON.stringify(details)]);
-  const stockOf = async (tx: Queryable, org: string, s: string, loc: string, lock = false) =>
-    Number((await tx.query('SELECT qty FROM wms_stock WHERE org_id=$1 AND sku=$2 AND location=$3' + (lock ? ' FOR UPDATE' : ''), [org, s, loc])).rows[0]?.qty ?? 0);
-  const addStock = async (tx: Queryable, org: string, s: string, loc: string, delta: number, bin: { slot?: number; mode?: 'pick' | 'count' } = {}) => {
-    const have = await stockOf(tx, org, s, loc, true);
-    if (have + delta < 0) deny(409, 'WMS_NEGATIVE_STOCK', 'Stock cannot go below zero');
-    await tx.query('INSERT INTO wms_stock(org_id,sku,location,qty) VALUES($1,$2,$3,$4) ON CONFLICT(org_id,sku,location) DO UPDATE SET qty=$4', [org, s, loc, have + delta]);
-    await binsAfterChange(tx, org, s, loc, delta, have + delta, bin);
-  };
+  const stockOf = stockAt, addStock = changeStock;
   const itemOf = async (tx: Queryable, org: string, s: string, actorId: string) => {
     await adoptCatalogItems(tx, org, actorId, [s]);
     const it = (await tx.query('SELECT * FROM wms_items WHERE org_id=$1 AND lower(sku)=lower($2) ORDER BY sku=$2 DESC LIMIT 1', [org, s])).rows[0];

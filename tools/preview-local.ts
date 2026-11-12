@@ -212,6 +212,28 @@ const app = await buildApp({
   }
 }
 
+// SCM: a year of fictional daily sales per SKU (as if synced from Shopify) and two shipments on the water.
+{
+  const token = (await issueSession(db, 'm1')).accessToken, call = (method: string, url: string, payload?: unknown) => app.inject({ method: method as any, url, payload: payload as any, headers: { authorization: `Bearer ${token}` } });
+  const org = (await db.query("SELECT org_id FROM users WHERE id='m1'")).rows[0].org_id;
+  const skus = (await db.query("SELECT sku FROM product_catalog WHERE org_id=$1 AND sku NOT LIKE 'REF-%' ORDER BY sku", [org])).rows.map((r: any) => r.sku);
+  // Each SKU gets its own fictional base rate and a gentle seasonal wave; the most recent month runs a little hotter for some.
+  for (const [i, sku] of skus.entries()) {
+    const base = [3.2, 1.4, 0.6, 5.5, 0.25, 2.1, 0.9][i % 7], hot = i % 3 === 0 ? 1.35 : i % 3 === 1 ? 0.8 : 1;
+    await db.query(`INSERT INTO scm_sales_daily(org_id,sku,day,qty)
+      SELECT $1,$2,d::date, GREATEST(0, round($3::float8 * (1 + 0.35*sin(n/29.0 + $5::int)) * (CASE WHEN n < 30 THEN $4::float8 ELSE 1 END) + (((n*7919 + $5::int*104729) % 5) - 2) * 0.3))::int
+      FROM generate_series(0,364) AS n, LATERAL (SELECT current_date - n AS d) x ON CONFLICT DO NOTHING`, [org, sku, base, hot, i]);
+  }
+  const units = Number((await db.query('SELECT coalesce(sum(qty),0) AS u FROM scm_sales_daily WHERE org_id=$1', [org])).rows[0].u);
+  await db.query(`INSERT INTO scm_sync(org_id,last_at,status,orders,units,since,note) VALUES($1,now(),'ok',$2,$3,current_date-364,'示例数据，测试站不连 Shopify') ON CONFLICT(org_id) DO NOTHING`, [org, Math.round(units * 0.8), units]);
+  const ago = (n: number) => new Date(Date.now() - n * 864e5).toISOString().slice(0, 10);
+  // Some finished goods waiting at the Dongguan factory (fictional), so the board can suggest shipping them first.
+  const atFactory = skus.slice(0, 4).map((sku: string, i: number) => ({ sku, qty: [80, 30, 45, 20][i] }));
+  if (atFactory.length) await call('POST', '/wms/movements/batch', { type: 'in', location: 'dg', opDate: ago(5), reason: '示例：工厂成品入库', lines: atFactory });
+  if (skus[0]) await call('POST', '/scm/shipments', { number: 'DEMO-MSKU-0001', mode: 'sea', carrier: '示例船公司', tracking: 'https://track.example.com/DEMO-MSKU-0001', source: 'new', shippedOn: ago(18), etaDays: 35, lines: skus.slice(0, 3).map((sku: string, i: number) => ({ sku, qty: [40, 25, 60][i] })) });
+  if (skus[1]) await call('POST', '/scm/shipments', { number: 'DEMO-AIR-0002', mode: 'air', carrier: '示例快递', tracking: 'DEMO1234567890', source: 'new', shippedOn: ago(2), etaDays: 7, lines: [{ sku: skus[skus.length - 1], qty: 12 }] });
+}
+
 const TYPES: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.otf': 'font/otf', '.woff2': 'font/woff2', '.png': 'image/png', '.json': 'application/json', '.webp': 'image/webp', '.ico': 'image/x-icon' };
 createServer(async (req, res) => {
   try {
