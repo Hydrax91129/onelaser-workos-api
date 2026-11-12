@@ -196,6 +196,8 @@ const app = await buildApp({
     npcr: [10, 15, 20, 25, 30, 35, 40], dtcTarget: '30', dtcFloor: 12, whTarget: '15', whFloor: 8, dtcRateOverride: null, whRateOverride: null });
   for (const [sku, landed, lastMile] of [['DEMO-AF-200', 210, 25], ['DEMO-F2-100W', 2400, 180], ['DEMO-F2-60W', 1650, 160], ['DEMO-H7-PRO', 4200, 260], ['DEMO-LENS-2', 9, 6], ['DEMO-RA-1', 120, 18]] as const)
     await call('PATCH', `/products/library/${sku}`, { values: { landed, lastMile } });
+}
+
 // Example shelf bins in the US LA warehouse (fictional).
 {
   const token = (await issueSession(db, 'm1')).accessToken;
