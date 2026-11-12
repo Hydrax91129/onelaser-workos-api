@@ -5,7 +5,7 @@ import {buildApp} from '../src/app.js';
 import {issueSession} from '../src/auth.js';
 
 // Demo org: m1 is the executive admin (marketing manager), m2/m3 report to m1; m4 manages product, m5/m6 report to m4.
-test('WMS: import, goods in/out/transfer, count adjustments confirmed by the manager, ERP access levels',async()=>{
+test('WMS: import, goods in/out/transfer, count adjustments confirmed by another warehouse manager, ERP access levels',async()=>{
  const db=await createDatabase();await db.exec(schema);await seedDemo(db);
  await db.query(`UPDATE users SET manager_id='m1' WHERE id IN ('m2','m3')`);await db.query(`UPDATE users SET manager_id='m4' WHERE id IN ('m5','m6')`);
  const app=await buildApp({db,integrations:{executiveUserIds:['m1']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
@@ -25,12 +25,16 @@ test('WMS: import, goods in/out/transfer, count adjustments confirmed by the man
   const imp=await call('m1','POST','/wms/import',{asOf:'2026-10-31',rows});assert.equal(imp.statusCode,200,imp.body);assert.equal(imp.json().created,2);
   assert.equal(await qty('DEMO-A','dg'),10);
   assert.equal((await call('m1','POST','/wms/import',{asOf:'2026-10-31',rows:[rows[0],rows[0]]})).statusCode,400,'duplicate SKU in the file');
+  // 导入 / 导出记录
+  assert.equal((await call('m1','POST','/wms/exports',{rows:2})).statusCode,201);
+  const recs=(await call('m1','GET','/wms/imports')).json().items;assert.deepEqual(recs.map((r:any)=>r.kind),['export','import']);assert.equal(recs[1].rows,2);
+  assert.equal((await call('m2','GET','/wms/imports')).statusCode,403,'no stock access, no records');
 
   // ERP access: the admin gives m5 warehouse manage; m4 (manager) can set warehouse for reports only.
   assert.equal((await call('m4','POST','/erp/access',{userId:'m2',area:'warehouse',level:'view'})).statusCode,403,'not m4’s report');
   assert.equal((await call('m4','POST','/erp/access',{userId:'m5',area:'products',level:'view'})).statusCode,403,'managers set warehouse only');
   const set=await call('m4','POST','/erp/access',{userId:'m5',area:'warehouse',level:'manage'});assert.equal(set.statusCode,200,set.body);assert.equal(set.json().access.warehouse,'manage');
-  const full=await call('m1','POST','/erp/access',{userId:'m6',area:'pricing',level:'full'});assert.equal(full.json().access.products,'view','full price build-up brings product access');
+  const full=await call('m1','POST','/erp/access',{userId:'m6',area:'pricing',level:'view'});assert.equal(full.json().access.products,'view','price access brings product access');
   const list=(await call('m4','GET','/erp/access')).json();assert.deepEqual(list.people.map((p:any)=>p.id).sort(),['m5','m6'],'managers only see their reports');
 
   // Movements by the warehouse manager m5.
@@ -44,12 +48,20 @@ test('WMS: import, goods in/out/transfer, count adjustments confirmed by the man
   assert.equal(await qty('DEMO-A','dg'),6);assert.equal(await qty('DEMO-A','transit'),6);
   assert.equal((await call('m5','POST','/wms/movements',{type:'in',sku:'NOPE',location:'us',qty:1,reason:'采购到货'})).statusCode,404);
 
-  // Count adjustment: pending until m5's manager (m4) or an admin confirms; m6 cannot.
+  // Count adjustment: pending until ANOTHER person with 库存·管理 confirms; with nobody else, the main admins (owner, 2026-11-12).
   const adj=await call('m5','POST','/wms/movements',{type:'adjust',sku:'DEMO-A',location:'us',counted:4,reason:'盘点差异'});assert.equal(adj.statusCode,201,adj.body);assert.equal(adj.json().status,'pending');
   assert.equal(await qty('DEMO-A','us'),6,'pending adjustments do not change stock');
   assert.equal((await call('m5','POST',`/wms/movements/${adj.json().id}/approve`,{})).statusCode,403,'cannot confirm your own');
-  assert.equal((await summary('m4')).movements.find((m:any)=>m.id===adj.json().id).canDecide,true);
-  assert.equal((await call('m4','POST',`/wms/movements/${adj.json().id}/approve`,{})).statusCode,200);
+  const pend=(who:string)=>summary(who).then((x:any)=>x.movements.find((m:any)=>m.id===adj.json().id));
+  assert.equal((await pend('m4')).canDecide,false,'a line manager without 库存·管理 cannot confirm');
+  const deny=await call('m4','POST',`/wms/movements/${adj.json().id}/approve`,{});assert.equal(deny.statusCode,403);assert.match(deny.json().error.message,/另一位有库存管理权限/);
+  const m1name=(await db.query("SELECT display_name FROM users WHERE id='m1'")).rows[0].display_name;
+  assert.deepEqual((await pend('m5')).confirmers,[m1name],'nobody else manages the warehouse: the main admin confirms, and the page says so');
+  // Another warehouse manager (m6) becomes the one to confirm
+  await call('m1','POST','/erp/access',{userId:'m6',area:'warehouse',level:'manage'});
+  const m6name=(await db.query("SELECT display_name FROM users WHERE id='m6'")).rows[0].display_name;
+  assert.deepEqual((await pend('m5')).confirmers,[m6name]);assert.equal((await pend('m6')).canDecide,true);
+  assert.equal((await call('m6','POST',`/wms/movements/${adj.json().id}/approve`,{})).statusCode,200);
   assert.equal(await qty('DEMO-A','us'),4);
   assert.equal((await call('m1','POST',`/wms/movements/${adj.json().id}/reject`,{})).statusCode,409,'already decided');
 
@@ -67,13 +79,13 @@ test('WMS batch goods in and batch transfer: all lines or none',async()=>{
  const call=async(who:string,method:'GET'|'POST',url:string,payload?:any)=>{tokens[who]??=(await issueSession(db,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who]}});};
  try{
   await call('m1','POST','/wms/import',{asOf:'2026-10-31',rows:[{sku:'A-1',qty:{us:0,transit:5}},{sku:'B-2',qty:{us:1}}]});
-  const bad=await call('m1','POST','/wms/movements/batch',{type:'in',location:'us',reason:'柜子到货',lines:[{sku:'A-1',qty:2},{sku:'NOPE',qty:1}]});assert.equal(bad.statusCode,400);
+  const bad=await call('m1','POST','/wms/movements/batch',{opDate:'2026-11-05',type:'in',location:'us',reason:'柜子到货',lines:[{sku:'A-1',qty:2},{sku:'NOPE',qty:1}]});assert.equal(bad.statusCode,400);
   const q=async(s:string,l:string)=>Number((await call('m1','GET','/wms/summary')).json().items.find((i:any)=>i.sku===s).qty[l]||0);
   assert.equal(await q('A-1','us'),0,'nothing applied when one line is wrong');
-  const ok=await call('m1','POST','/wms/movements/batch',{type:'in',location:'us',reason:'柜子到货',reference:'MSKU-1',lines:[{sku:'a-1',qty:2},{sku:'B-2',qty:3},{sku:'A-1',qty:1}]});assert.equal(ok.statusCode,201,ok.body);assert.deepEqual(ok.json(),{lines:2,units:6});
+  const ok=await call('m1','POST','/wms/movements/batch',{opDate:'2026-11-05',type:'in',location:'us',reason:'柜子到货',reference:'MSKU-1',lines:[{sku:'a-1',qty:2},{sku:'B-2',qty:3},{sku:'A-1',qty:1}]});assert.equal(ok.statusCode,201,ok.body);assert.equal(ok.json().lines,2);assert.equal(ok.json().units,6);
   assert.equal(await q('A-1','us'),3);assert.equal(await q('B-2','us'),4);
-  assert.equal((await call('m1','POST','/wms/movements/batch',{type:'transfer',location:'transit',toLocation:'us',reason:'到港入仓',lines:[{sku:'A-1',qty:9}]})).statusCode,409,'cannot move more than is there');
-  assert.equal((await call('m1','POST','/wms/movements/batch',{type:'transfer',location:'transit',toLocation:'us',reason:'到港入仓',lines:[{sku:'A-1',qty:5}]})).statusCode,201);
+  assert.equal((await call('m1','POST','/wms/movements/batch',{opDate:'2026-11-05',type:'transfer',location:'transit',toLocation:'us',reason:'到港入仓',lines:[{sku:'A-1',qty:9}]})).statusCode,409,'cannot move more than is there');
+  assert.equal((await call('m1','POST','/wms/movements/batch',{opDate:'2026-11-05',type:'transfer',location:'transit',toLocation:'us',reason:'到港入仓',lines:[{sku:'A-1',qty:5}]})).statusCode,201);
   assert.equal(await q('A-1','us'),8);assert.equal(await q('A-1','transit'),0);
  }finally{await app.close();}
 });
@@ -115,11 +127,126 @@ test('WMS: SKUs in the product library are warehouse SKUs without adding them ag
 
   const one=await call('POST','/wms/movements',{type:'in',sku:'LIB-HOST-01',location:'us',qty:1,reason:'采购到货'});assert.equal(one.statusCode,201,one.body);
   assert.equal((await item('LIB-HOST-01')).qty.us,1);
-  const batch=await call('POST','/wms/movements/batch',{type:'in',location:'us',reason:'采购到货',lines:[{sku:'lib-part-02',qty:4},{sku:'LIB-HOST-01',qty:2}]});
+  const batch=await call('POST','/wms/movements/batch',{opDate:'2026-11-05',type:'in',location:'us',reason:'采购到货',lines:[{sku:'lib-part-02',qty:4},{sku:'LIB-HOST-01',qty:2}]});
   assert.equal(batch.statusCode,201,batch.body);
   assert.equal((await item('LIB-PART-02')).qty.us,4);assert.equal((await item('LIB-HOST-01')).qty.us,3);
   assert.equal((await call('GET','/wms/summary')).json().items.filter((i:any)=>i.sku.startsWith('LIB-')).length,2,'listed once after the first movement');
-  assert.equal((await call('POST','/wms/movements/batch',{type:'in',location:'us',reason:'采购到货',lines:[{sku:'NOT-IN-LIBRARY',qty:1}]})).statusCode,400);
+  assert.equal((await call('POST','/wms/movements/batch',{opDate:'2026-11-05',type:'in',location:'us',reason:'采购到货',lines:[{sku:'NOT-IN-LIBRARY',qty:1}]})).statusCode,400);
   assert.equal((await call('POST','/wms/movements',{type:'in',sku:'NOT-IN-LIBRARY',location:'us',qty:1,reason:'采购到货'})).statusCode,404);
+ }finally{await app.close();}
+});
+
+test('WMS: one order with many SKUs (out), a count of many SKUs, operation dates, how each movement was made, shelf bins, product filters',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ const app=await buildApp({db,integrations:{executiveUserIds:['m1']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
+ const tokens:Record<string,string>={};
+ const call=async(who:string,method:'GET'|'POST',url:string,payload?:any,lang='en')=>{tokens[who]??=(await issueSession(db,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who],'accept-language':lang}});};
+ const sum=async()=>(await call('m1','GET','/wms/summary')).json();
+ const q=async(s:string,l:string)=>Number((await sum()).items.find((i:any)=>i.sku===s).qty[l]||0);
+ try{
+  await call('m1','POST','/wms/import',{asOf:'2026-10-31',rows:[{sku:'X-1',qty:{us:10}},{sku:'X-2',qty:{us:4}},{sku:'X-3',qty:{us:7}}]});
+  const base={type:'out',location:'us',reason:'销售发货',opDate:'2026-11-06'};
+  // Goods out: the order number is required, every line must have enough stock, all or nothing
+  assert.equal((await call('m1','POST','/wms/movements/batch',{...base,lines:[{sku:'X-1',qty:1}]})).json().error.code,'WMS_REFERENCE_REQUIRED');
+  const short=await call('m1','POST','/wms/movements/batch',{...base,reference:'SO-9001',lines:[{sku:'X-1',qty:2},{sku:'X-2',qty:5}]},'zh-CN');
+  assert.equal(short.statusCode,409);assert.match(short.json().error.message,/X-2 库存不足/);assert.equal(await q('X-1','us'),10,'nothing applied');
+  const out=await call('m1','POST','/wms/movements/batch',{...base,reference:'SO-9001',lines:[{sku:'X-1',qty:2},{sku:'X-2',qty:1}]});
+  assert.equal(out.statusCode,201,out.body);assert.equal(await q('X-1','us'),8);assert.equal(await q('X-2','us'),3);
+  // Operation date: required for a batch, not in the future, not before 2000
+  const {opDate:_d,...noDate}=base;
+  assert.equal((await call('m1','POST','/wms/movements/batch',{...noDate,reference:'SO-1',lines:[{sku:'X-1',qty:1}]})).statusCode,400);
+  for(const d of ['1999-12-31','2099-01-01']){const r=await call('m1','POST','/wms/movements/batch',{...base,opDate:d,reference:'SO-1',lines:[{sku:'X-1',qty:1}]},'zh-CN');assert.equal(r.json().error.code,'WMS_OP_DATE');assert.match(r.json().error.message,/操作日期/);}
+  // A count of several SKUs: lines that match the system are skipped; the rest wait for the manager
+  const cnt=await call('m1','POST','/wms/movements/batch',{type:'adjust',location:'us',reason:'月底盘点',opDate:'2026-11-07',lines:[{sku:'X-1',counted:8},{sku:'X-2',counted:2},{sku:'X-3',counted:9}]});
+  assert.equal(cnt.statusCode,201,cnt.body);assert.deepEqual([cnt.json().lines,cnt.json().unchanged,cnt.json().status],[2,1,'pending']);
+  assert.equal(await q('X-3','us'),7,'a count changes nothing until it is confirmed');
+  assert.equal((await call('m1','POST','/wms/movements/batch',{type:'adjust',location:'us',reason:'月底盘点',opDate:'2026-11-07',lines:[{sku:'X-1',counted:1},{sku:'x-1',counted:2}]})).json().error.code,'WMS_DUPLICATE_LINE');
+  // The log says how each movement was made and when
+  const s1=await sum(), mv=(sku:string,type:string)=>s1.movements.find((m:any)=>m.sku===sku&&m.type===type);
+  assert.deepEqual([mv('X-1','out').method,mv('X-1','out').batchSkus,mv('X-1','out').batchUnits,mv('X-1','out').opDate],['batch',2,3,'2026-11-06']);
+  assert.equal(mv('X-3','adjust').status,'pending');assert.equal(mv('X-3','adjust').opDate,'2026-11-07');
+  const imp=s1.movements.find((m:any)=>m.reference==='IMPORT');assert.equal(imp.method,'import');assert.equal(imp.opDate,'2026-10-31','the import is dated as of the stock sheet');
+  await call('m1','POST','/wms/movements',{type:'in',sku:'X-3',location:'us',qty:1,reason:'采购到货',opDate:'2026-11-08'});
+  const one=(await sum()).movements.find((m:any)=>m.sku==='X-3'&&m.type==='in');assert.deepEqual([one.method,one.opDate],['manual','2026-11-08']);
+  // Shelf bins: a preferred bin and two alternates per warehouse
+  assert.equal((await call('m1','POST','/wms/bins',{sku:'X-1',location:'us',bins:['','B-02']})).json().error.code,'WMS_BIN_PRIMARY');
+  assert.equal((await call('m1','POST','/wms/bins',{sku:'X-1',location:'us',bins:['A-01-03','B-02','C-07']})).statusCode,200);
+  assert.deepEqual((await sum()).items.find((i:any)=>i.sku==='X-1').bins,{us:['A-01-03','B-02','C-07']});
+  assert.equal((await call('m4','POST','/wms/bins',{sku:'X-1',location:'us',bins:['Z-1']})).statusCode,403,'view access cannot change bins');
+  // Product facts for the filters come from the product library
+  await db.query(`INSERT INTO product_catalog(org_id,sku,name_zh,msrp,family,attrs) SELECT org_id,'X-2','示例配件',59,'acc','{"series":"XRF"}' FROM users WHERE id='m1'`);
+  const s2=await sum(), x2=s2.items.find((i:any)=>i.sku==='X-2');
+  assert.deepEqual([x2.family,x2.series,x2.msrp],['acc','XRF',59]);assert.ok(s2.families.some((f:any)=>f.key==='acc'));
+ }finally{await app.close();}
+});
+
+test('returns and repairs have their own access: warehouse people keep it once, then it is set on its own; managers may set it for their reports',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ await db.query(`UPDATE users SET manager_id='m4' WHERE id IN ('m5','m6')`);
+ await db.query(`UPDATE users SET grants='["warehouse","warehouse_manage"]' WHERE id='m5'`);await db.query(`UPDATE users SET grants='["warehouse"]' WHERE id='m6'`);
+ const app=await buildApp({db,integrations:{executiveUserIds:['m1']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
+ const tokens:Record<string,string>={};
+ const call=async(who:string,method:'GET'|'POST',url:string,payload?:any)=>{tokens[who]??=(await issueSession(db,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who]}});};
+ try{
+  const acc=async(id:string)=>(await call('m1','GET','/erp/access')).json().people.find((p:any)=>p.id===id).access;
+  assert.equal((await acc('m5')).returns,'manage','warehouse managers keep managing returns');assert.equal((await acc('m6')).returns,'view');
+  assert.equal((await call('m6','GET','/rma')).statusCode,200);
+  // From now on it is separate: removing returns leaves warehouse alone
+  assert.equal((await call('m1','POST','/erp/access',{userId:'m6',area:'returns',level:'none'})).json().access.warehouse,'view');
+  assert.equal((await call('m6','GET','/rma')).statusCode,403);
+  // A restart does not hand it back
+  await (await import('../src/wms.js')).migrateReturnsAccess(db);assert.equal((await acc('m6')).returns,'none');
+  // Managers set returns (and warehouse) for their own reports only
+  assert.equal((await call('m4','POST','/erp/access',{userId:'m6',area:'returns',level:'manage'})).statusCode,200);
+  assert.equal((await call('m4','POST','/erp/access',{userId:'m2',area:'returns',level:'view'})).statusCode,403);
+  assert.equal((await call('m4','POST','/erp/access',{userId:'m6',area:'pricing',level:'view'})).statusCode,403);
+ }finally{await app.close();}
+});
+
+test('WMS bins hold quantities: goods in go to the chosen bin, goods out pick bins in order, counts take unassigned first, moves between bins are logged',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ const app=await buildApp({db,integrations:{executiveUserIds:['m1']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
+ const tok=(await issueSession(db,'m1')).accessToken;
+ const call=(method:'GET'|'POST',url:string,payload?:any)=>app.inject({method,url,payload,headers:{authorization:'Bearer '+tok,'accept-language':'zh-CN'}});
+ const it=async()=>(await call('GET','/wms/summary')).json().items.find((i:any)=>i.sku==='B-1');
+ const day='2026-11-06';
+ try{
+  await call('POST','/wms/import',{asOf:'2026-10-31',rows:[{sku:'B-1',qty:{us:10}}]});
+  assert.equal((await call('POST','/wms/bins',{sku:'B-1',location:'us',bins:['A-01','A-02','A-03']})).statusCode,200);
+  let x=await it();assert.deepEqual(x.binQty.us,[0,0,0],'opening stock is unassigned until it is put away');
+  // put 6 of the unassigned stock into A-01
+  const mv=await call('POST','/wms/bins/move',{sku:'B-1',location:'us',from:0,to:1,qty:6});assert.equal(mv.statusCode,201,mv.body);
+  assert.equal((await call('POST','/wms/bins/move',{sku:'B-1',location:'us',from:0,to:2,qty:9})).json().error.code,'WMS_BIN_SHORT','only 4 unassigned left');
+  // goods in: preferred bin by default, or the chosen one
+  await call('POST','/wms/movements/batch',{type:'in',location:'us',opDate:day,reason:'采购到货',lines:[{sku:'B-1',qty:2},{sku:'B-1',qty:3,slot:2}]});
+  x=await it();assert.equal(x.qty.us,15);assert.deepEqual(x.binQty.us,[8,3,0]);
+  // goods out: from the chosen bin (must hold enough) or from the bins in order
+  assert.equal((await call('POST','/wms/movements/batch',{type:'out',location:'us',opDate:day,reason:'销售发货',reference:'SO-1',lines:[{sku:'B-1',qty:4,slot:2}]})).json().error.code,'WMS_BIN_SHORT');
+  await call('POST','/wms/movements/batch',{type:'out',location:'us',opDate:day,reason:'销售发货',reference:'SO-2',lines:[{sku:'B-1',qty:10}]});
+  x=await it();assert.equal(x.qty.us,5);assert.deepEqual(x.binQty.us,[0,1,0],'8 from A-01, then 2 from A-02');
+  // a count that finds fewer takes the unassigned stock first (4 unassigned here)
+  const c=await call('POST','/wms/movements/batch',{type:'adjust',location:'us',opDate:day,reason:'盘点',lines:[{sku:'B-1',counted:2}]});
+  const pid=(await call('GET','/wms/summary')).json().movements.find((m:any)=>m.status==='pending').id;
+  assert.equal(c.statusCode,201);await call('POST',`/wms/movements/${pid}/approve`,{});
+  x=await it();assert.equal(x.qty.us,2);assert.deepEqual(x.binQty.us,[0,1,0]);
+  // clearing a bin puts its quantity back to unassigned; the move is in the log
+  await call('POST','/wms/bins',{sku:'B-1',location:'us',bins:['A-01','','']});
+  assert.deepEqual((await it()).binQty.us,[0,0,0]);
+  assert.ok((await call('GET','/wms/summary')).json().movements.some((m:any)=>m.type==='move'&&/移库：未分库位 → A-01/.test(m.reason)));
+ }finally{await app.close();}
+});
+
+test('WMS stock value per warehouse: MSRP for everyone with stock access, landed cost only for cost access',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ const org=(await db.query("SELECT org_id FROM users WHERE id='m1'")).rows[0].org_id;
+ await db.query(`INSERT INTO product_catalog(org_id,sku,msrp) VALUES($1,'V-1',100)`,[org]);await db.query(`INSERT INTO product_pricing(org_id,sku,landed_usd) VALUES($1,'V-1',40)`,[org]);
+ await db.query(`UPDATE users SET grants='["warehouse"]' WHERE id='m2'`);
+ const app=await buildApp({db,integrations:{executiveUserIds:['m1']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
+ const tokens:Record<string,string>={};
+ const call=async(who:string,method:'GET'|'POST',url:string,payload?:any)=>{tokens[who]??=(await issueSession(db,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who]}});};
+ try{
+  await call('m1','POST','/wms/import',{asOf:'2026-10-31',rows:[{sku:'V-1',qty:{us:3,dg:2}}]});
+  const a=(await call('m1','GET','/wms/summary')).json().values;assert.equal(a.msrp.us,300);assert.equal(a.msrp.dg,200);assert.equal(a.cost.us,120);
+  const b=(await call('m2','GET','/wms/summary')).json().values;assert.equal(b.msrp.us,300);assert.equal(b.cost,undefined,'no cost without cost access');
  }finally{await app.close();}
 });

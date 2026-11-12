@@ -40,6 +40,8 @@ export const normalizeWorksheet = (w: any): Worksheet => {
 const sum = (a: { pct: number }[]) => a.reduce((s, x) => s + (Number(x.pct) || 0), 0);
 /** Selling-cost rates as fractions; null until the settings have line items or a manual rate. */
 export const dtcRate = (w: Worksheet) => w.dtcRateOverride != null ? w.dtcRateOverride / 100 : w.dtcItems.length ? sum(w.dtcItems) / 100 : null;
+/** A SKU's own rate (percent, from the product library) when set, else the company rate. */
+export const skuRate = (own: any, company: number | null) => { const x = own == null || own === '' ? NaN : Number(own); return isFinite(x) && x >= 0 && x < 100 ? x / 100 : company; };
 export const whRate = (w: Worksheet) => w.whRateOverride != null ? w.whRateOverride / 100 : w.whItems.length ? sum(w.whItems) / 100 : null;
 export const r99 = (x: number | null) => x == null || !isFinite(x) || x <= 0 ? null : Math.max(99, Math.round(x / 100) * 100 - 1);
 const cmAt = (p: number | null, cost: number | null, rate: number | null) => p == null || cost == null || rate == null ? null : p * (1 - rate) - cost;
@@ -52,7 +54,7 @@ export const tone = (cmp: number | null, floorPct: number | null) => cmp == null
 
 export function worksheet(p: PriceInputs, w: Worksheet) {
   const landed = n(p.landed), lastMile = n(p.lastMile) ?? 0, delivered = landed == null ? null : landed + lastMile;
-  const dr = dtcRate(w), wr = whRate(w), msrp = n(p.msrp);
+  const dr = skuRate(p.dtcRate, dtcRate(w)), wr = skuRate(p.whRate, whRate(w)), msrp = n(p.msrp);
   const retail = w.retailTiers.map(t => {
     const theory = priceFor(delivered, dr, t.cm / 100), list = r99(theory), cm = cmAt(list, delivered, dr);
     return { name: t.name, cmTarget: t.cm, use: t.use, theory, list, offMsrp: msrp && list ? 1 - list / msrp : null, cm, cmPct: ratio(cm, list) };

@@ -186,6 +186,76 @@ const app = await buildApp({
   }
 }
 
+// Example shelf bins in the US LA warehouse (fictional).
+{
+  const token = (await issueSession(db, 'm1')).accessToken;
+  for (const [sku, bins] of [['DEMO-F2-60W', ['A-01-01', 'A-01-02', '']], ['DEMO-F2-100W', ['A-02-01', '', '']], ['DEMO-LENS-2', ['C-10-03', 'C-10-04', 'D-01-01']]] as const)
+    await app.inject({ method: 'POST', url: '/wms/bins', payload: { sku, location: 'us', bins: [...bins] }, headers: { authorization: `Bearer ${token}` } });
+  // Put most of the US stock away: the first bin gets all but 3, the second bin the rest (fictional).
+  const items = (await app.inject({ method: 'GET', url: '/wms/summary', headers: { authorization: `Bearer ${token}` } })).json().items;
+  for (const it of items.filter((x: any) => x.bins?.us?.[0] && Number(x.qty?.us || 0) > 0)) {
+    const total = Number(it.qty.us), second = it.bins.us[1] ? Math.min(3, total) : 0;
+    if (total - second > 0) await app.inject({ method: 'POST', url: '/wms/bins/move', payload: { sku: it.sku, location: 'us', from: 0, to: 1, qty: total - second }, headers: { authorization: `Bearer ${token}` } });
+    if (second) await app.inject({ method: 'POST', url: '/wms/bins/move', payload: { sku: it.sku, location: 'us', from: 0, to: 2, qty: second }, headers: { authorization: `Bearer ${token}` } });
+  }
+}
+
+// Product facts the supply chain needs (fictional): family, production lead time, first leg and MOQ.
+{
+  const org = (await db.query("SELECT org_id FROM users WHERE id='m1'")).rows[0].org_id;
+  for (const [sku, family, lead, firstLeg, moq] of [['DEMO-H7-PRO', 'main', '25 天', '海运 35 天', '5 台'], ['DEMO-F2-100W', 'main', '20 天', '海运 35 天', '10 台'], ['DEMO-F2-60W', 'main', '20 天', '海运 35 天', '10 台'],
+    ['DEMO-AF-200', 'acc', '15 天', '海运 30 天', '20 件'], ['DEMO-RA-1', 'acc', '15 天', '', '20 件'], ['DEMO-LENS-2', 'cons', '', '空运 7 天', '50 片']] as const)
+    await db.query(`UPDATE product_catalog SET family=$3, lead=$4::text, attrs=COALESCE(attrs,'{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object('firstLeg', NULLIF($5::text,''), 'moqUnit', $6::text)) WHERE org_id=$1 AND sku=$2`, [org, sku, family, lead, firstLeg, moq]);
+}
+
+// SCM: a year of fictional daily sales per SKU (as if synced from Shopify) and two shipments on the water.
+{
+  const token = (await issueSession(db, 'm1')).accessToken, call = (method: string, url: string, payload?: unknown) => app.inject({ method: method as any, url, payload: payload as any, headers: { authorization: `Bearer ${token}` } });
+  const org = (await db.query("SELECT org_id FROM users WHERE id='m1'")).rows[0].org_id;
+  const skus = (await db.query("SELECT sku FROM product_catalog WHERE org_id=$1 AND sku NOT LIKE 'REF-%' ORDER BY sku", [org])).rows.map((r: any) => r.sku);
+  // Each SKU gets its own fictional base rate and a gentle seasonal wave; the most recent month runs a little hotter for some.
+  for (const [i, sku] of skus.entries()) {
+    const base = [3.2, 1.4, 0.6, 5.5, 0.25, 2.1, 0.9][i % 7], hot = i % 3 === 0 ? 1.35 : i % 3 === 1 ? 0.8 : 1;
+    await db.query(`INSERT INTO scm_sales_daily(org_id,sku,day,qty)
+      SELECT $1,$2,d::date, GREATEST(0, round($3::float8 * (1 + 0.35*sin(n/29.0 + $5::int)) * (CASE WHEN n < 30 THEN $4::float8 ELSE 1 END) + (((n*7919 + $5::int*104729) % 5) - 2) * 0.3))::int
+      FROM generate_series(0,364) AS n, LATERAL (SELECT current_date - n AS d) x ON CONFLICT DO NOTHING`, [org, sku, base, hot, i]);
+  }
+  const units = Number((await db.query('SELECT coalesce(sum(qty),0) AS u FROM scm_sales_daily WHERE org_id=$1', [org])).rows[0].u);
+  await db.query(`INSERT INTO scm_sync(org_id,last_at,status,orders,units,since,note) VALUES($1,now(),'ok',$2,$3,current_date-364,'示例数据，测试站不连 Shopify') ON CONFLICT(org_id) DO NOTHING`, [org, Math.round(units * 0.8), units]);
+  const ago = (n: number) => new Date(Date.now() - n * 864e5).toISOString().slice(0, 10);
+  // Some finished goods waiting at the Dongguan factory (fictional), so the board can suggest shipping them first.
+  const atFactory = skus.slice(0, 4).map((sku: string, i: number) => ({ sku, qty: [80, 30, 45, 20][i] }));
+  if (atFactory.length) await call('POST', '/wms/movements/batch', { type: 'in', location: 'dg', opDate: ago(5), reason: '示例：工厂成品入库', lines: atFactory });
+  if (skus[0]) await call('POST', '/scm/shipments', { number: 'DEMO-MSKU-0001', mode: 'sea', firstLeg: 'oa', lastLeg: 'port', carrier: '示例船公司', tracking: 'https://track.example.com/DEMO-MSKU-0001', source: 'new', shippedOn: ago(18), etaDays: 35, lines: skus.slice(0, 3).map((sku: string, i: number) => ({ sku, qty: [40, 25, 60][i] })) });
+  if (skus[1]) await call('POST', '/scm/shipments', { number: 'DEMO-AIR-0002', mode: 'air', firstLeg: 'air', lastLeg: 'express', carrier: '示例快递', tracking: 'DEMO1234567890', source: 'new', shippedOn: ago(2), etaDays: 7, lines: [{ sku: skus[skus.length - 1], qty: 12 }] });
+  // Ship position, an arrival notice waiting for the warehouse, shelf bins and a purchase order partly finished (all fictional).
+  const board = (await call('GET', '/scm/board')).json();
+  const sea = board.shipments?.find((x: any) => x.number === 'DEMO-MSKU-0001'), air = board.shipments?.find((x: any) => x.number === 'DEMO-AIR-0002');
+  if (sea) await call('POST', `/scm/shipments/${sea.id}/position`, { position: '示例：已过夏威夷，按计划航行' });
+  if (air) await call('POST', `/scm/shipments/${air.id}/notify`, {});
+  await call('POST', '/wms/bin-codes', { location: 'us', codes: ['A-01-01', 'A-01-02', 'A-01-03', 'A-02-01', 'A-02-02', 'C-10-03', 'C-10-04', 'D-01-01', 'D-01-02'], note: '示例货架' });
+  // Fictional suppliers in the product library, then a purchase order in production (partly finished) and a draft.
+  const orgId = (await db.query("SELECT org_id FROM users WHERE id='m1'")).rows[0].org_id;
+  for (const [i, sku] of skus.entries())
+    await db.query(`INSERT INTO product_pricing(org_id,sku,attrs) VALUES($1,$2,$3::jsonb) ON CONFLICT(org_id,sku) DO UPDATE SET attrs=COALESCE(product_pricing.attrs,'{}'::jsonb) || $3::jsonb`,
+      [orgId, sku, JSON.stringify(i % 2 ? { supplier: '示例济南工厂', supplierAlt1: '示例东莞工厂' } : { supplier: '示例东莞工厂', supplierAlt1: '示例济南工厂' })]);
+  const ahead = (n: number) => new Date(Date.now() + n * 864e5).toISOString().slice(0, 10);
+  const po = (await call('POST', '/scm/orders', { supplier: '示例东莞工厂', orderedOn: ago(10), readyOn: ahead(15), note: '示例采购单', lines: skus.slice(0, 2).map((sku: string, i: number) => ({ sku, qty: [120, 60][i] })) })).json();
+  if (po?.id && skus[0]) { await call('POST', `/scm/orders/${po.id}/issue`, {}); await call('POST', `/scm/orders/${po.id}/finish`, { opDate: ago(1), location: 'dg', lines: [{ sku: skus[0], qty: 40 }] }); }
+  if (skus[2]) await call('POST', '/scm/orders', { supplier: '示例东莞工厂', orderedOn: ago(0), readyOn: ahead(25), note: '示例草稿：等工厂确认', lines: [{ sku: skus[2], qty: 50 }] });
+}
+
+// Example pricing parameters (fictional rates, tiers and NPCR steps) and landed / last-mile costs, so 定价 shows the NPCR calculation.
+{
+  const token = (await issueSession(db, 'm1')).accessToken, call = (method: string, url: string, payload?: unknown) => app.inject({ method: method as any, url, payload: payload as any, headers: { authorization: `Bearer ${token}` } });
+  await call('PUT', '/products/worksheet-settings', { dtcItems: [{ name: '示例 · 广告', pct: 8 }, { name: '示例 · 平台与支付', pct: 5 }], whItems: [{ name: '示例 · 销售支持', pct: 4 }], mktExtra: 10,
+    retailTiers: [{ name: 'MSRP', cm: 40, use: '标价' }, { name: '日常', cm: 30, use: '日常调整' }, { name: '小促', cm: 22, use: '常规活动' }, { name: '大促', cm: 15, use: '每年最多 2 次' }],
+    whTiers: [{ name: '普通经销商', discount: 25, floor: false }, { name: '大经销商', discount: 30, floor: false }, { name: '底线档', discount: 35, floor: true }],
+    npcr: [10, 15, 20, 25, 30, 35, 40], dtcTarget: '30', dtcFloor: 12, whTarget: '15', whFloor: 8, dtcRateOverride: null, whRateOverride: null });
+  for (const [sku, landed, lastMile] of [['DEMO-AF-200', 210, 25], ['DEMO-F2-100W', 2400, 180], ['DEMO-F2-60W', 1650, 160], ['DEMO-H7-PRO', 4200, 260], ['DEMO-LENS-2', 9, 6], ['DEMO-RA-1', 120, 18]] as const)
+    await call('PATCH', `/products/library/${sku}`, { values: { landed, lastMile } });
+}
+
 const TYPES: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.otf': 'font/otf', '.woff2': 'font/woff2', '.png': 'image/png', '.json': 'application/json', '.webp': 'image/webp', '.ico': 'image/x-icon' };
 createServer(async (req, res) => {
   try {

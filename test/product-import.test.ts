@@ -56,8 +56,9 @@ test('template: every visible column in spec order, hidden key row, dropdowns, n
    assert.ok(csv[1].includes('whOv0'));assert.equal(JSON.stringify(csv).includes('1000'),false,'no landed cost value');
    assert.equal(csv[1].includes('fdaAccession'),who==='m2','FDA number is 产品与供应链');
   }
-  // Only main admins upload
-  assert.equal((await preview(call,'x.csv',writeCsv([['SKU'],['sku'],['ODL-A1']]),'m5')).statusCode,403);
+  // Bulk updates: main admins, 价格·管理 and 产品资料·管理信息 (m5 had product manage and cost access, so 管理信息 after the move to four levels)
+  assert.equal((await preview(call,'x.csv',writeCsv([['SKU'],['sku'],['ODL-A1']]),'m5')).statusCode,200);
+  assert.equal((await preview(call,'x.csv',writeCsv([['SKU'],['sku'],['ODL-A1']]),'m2')).statusCode,403);
  }finally{await app.close();}
 });
 
@@ -173,24 +174,24 @@ test('review fixes: return SKUs unique across the file and the system, replaceme
  }finally{await app.close();}
 });
 
-test('bulk update permission: main admins choose who may bulk-update SKUs and prices; columns still follow field access; undo own only',async()=>{
+test('bulk update permission: 价格·管理 or 产品资料·管理信息 may bulk-update; columns still follow field access; undo own only',async()=>{
  const {app,call}=await setup();
  try{
   const csvOf=async(who:string)=>readCsv((await call(who,'GET','/products/library/template?format=csv')).body);
-  // Not allowed yet, even with product manage access
-  assert.equal((await preview(call,'x.csv',writeCsv([['SKU'],['sku'],['ODL-A1']]),'m5')).statusCode,403);
-  assert.equal((await call('m5','GET','/products/library')).json().viewer.canImport,false);
-  // Only main admins assign it (managers cannot, even for their reports)
-  assert.equal((await call('m4','POST','/erp/access',{userId:'m2',area:'import',level:'allow'})).statusCode,403);
-  const g=await call('m1','POST','/erp/access',{userId:'m2',area:'import',level:'allow'});assert.equal(g.statusCode,200,g.body);
-  assert.equal(g.json().access.import,'allow');assert.equal(g.json().access.products,'manage','bulk update comes with product data');assert.equal(g.json().access.pricing,'msrp','and retail prices');
+  // Bulk updates come with 价格·管理 or 产品资料·管理信息; view access alone is not enough
+  assert.equal((await preview(call,'x.csv',writeCsv([['SKU'],['sku'],['ODL-A1']]),'m2')).statusCode,403);
+  assert.equal((await call('m2','GET','/products/library')).json().viewer.canImport,false);
+  // Only main admins set price access (managers cannot, even for their reports)
+  assert.equal((await call('m4','POST','/erp/access',{userId:'m2',area:'pricing',level:'manage'})).statusCode,403);
+  const g=await call('m1','POST','/erp/access',{userId:'m2',area:'pricing',level:'manage'});assert.equal(g.statusCode,200,g.body);
+  assert.equal(g.json().access.pricing,'manage');assert.equal(g.json().access.products,'view','product data stays at view');
   assert.equal((await call('m2','GET','/products/library')).json().viewer.canImport,true);
-  // m2 changes a name and the MSRP; the cost column is not in their template (no cost access)
+  // m2 changes the MSRP and the landed cost (价格·管理 sees and edits cost columns)
   const t=await csvOf('m2'),keys=t[1] as string[];
-  assert.ok(!keys.includes('landed'),'no cost columns without cost access');
-  const row=t.find(r=>r[0]==='ODL-A1')!.slice();row[keys.indexOf('nameZh')]='示例主机 A2';row[keys.indexOf('msrp')]='2100';
+  assert.ok(keys.includes('landed'),'cost columns come with price access');
+  const row=t.find(r=>r[0]==='ODL-A1')!.slice();row[keys.indexOf('landed')]='1050';row[keys.indexOf('msrp')]='2100';
   const p=await preview(call,'m2.csv',writeCsv([t[0],t[1],row]),'m2');assert.equal(p.statusCode,200,p.body);
-  const r=p.json().results.find((x:any)=>x.sku==='ODL-A1');assert.equal(r.status,'update');assert.deepEqual(r.changes.map((c:any)=>c.key).sort(),['msrp','nameZh']);
+  const r=p.json().results.find((x:any)=>x.sku==='ODL-A1');assert.equal(r.status,'update');assert.deepEqual(r.changes.map((c:any)=>c.key).sort(),['landed','msrp']);
   assert.equal((await call('m2','POST',`/products/library/import/${p.json().id}/confirm`,{})).statusCode,200);
   assert.equal((await call('m1','GET','/products/library')).json().items.find((i:any)=>i.sku==='ODL-A1').values.msrp,2100);
   // A column the person may not change is fine when unchanged, refused when changed
@@ -200,7 +201,7 @@ test('bulk update permission: main admins choose who may bulk-update SKUs and pr
   assert.equal(r2.status,'update','unchanged columns the person may not edit (names) are ignored');assert.deepEqual(r2.changes.map((c:any)=>c.key),['msrp']);
   const chg=same2.slice();chg[k2.indexOf('nameZh')]='改名';
   const p3=(await preview(call,'m2c.csv',writeCsv([t2[0],t2[1],chg]),'m2')).json();const r3=p3.results.find((x:any)=>x.sku==='ODL-A1');
-  assert.equal(r3.status,'error');assert.ok(r3.errors.some((e:any)=>e.key==='nameZh'),'changing product data needs 产品：管理');
+  assert.equal(r3.status,'error');assert.ok(r3.errors.some((e:any)=>e.key==='nameZh'),'changing product data needs 产品资料·管理信息');
   // Undo: own imports only; main admins undo any
   const imports=(await call('m2','GET','/products/library/imports')).json().items;assert.ok(imports.length>=1);
   const mine=imports[0].id;
@@ -209,7 +210,7 @@ test('bulk update permission: main admins choose who may bulk-update SKUs and pr
   assert.equal((await call('m2','POST',`/products/library/imports/${adminImport}/undo`,{})).json().error.code,'IMPORT_UNDO_OWN');
   assert.equal((await call('m2','POST',`/products/library/imports/${mine}/undo`,{})).statusCode,200);
   // Taking it away
-  assert.equal((await call('m1','POST','/erp/access',{userId:'m2',area:'import',level:'none'})).json().access.import,'none');
+  assert.equal((await call('m1','POST','/erp/access',{userId:'m2',area:'pricing',level:'none'})).json().access.pricing,'none');
   assert.equal((await preview(call,'x.csv',writeCsv([['SKU'],['sku'],['ODL-A1']]),'m2')).statusCode,403);
  }finally{await app.close();}
 });

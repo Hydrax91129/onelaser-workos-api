@@ -142,7 +142,11 @@ export async function registerMemberRoutes(app: FastifyInstance, db: Database, o
         heir = (await tx.query('SELECT * FROM users WHERE id=$1 AND org_id=$2 AND active=true', [input.reassignTo, user.org_id])).rows[0];
         if (!heir || heir.id === member.id || heir.department_id !== member.department_id) deny(400, 'INVALID_REASSIGNEE', 'Choose an active member of the same department to take over open tasks');
       }
-      await tx.query('UPDATE users SET active=false,disabled_at=now(),disabled_by=$2 WHERE id=$1', [member.id, user.id]);
+      // Leaving the company ends every permission (owner's rule, 2026-11-12): feature grants and the admin tick are cleared in the
+      // same transaction and are not given back when the account is re-enabled; what was cleared is kept in the audit log.
+      await tx.query(`UPDATE users SET active=false,disabled_at=now(),disabled_by=$2,grants='[]'::jsonb,is_admin=false WHERE id=$1`, [member.id, user.id]);
+      if ((Array.isArray(member.grants) && member.grants.length) || member.is_admin)
+        await audit(tx, user, 'org.member_access_cleared', member.id, { grants: member.grants || [], isAdmin: !!member.is_admin }, member.id);
       await tx.query('DELETE FROM sessions WHERE user_id=$1', [member.id]);
       await hrMarkLeft(tx, user.org_id, member.id, user.id);
       // Direct reports move up one level so their reporting line stays intact.
@@ -286,6 +290,30 @@ export async function registerMemberRoutes(app: FastifyInstance, db: Database, o
     if (!user || !ok) deny(401, 'INVALID_CREDENTIALS', 'Email or password is incorrect');
     if (!user.active || user.disabled_at) deny(403, 'ACCOUNT_DISABLED', 'This account has been disabled by an administrator');
     return signIn(reply, user.id);
+  });
+
+  // Email + password sign-in for an account that signs in with DingTalk (or changing the sign-in email). The person does it
+  // themselves while signed in; the email must not be anyone else's sign-in email; an existing password is required to change it.
+  app.get('/me/login', async req => {
+    const user = actorOf(req);
+    const r = (await db.query('SELECT login_email,(password_hash IS NOT NULL) AS has_password FROM users WHERE id=$1', [user.id])).rows[0];
+    return { loginEmail: r?.login_email || '', hasPassword: !!r?.has_password };
+  });
+  app.post('/me/login', async req => {
+    const user = actorOf(req);
+    const input = z.object({ email, newPassword: password, currentPassword: z.string().max(200).optional() }).strict().parse(req.body);
+    limit('me-login:' + user.id, 10, 15 * 60_000);
+    return db.transaction(async tx => {
+      const row = (await tx.query('SELECT login_email,password_hash FROM users WHERE id=$1 FOR UPDATE', [user.id])).rows[0];
+      if (row?.password_hash && !(await verifyPassword(input.currentPassword || '', row.password_hash))) deny(401, 'INVALID_CREDENTIALS', 'Email or password is incorrect');
+      if ((await tx.query("SELECT 1 FROM users WHERE lower(login_email)=$1 AND login_email<>'' AND id<>$2", [input.email, user.id])).rows.length)
+        deny(409, 'LOGIN_EMAIL_TAKEN', 'Another account already signs in with this email', '这个邮箱已经被别的账号用来登录了，请换一个。');
+      await tx.query('UPDATE users SET login_email=$2,password_hash=$3 WHERE id=$1', [user.id, input.email, await hashPassword(input.newPassword)]);
+      await tx.query('DELETE FROM sessions WHERE user_id=$1 AND token_hash<>$2', [user.id, hash(req.sessionToken || '')]);
+      await tx.query('INSERT INTO audit_events(id,org_id,department_id,owner_id,actor_id,action,object_id,details) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',
+        [randomUUID(), user.org_id, user.department_id, user.id, user.id, 'auth.login_email_set', user.id, JSON.stringify({ email: input.email, hadPassword: !!row?.password_hash })]);
+      return { loginEmail: input.email, hasPassword: true };
+    });
   });
 
   app.post('/me/password', async req => {

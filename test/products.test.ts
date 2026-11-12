@@ -7,8 +7,8 @@ import {issueSession} from '../src/auth.js';
 test('product catalog and pricing imports: who can import, who sees cost inputs',async()=>{
  const db=await createDatabase();await db.exec(schema);await seedDemo(db);
  await db.query(`UPDATE users SET grants='["products"]' WHERE id='m2'`);
- await db.query(`UPDATE users SET grants='["products","products_manage"]' WHERE id='m3'`);
- await db.query(`UPDATE users SET grants='["products","product_cost_detail"]' WHERE id='m5'`);
+ await db.query(`UPDATE users SET grants='["products","products_secret","products_manage"]' WHERE id='m3'`);
+ await db.query(`UPDATE users SET grants='["products","product_cost_detail","products_import"]' WHERE id='m5'`);
  const app=await buildApp({db,integrations:{executiveUserIds:['m1']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
  const tokens:Record<string,string>={};
  const call=async(who:string,method:'GET'|'POST',url:string,payload?:any)=>{tokens[who]??=(await issueSession(db,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who]}});};

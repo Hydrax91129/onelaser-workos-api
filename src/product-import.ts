@@ -19,6 +19,7 @@ import { deny } from './errors.js';
 import {
   FAMILIES, FIELD, GROUPS, CLEAR, CORE_REQUIRED, fieldOf, VIS_NAMES, allFields, canSee, canWrite, completeness, enumLabel, famCode, parseValue, viewerOf, relationIssues,
   type Field, type Viewer,
+  canBulkImport,
 } from './product-spec.js';
 import { worksheet, type Worksheet } from './product-worksheet.js';
 import { loadRecords, findRec, worksheetOf, writeRecord, validateValues, recordIssues, same, type Rec, type WriteOpts, type Change } from './product-library.js';
@@ -260,8 +261,8 @@ export async function registerProductImportRoutes(app: FastifyInstance, db: Data
 }) {
   const actorOf = (req: FastifyRequest): User => req.actor || deny(401, 'UNAUTHENTICATED', 'Authentication is required');
   const viewer = (u: User) => viewerOf(Array.isArray((u as any).grants) ? (u as any).grants : [], o.isAdmin(u));
-  /** Main admins, and the people they allow in 供应链权限管理 (grant products_import). Which columns each person can change still follows their field access. */
-  const canImport = (u: User) => o.isAdmin(u) || (Array.isArray((u as any).grants) && (u as any).grants.includes('products_import'));
+  /** Main admins, 价格·管理 and 产品资料·管理信息 (product-spec.ts canBulkImport). Which columns each person can change still follows their field access. */
+  const canImport = (u: User) => canBulkImport(Array.isArray((u as any).grants) ? (u as any).grants : [], o.isAdmin(u));
   const adminOnly = (u: User) => { if (!canImport(u)) deny(403, 'PRODUCT_IMPORT_FORBIDDEN', 'Only people allowed to bulk-update products can do this', '只有主管理员授权的人可以批量更新 SKU 和价格。'); };
   const stamp = () => new Date().toISOString().slice(0, 10);
 
