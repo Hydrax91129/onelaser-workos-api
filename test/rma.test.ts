@@ -45,7 +45,7 @@ test('returns & repairs: register, diagnose, photos, repaired, put away for sale
   assert.equal((await call('m1','POST',`/rma/${id}/price`,{discountPct:20})).statusCode,200,'the discount can be chosen once repaired');
   assert.equal((await call('m1','POST',`/rma/${id}/price`,{listing:'listed'})).statusCode,409,'listing only after restock');
   assert.equal((await call('m3','POST',`/rma/${id}/close`,{outcome:'restock'})).statusCode,403,'only warehouse managers close');
-  assert.equal((await call('m1','POST',`/rma/${id}/close`,{outcome:'restock',grade:'B'})).statusCode,200);
+  assert.equal((await call('m1','POST',`/rma/${id}/close`,{outcome:'restock',grade:'C'})).statusCode,200);
   assert.equal((await call('m1','GET',`/rma/${id}`)).json().discountPct,10,'B 品 = 10% off');
   // Returns are not regular stock: nothing is written to WMS and WMS has no returns warehouse.
   const sum=(await call('m1','GET','/wms/summary')).json();
@@ -63,7 +63,7 @@ test('returns & repairs: register, diagnose, photos, repaired, put away for sale
   assert.equal((await call('m1','POST',`/rma/${id}/price`,{listing:'sold'})).statusCode,200,'marking sold again changes nothing');
   await call('m1','POST',`/rma/${id}/price`,{listing:'pending'});
   wms=(await call('m1','GET','/wms/summary')).json();
-  assert.equal((await call('m1','GET',`/rma/${id}`)).json().stage,'restocked','undoing 售出 puts it back in the returns module');assert.ok(!wms.movements.some((m:any)=>m.reference==='RMA-2026-0001'));assert.equal(d.repairDays,5);assert.equal(d.photos.length,1);assert.equal(d.grade,'B');
+  assert.equal((await call('m1','GET',`/rma/${id}`)).json().stage,'restocked','undoing 售出 puts it back in the returns module');assert.ok(!wms.movements.some((m:any)=>m.reference==='RMA-2026-0001'));assert.equal(d.repairDays,5);assert.equal(d.photos.length,1);assert.equal(d.grade,'C');
   assert.ok(d.events.length>=5);
   const img=await call('m1','GET',`/rma/${id}/photos/${d.photos[0].id}`);assert.equal(img.headers['content-type'],'image/png');
   assert.equal((await call('m1','POST',`/rma/${id}/update`,{diagnosis:'y'})).statusCode,409,'closed');
@@ -119,7 +119,7 @@ test('register a return: item class, serial required for machines, repairable, n
  }finally{await app.close();}
 });
 
-test('grade sets the discount: A untouched goes back as new stock, B 10% off, C 20% off',async()=>{
+test('grade sets the discount: A new, B open box 5%, C open box used 10%, D used 15%, E damaged but working 20%',async()=>{
  const {app,call}=await setupRma();
  try{
   const base={sku:'DEMO-A',qty:1,productClass:'accessory',repairable:'yes',reason:'示例退货',condition:'示例外观',receivedAt:'2026-11-01'};
@@ -127,7 +127,32 @@ test('grade sets the discount: A untouched goes back as new stock, B 10% off, C 
   assert.equal((await call('m1','POST',`/rma/${a}/close`,{outcome:'restock',grade:'A'})).statusCode,200,'A needs no repair');
   const ca=(await call('m1','GET',`/rma/${a}`)).json();assert.equal(ca.discountPct,0);assert.equal(ca.restockLocation,null,'returns are not regular stock');
   const c=(await call('m1','POST','/rma',base)).json().id;
-  assert.equal((await call('m1','POST',`/rma/${c}/close`,{outcome:'restock',grade:'C'})).statusCode,400,'B and C must be repaired first');
+  assert.equal((await call('m1','POST',`/rma/${c}/close`,{outcome:'restock',grade:'C'})).statusCode,400,'B to E must be repaired first');
+  const png=Buffer.from('89504e470d0a1a0a0000000d49484452','hex').toString('base64');
+  for(const [g,pct] of [['B',5],['C',10],['D',15],['E',20]] as const){
+   const id=(await call('m1','POST','/rma',base)).json().id;
+   assert.equal((await call('m1','POST',`/rma/${id}/update`,{technicianId:'m1',diagnosis:'示例诊断'})).statusCode,200);
+   assert.equal((await call('m1','POST',`/rma/${id}/photos`,{kind:'diagnosis',name:'d.png',mime:'image/png',dataBase64:png})).statusCode,201);
+   const rp=await call('m1','POST',`/rma/${id}/repaired`,{repairedAt:'2026-11-02'});assert.equal(rp.statusCode,200,rp.body);
+   const r=await call('m1','POST',`/rma/${id}/close`,{outcome:'restock',grade:g});assert.equal(r.statusCode,200,r.body);
+   const d=(await call('m1','GET',`/rma/${id}`)).json();assert.equal(d.discountPct,pct,g);assert.equal(d.grade,g);
+  }
+  assert.equal((await call('m1','POST',`/rma/${a}/close`,{outcome:'restock',grade:'F'})).statusCode,400,'only A–E');
+ }finally{await app.close();}
+});
+
+test('grades A / B 10% / C 20% become A–E once by the discount each case got',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ const org=(await db.query("SELECT org_id FROM users WHERE id='m1'")).rows[0].org_id;
+ const add=(n:string,grade:string,pct:number)=>db.query(`INSERT INTO rma_cases(id,org_id,number,sku,qty,kind,reason,received_at,status,grade,discount_pct,created_by) VALUES($1,$2,$1,'REF-DEMO',1,'return','示例','2026-10-01','restocked',$3,$4,'m1')`,[n,org,grade,pct]);
+ await add('OLD-B','B',10);await add('OLD-C','C',20);await add('OLD-A','A',0);
+ const app=await buildApp({db,integrations:{executiveUserIds:['m1']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
+ try{
+  const rows=Object.fromEntries((await db.query(`SELECT id,grade,discount_pct FROM rma_cases WHERE id LIKE 'OLD-%'`)).rows.map((r:any)=>[r.id,[r.grade,Number(r.discount_pct)]]));
+  assert.deepEqual(rows,{'OLD-B':['C',10],'OLD-C':['E',20],'OLD-A':['A',0]},'letters follow the discount kept');
+  await db.query(`UPDATE rma_cases SET grade='B',discount_pct=5 WHERE id='OLD-A'`);
+  const {migrateRmaGrades}=await import('../src/rma.js');await migrateRmaGrades(db);
+  assert.equal((await db.query(`SELECT grade FROM rma_cases WHERE id='OLD-A'`)).rows[0].grade,'B','runs once: new B 5% stays B');
  }finally{await app.close();}
 });
 
@@ -151,5 +176,23 @@ test('returns: handler and technician are two people; the return links to a prod
   assert.equal(c.valueMsrp,2000);assert.equal(c.valueCost,800);
   assert.equal(all.values.msrp.total,2000);assert.equal(all.values.msrp.unrepaired,2000);assert.equal(all.values.cost.unrepaired,800);
   const m3=(await call('m3','GET','/rma')).json();assert.equal(m3.values.cost,undefined,'no cost values without cost access');assert.equal(m3.items[0].valueCost,undefined);
+ }finally{await app.close();}
+});
+
+test('photos can be deleted: managers any photo, the technician only their own; the history says so',async()=>{
+ const {db,app,call}=await setupRma();
+ try{
+  const png=Buffer.from('89504e470d0a1a0a0000000d49484452','hex').toString('base64');
+  await db.query(`UPDATE users SET grants='["returns"]' WHERE id='m3'`);
+  const id=(await call('m1','POST','/rma',{sku:'DEMO-A',qty:1,productClass:'accessory',repairable:'yes',reason:'示例退货',condition:'示例外观',receivedAt:'2026-11-01'})).json().id;
+  assert.equal((await call('m1','POST',`/rma/${id}/update`,{technicianId:'m3'})).statusCode,200);
+  const mine=(await call('m1','POST',`/rma/${id}/photos`,{kind:'received',name:'manager.png',mime:'image/png',dataBase64:png})).json().id;
+  const tech=(await call('m3','POST',`/rma/${id}/photos`,{kind:'diagnosis',name:'tech.png',mime:'image/png',dataBase64:png})).json().id;
+  assert.equal((await call('m3','POST',`/rma/${id}/photos/${mine}/delete`)).statusCode,403,'technician cannot delete the manager’s photo');
+  assert.equal((await call('m3','POST',`/rma/${id}/photos/${tech}/delete`)).statusCode,200,'technician deletes their own');
+  assert.equal((await call('m1','POST',`/rma/${id}/photos/${mine}/delete`)).statusCode,200,'manager deletes any');
+  assert.equal((await call('m1','POST',`/rma/${id}/photos/${mine}/delete`)).statusCode,404,'gone');
+  const d=(await call('m1','GET',`/rma/${id}`)).json();assert.equal(d.photos.length,0);
+  assert.equal(d.events.filter((e:any)=>String(e.action).startsWith('photo_deleted:')).length,2,'history keeps both deletions');
  }finally{await app.close();}
 });

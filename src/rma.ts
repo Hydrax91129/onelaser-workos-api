@@ -7,7 +7,8 @@
  * Returns and repairs are their own stock (owner, 2026-11-11): nothing here writes regular WMS stock, and WMS
  * never lists REF- SKUs or has a returns warehouse. The case's stage is the unit's stock state.
  * A restocked refurbished unit can get a discount and a listing status for selling on the website;
- * the grade chosen when restocking sets the discount (A untouched, sold as new, B 10% off, C 20% off).
+ * the grade chosen when restocking sets the discount (owner, 2026-11-12): A completely new (no discount), B open box 5% off,
+ * C open box with signs of use 10% off, D regular used 15% off, E damaged but functional 20% off.
  *
  * Access: anyone who can view warehouse stock can view cases; warehouse managers register and close
  * cases; the assigned technician can update diagnosis, photos and mark the repair done; prices are set
@@ -57,7 +58,16 @@ const CHANNELS = ['website', 'amazon', 'dealer', 'other'] as const;
 const PHOTO_KINDS = ['received', 'diagnosis', 'listing', 'repaired'] as const;
 const CLASSES = ['machine', 'accessory', 'material', 'other'] as const;
 /* Grade sets the refurbished discount: A = untouched, sold as new stock (no discount); B = 10% off; C = 20% off. */
-export const GRADE_DISCOUNT: Record<string, number> = { A: 0, B: 10, C: 20 };
+export const GRADE_DISCOUNT: Record<string, number> = { A: 0, B: 5, C: 10, D: 15, E: 20 };
+/** Once (2026-11-12): grades went from A / B 10% / C 20% to A–E. A case keeps the discount it was closed with;
+ *  its letter follows that discount (10% is now C, 20% is now E), so nothing shows a discount it did not get. */
+export async function migrateRmaGrades(db: Database) {
+  await db.transaction(async tx => {
+    if (!(await tx.query(`INSERT INTO erp_migrations(id) VALUES('rma_grades_v2') ON CONFLICT DO NOTHING RETURNING id`)).rows.length) return;
+    await tx.query(`UPDATE rma_cases SET grade = CASE WHEN discount_pct = 10 THEN 'C' WHEN discount_pct = 20 THEN 'E' ELSE grade END
+      WHERE grade IN ('B','C') AND discount_pct IN (10, 20)`);
+  });
+}
 const PHOTO_MIME = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 const MAX_PHOTO = 5 * 1024 * 1024, MAX_PHOTOS = 40;
 const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use a date like 2026-11-02');
@@ -68,6 +78,7 @@ const days = (a: any, b: any) => a && b ? Math.max(0, Math.round((new Date(b).ge
 const ymd = (v: any) => v ? (v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10)) : null;
 
 export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: { isAdmin: (u: User) => boolean; now?: () => number }) {
+  await migrateRmaGrades(db);
   const now = o.now || Date.now;
   const actorOf = (req: FastifyRequest): User => req.actor || deny(401, 'UNAUTHENTICATED', 'Authentication is required');
   const level = (u: User) => returnsLevelFor(u, o.isAdmin(u));
@@ -153,7 +164,7 @@ export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: {
     const c = await caseOf(db, u, id.parse(req.params.id));
     const { items, msrp, cat, ppl } = await lookups(u.org_id);
     const photos = (await db.query('SELECT id,kind,name,mime,size,uploader_id,created_at FROM rma_photos WHERE case_id=$1 ORDER BY created_at', [c.id])).rows
-      .map((p: any) => ({ id: p.id, kind: p.kind, name: p.name, size: Number(p.size), byName: nameOf(ppl.get(p.uploader_id)), createdAt: p.created_at }));
+      .map((p: any) => ({ id: p.id, kind: p.kind, name: p.name, size: Number(p.size), byName: nameOf(ppl.get(p.uploader_id)), createdAt: p.created_at, mine: p.uploader_id === u.id }));
     const events = (await db.query('SELECT * FROM rma_events WHERE case_id=$1 ORDER BY created_at, id', [c.id])).rows
       .map((e: any) => ({ id: e.id, action: e.action, note: e.note, byName: nameOf(ppl.get(e.actor_id)), at: e.created_at }));
     return { ...shape(c, ppl, items, msrp, photos.length, cat, costOk(u)), photos, events, canWork: canWork(u, c), canOperate: level(u) === 'manage', canPrice: canPrice(u) };
@@ -250,14 +261,14 @@ export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: {
     });
   });
 
-  const closeInput = z.object({ outcome: z.enum(['restock', 'scrap', 'return_customer']), location: z.string().max(20).optional() /* ignored: returns are not regular stock */, grade: z.enum(['A', 'B', 'C', 'new']).optional(), note: z.string().trim().max(1000).optional() }).strict();
+  const closeInput = z.object({ outcome: z.enum(['restock', 'scrap', 'return_customer']), location: z.string().max(20).optional() /* ignored: returns are not regular stock */, grade: z.enum(['A', 'B', 'C', 'D', 'E', 'new']).optional(), note: z.string().trim().max(1000).optional() }).strict();
   app.post<{ Params: { id: string } }>('/rma/:id/close', async req => {
     const u = actorOf(req), v = closeInput.parse(req.body), caseId = id.parse(req.params.id); requireManage(u);
     return db.transaction(async tx => {
       const c = await caseOf(tx, u, caseId, true);
       if (!OPEN.includes(c.status)) deny(409, 'RMA_CLOSED', 'This case is closed');
       if (v.outcome === 'restock') {
-        const grade = v.grade === 'new' ? 'A' : (v.grade || 'B'), pct = GRADE_DISCOUNT[grade];
+        const grade = v.grade === 'new' ? 'A' : (v.grade || 'C' /* 10% off, as before when no grade was sent */), pct = GRADE_DISCOUNT[grade];
         if (c.status !== 'repaired' && grade !== 'A') deny(400, 'RMA_NOT_REPAIRED', 'Mark the repair as done before putting it back into stock');
         await tx.query(`UPDATE rma_cases SET status='restocked',outcome='restock',restock_location=NULL,grade=$2,discount_pct=$3,sale_price=NULL,closed_at=now(),updated_at=now() WHERE id=$1`, [caseId, grade, pct]);
       } else {
@@ -308,6 +319,22 @@ export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: {
     });
     reply.code(201);
     return { id: photoId, kind: v.kind, name: v.name, size: data.length };
+  });
+
+  /* Delete a photo (owner, 2026-11-12): warehouse managers any photo, the assigned technician the photos they uploaded.
+     The case history keeps a line saying which photo was removed and by whom. */
+  app.post<{ Params: { id: string; photo: string } }>('/rma/:id/photos/:photo/delete', async req => {
+    const u = actorOf(req), caseId = id.parse(req.params.id), photoId = id.parse(req.params.photo);
+    const c = await caseOf(db, u, caseId);
+    if (!canWork(u, c)) deny(403, 'RMA_WORK_ONLY', 'Only warehouse managers or the assigned technician can update this case');
+    const p = (await db.query('SELECT id,kind,name,uploader_id FROM rma_photos WHERE id=$1 AND case_id=$2 AND org_id=$3', [photoId, caseId, u.org_id])).rows[0];
+    if (!p) deny(404, 'RMA_PHOTO_NOT_FOUND', 'This photo was not found');
+    if (level(u) !== 'manage' && p.uploader_id !== u.id) deny(403, 'RMA_PHOTO_NOT_YOURS', 'Only a warehouse manager can delete a photo someone else uploaded');
+    await db.transaction(async tx => {
+      await tx.query('DELETE FROM rma_photos WHERE id=$1', [p.id]);
+      await event(tx, u, caseId, 'photo_deleted:' + p.kind, p.name);
+    });
+    return { ok: true };
   });
 
   app.get<{ Params: { id: string; photo: string } }>('/rma/:id/photos/:photo', async (req, reply) => {

@@ -159,7 +159,7 @@ const app = await buildApp({
     const parts = await make('DEMO-SN-002', 6, '示例：雕刻偏移；已部分退款');
     await call('POST', `/rma/${parts}/update`, { technicianId: 'm1', status: 'waiting_parts', waitingFor: '示例同步带 ×1' });
     const fixed = await make('DEMO-SN-003', 9, '示例：风扇异响；已全额退款'); await repair(fixed);
-    for (const [serial, listing, grade] of [['DEMO-SN-004', 'listed', 'B'], ['DEMO-SN-005', 'sold', 'C']] as const) {
+    for (const [serial, listing, grade] of [['DEMO-SN-004', 'listed', 'B'], ['DEMO-SN-005', 'sold', 'D']] as const) {
       const id = await make(serial, 14, '示例：客户七天无理由退货'); await repair(id);
       await call('POST', `/rma/${id}/close`, { outcome: 'restock', grade });
       await call('POST', `/rma/${id}/price`, { listing });
