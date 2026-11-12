@@ -341,7 +341,8 @@ export async function registerProductLibraryRoutes(app: FastifyInstance, db: Dat
   app.get('/products/library/files/:id', async (req, reply) => {
     const u = actorOf(req), f = await fileOf(u, String((req.params as any).id));
     const data = (await db.query('SELECT data FROM product_files WHERE id=$1', [f.id])).rows[0].data;
-    return reply.header('content-type', f.mime).header('cache-control', 'private, no-store').header('x-content-type-options', 'nosniff')
+    // A stored file never changes under its id, so the browser may keep images (product thumbnails in lists); other files are not kept.
+    return reply.header('content-type', f.mime).header('cache-control', f.mime.startsWith('image/') ? 'private, max-age=86400, immutable' : 'private, no-store').header('x-content-type-options', 'nosniff')
       .header('content-disposition', `${f.mime.startsWith('image/') || f.mime === 'application/pdf' ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(f.name)}`).send(Buffer.from(data));
   });
   app.delete('/products/library/files/:id', async req => {
