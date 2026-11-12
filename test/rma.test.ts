@@ -6,6 +6,7 @@ import {issueSession} from '../src/auth.js';
 
 test('returns & repairs: register, diagnose, photos, repaired, put away for sale inside the returns module (no WMS stock), price for the website',async()=>{
  const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ await db.query(`INSERT INTO product_catalog(org_id,sku,name_zh,msrp) SELECT org_id,'DEMO-A','示例主机 A',1000 FROM users WHERE id='m1' ON CONFLICT DO NOTHING`); // returns link to a product-library SKU
  const clock=()=>new Date('2026-11-10T18:00:00Z').getTime();
  const app=await buildApp({db,integrations:{executiveUserIds:['m1']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0,clock});
  const tokens:Record<string,string>={};
@@ -14,7 +15,7 @@ test('returns & repairs: register, diagnose, photos, repaired, put away for sale
  try{
   assert.equal((await call('m1','GET','/capabilities')).json().rma,true);
   await call('m1','POST','/wms/import',{asOf:'2026-10-31',rows:[{sku:'DEMO-A',name:'Demo machine A',type:'整机',qty:{us:5}}]});
-  await db.query("INSERT INTO product_catalog(org_id,sku,msrp) SELECT org_id,'DEMO-A',4000 FROM users WHERE id='m1'");
+  await db.query("INSERT INTO product_catalog(org_id,sku,msrp) SELECT org_id,'DEMO-A',4000 FROM users WHERE id='m1' ON CONFLICT(org_id,sku) DO UPDATE SET msrp=EXCLUDED.msrp");
   assert.equal((await call('m2','GET','/rma')).statusCode,403,'no returns access');
   assert.equal((await call('m1','POST','/rma',{sku:'NOPE',serial:'S1',productClass:'machine',repairable:'yes',condition:'外观完好',reason:'坏了',receivedAt:'2026-11-01'})).statusCode,400,'unknown SKUs that are not RE- are refused');
   assert.equal((await call('m1','POST','/rma',{sku:'DEMO-A',serial:'S1',productClass:'machine',repairable:'yes',condition:'外观完好',reason:'坏了',receivedAt:'2026-12-30'})).statusCode,400,'no future dates');
@@ -88,6 +89,7 @@ test('returns stay out of regular stock: REF- SKUs never show or move in WMS, no
 
 async function setupRma(){
  const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ await db.query(`INSERT INTO product_catalog(org_id,sku,name_zh,msrp) SELECT org_id,'DEMO-A','示例主机 A',1000 FROM users WHERE id='m1' ON CONFLICT DO NOTHING`); // returns link to a product-library SKU
  const clock=()=>new Date('2026-11-10T18:00:00Z').getTime();
  const app=await buildApp({db,integrations:{executiveUserIds:['m1']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0,clock});
  const tokens:Record<string,string>={};
@@ -107,7 +109,7 @@ test('register a return: item class, serial required for machines, repairable, n
   const c=(await call('m1','GET',`/rma/${r.json().id}`)).json();
   assert.equal(c.sku,'REF-demo-a');assert.equal(c.productClass,'machine');assert.equal(c.repairable,'no','repairable may still be sent');assert.equal(c.discountPct,null);assert.equal(c.stage,'waiting_repair');
   const org=(await db.query(`SELECT org_id FROM users WHERE id='m1'`)).rows[0].org_id;
-  await db.query(`INSERT INTO product_catalog(org_id,sku,msrp) VALUES($1,'DEMO-A',4000)`,[org]);
+  await db.query(`INSERT INTO product_catalog(org_id,sku,msrp) VALUES($1,'DEMO-A',4000) ON CONFLICT(org_id,sku) DO UPDATE SET msrp=EXCLUDED.msrp`,[org]);
   assert.equal((await call('m1','GET',`/rma/${r.json().id}`)).json().msrp,4000,'a REF- SKU uses the MSRP of its model');
   const it=(await db.query(`SELECT name,type FROM wms_items WHERE org_id=$1 AND sku='REF-demo-a'`,[org])).rows[0];assert.equal(it.type,'return');assert.match(it.name,/退货/);
   assert.equal((await call('m1','POST','/rma',{...base,sku:'REF-demo-a',productClass:'accessory'})).statusCode,201,'the second return reuses the REF- SKU');
@@ -126,5 +128,28 @@ test('grade sets the discount: A untouched goes back as new stock, B 10% off, C 
   const ca=(await call('m1','GET',`/rma/${a}`)).json();assert.equal(ca.discountPct,0);assert.equal(ca.restockLocation,null,'returns are not regular stock');
   const c=(await call('m1','POST','/rma',base)).json().id;
   assert.equal((await call('m1','POST',`/rma/${c}/close`,{outcome:'restock',grade:'C'})).statusCode,400,'B and C must be repaired first');
+ }finally{await app.close();}
+});
+
+test('returns: handler and technician are two people; the return links to a product-library SKU; values by stage (MSRP for everyone, cost for cost access)',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ const org=(await db.query("SELECT org_id FROM users WHERE id='m1'")).rows[0].org_id;
+ await db.query(`INSERT INTO product_catalog(org_id,sku,name_zh,msrp) VALUES($1,'DEMO-M',$2,1000)`,[org,'示例主机 M']);
+ await db.query(`INSERT INTO product_pricing(org_id,sku,landed_usd) VALUES($1,'DEMO-M',400) ON CONFLICT(org_id,sku) DO UPDATE SET landed_usd=400`,[org]);
+ await db.query(`UPDATE users SET grants='["returns","returns_manage"]' WHERE id='m2'`);await db.query(`UPDATE users SET grants='["returns"]' WHERE id='m3'`);
+ const app=await buildApp({db,integrations:{executiveUserIds:['m1']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
+ const tokens:Record<string,string>={};
+ const call=async(who:string,method:'GET'|'POST',url:string,payload?:any)=>{tokens[who]??=(await issueSession(db,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who],'accept-language':'zh-CN'}});};
+ try{
+  const base={productClass:'machine',serial:'SN-DEMO-1',reason:'示例：开机不出光',condition:'示例：外箱破损',receivedAt:'2026-11-05'};
+  const bad=await call('m1','POST','/rma',{...base,sku:'REF-NOTHING-1'});assert.equal(bad.statusCode,400);assert.match(bad.json().error.message,/主 SKU/,'a made-up return SKU needs a main SKU from the product library');
+  assert.equal((await call('m1','POST','/rma',{...base,sku:'REF-CUSTOM-9',mainSku:'DEMO-M',handlerId:'m3'})).json().error.code,'RMA_HANDLER','the handler manages returns');
+  const r=await call('m1','POST','/rma',{...base,sku:'REF-CUSTOM-9',mainSku:'demo-m',handlerId:'m2',qty:2});assert.equal(r.statusCode,201,r.body);
+  await call('m1','POST',`/rma/${r.json().id}/update`,{technicianId:'m3'});
+  const all=(await call('m1','GET','/rma')).json(), c=all.items.find((x:any)=>x.id===r.json().id);
+  assert.deepEqual([c.mainSku,c.mainName,c.handlerName!=='',c.technicianId],['DEMO-M','示例主机 M',true,'m3'],'handler and technician both shown');
+  assert.equal(c.valueMsrp,2000);assert.equal(c.valueCost,800);
+  assert.equal(all.values.msrp.total,2000);assert.equal(all.values.msrp.unrepaired,2000);assert.equal(all.values.cost.unrepaired,800);
+  const m3=(await call('m3','GET','/rma')).json();assert.equal(m3.values.cost,undefined,'no cost values without cost access');assert.equal(m3.items[0].valueCost,undefined);
  }finally{await app.close();}
 });

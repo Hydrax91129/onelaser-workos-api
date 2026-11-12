@@ -245,7 +245,11 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     const movements = all.map(movementOut(u, people, await batchesOf(u.org_id, all)));
     const level = warehouseLevel(u);
     // Product facts for the filters (family, series, MSRP: all public in the product library) and shelf bins per location.
-    const facts = new Map((await db.query(`SELECT lower(sku) k, family, COALESCE(attrs->>'series','') series, COALESCE(attrs->>'brand','') brand, status, msrp, name_zh, name_en FROM product_catalog WHERE org_id=$1`, [u.org_id])).rows.map((r: any) => [r.k, r]));
+    const facts = new Map((await db.query(`SELECT lower(c.sku) k, c.family, COALESCE(c.attrs->>'series','') series, COALESCE(c.attrs->>'brand','') brand, c.status, c.msrp, c.name_zh, c.name_en, p.landed_usd
+      FROM product_catalog c LEFT JOIN product_pricing p ON p.org_id=c.org_id AND p.sku=c.sku WHERE c.org_id=$1`, [u.org_id])).rows.map((r: any) => [r.k, r]));
+    // Stock value per warehouse: MSRP value for everyone who sees stock; landed-cost value only for cost access and main admins.
+    const costOk = o.isAdmin(u) || grantsOf(u).includes('product_cost_detail'), r2 = (n: number) => Math.round(n * 100) / 100;
+    const value = (k: 'msrp' | 'landed_usd') => Object.fromEntries(LOCATIONS.map(l => [l.id, r2(items.reduce((a: number, it: any) => { const f: any = facts.get(it.sku.toLowerCase()); const unit = f?.[k] == null ? 0 : Number(f[k]); return a + unit * Number(qty.get(it.sku)?.[l.id] || 0); }, 0))]));
     // The product's main image (visible to everyone in the product library), shown small next to the SKU.
     const images = new Map((await db.query(`SELECT DISTINCT ON (lower(sku)) lower(sku) k, id FROM product_files WHERE org_id=$1 AND slot='mainImage' ORDER BY lower(sku), created_at DESC`, [u.org_id])).rows.map((r: any) => [r.k, r.id]));
     const bins = new Map<string, Record<string, string[]>>();
@@ -255,6 +259,7 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
       bins.get(k)![r.location] = [r.bin1, r.bin2, r.bin3]; binQty.get(k)![r.location] = [r.qty1, r.qty2, r.qty3].map(Number);
     }
     return {
+      values: { msrp: value('msrp'), ...(costOk ? { cost: value('landed_usd') } : {}) },
       locations: LOCATIONS, families: FAMILIES.map(([key, zh, en]) => ({ key, zh, en })), statuses: STATUSES.map(([key, zh, en]) => ({ key, zh, en })),
       items: items.map((it: any) => { const f: any = facts.get(it.sku.toLowerCase()) || {};
         return { ...it, qty: qty.get(it.sku) || {}, family: f.family || '', series: f.series || '', msrp: f.msrp == null ? null : Number(f.msrp),
