@@ -203,6 +203,13 @@ const app = await buildApp({
   const token = (await issueSession(db, 'm1')).accessToken;
   for (const [sku, bins] of [['DEMO-F2-60W', ['A-01-01', 'A-01-02', '']], ['DEMO-F2-100W', ['A-02-01', '', '']], ['DEMO-LENS-2', ['C-10-03', 'C-10-04', 'D-01-01']]] as const)
     await app.inject({ method: 'POST', url: '/wms/bins', payload: { sku, location: 'us', bins: [...bins] }, headers: { authorization: `Bearer ${token}` } });
+  // Put most of the US stock away: the first bin gets all but 3, the second bin the rest (fictional).
+  const items = (await app.inject({ method: 'GET', url: '/wms/summary', headers: { authorization: `Bearer ${token}` } })).json().items;
+  for (const it of items.filter((x: any) => x.bins?.us?.[0] && Number(x.qty?.us || 0) > 0)) {
+    const total = Number(it.qty.us), second = it.bins.us[1] ? Math.min(3, total) : 0;
+    if (total - second > 0) await app.inject({ method: 'POST', url: '/wms/bins/move', payload: { sku: it.sku, location: 'us', from: 0, to: 1, qty: total - second }, headers: { authorization: `Bearer ${token}` } });
+    if (second) await app.inject({ method: 'POST', url: '/wms/bins/move', payload: { sku: it.sku, location: 'us', from: 0, to: 2, qty: second }, headers: { authorization: `Bearer ${token}` } });
+  }
 }
 
 const TYPES: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.otf': 'font/otf', '.woff2': 'font/woff2', '.png': 'image/png', '.json': 'application/json', '.webp': 'image/webp', '.ico': 'image/x-icon' };
