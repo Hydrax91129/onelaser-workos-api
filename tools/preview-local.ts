@@ -254,7 +254,8 @@ createServer(async (req, res) => {
       const r = await app.inject({ method: 'POST', url: '/auth/password', payload: { email: `${who}@workos.test`, password: PASSWORD }, headers: { origin: ORIGIN } });
       res.writeHead(302, { location: '/', 'set-cookie': r.headers['set-cookie'] as any, 'cache-control': 'no-store' }); return res.end();
     }
-    if ((url.pathname === '/' || url.pathname === '/index.html') && !/workos[^=]*session|session[^=]*=/i.test(String(req.headers.cookie || ''))) {
+    // A cookie from an earlier deploy points at a session that no longer exists (data resets on every start), so check it instead of trusting it.
+    if ((url.pathname === '/' || url.pathname === '/index.html') && (await app.inject({ method: 'GET', url: '/me', headers: { cookie: String(req.headers.cookie || '') } })).statusCode !== 200) {
       res.writeHead(302, { location: '/preview-enter?as=owner', 'cache-control': 'no-store' }); return res.end();
     }
     if (url.pathname === '/build-info.json') { res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); return res.end(JSON.stringify({ frontendCommit: FRONTEND_COMMIT, preview: true })); }
