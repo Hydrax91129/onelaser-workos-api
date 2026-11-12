@@ -167,3 +167,26 @@ test('WMS: one order with many SKUs (out), a count of many SKUs, operation dates
   assert.deepEqual([x2.family,x2.series,x2.msrp],['acc','XRF',59]);assert.ok(s2.families.some((f:any)=>f.key==='acc'));
  }finally{await app.close();}
 });
+
+test('returns and repairs have their own access: warehouse people keep it once, then it is set on its own; managers may set it for their reports',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ await db.query(`UPDATE users SET manager_id='m4' WHERE id IN ('m5','m6')`);
+ await db.query(`UPDATE users SET grants='["warehouse","warehouse_manage"]' WHERE id='m5'`);await db.query(`UPDATE users SET grants='["warehouse"]' WHERE id='m6'`);
+ const app=await buildApp({db,integrations:{executiveUserIds:['m1']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
+ const tokens:Record<string,string>={};
+ const call=async(who:string,method:'GET'|'POST',url:string,payload?:any)=>{tokens[who]??=(await issueSession(db,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who]}});};
+ try{
+  const acc=async(id:string)=>(await call('m1','GET','/erp/access')).json().people.find((p:any)=>p.id===id).access;
+  assert.equal((await acc('m5')).returns,'manage','warehouse managers keep managing returns');assert.equal((await acc('m6')).returns,'view');
+  assert.equal((await call('m6','GET','/rma')).statusCode,200);
+  // From now on it is separate: removing returns leaves warehouse alone
+  assert.equal((await call('m1','POST','/erp/access',{userId:'m6',area:'returns',level:'none'})).json().access.warehouse,'view');
+  assert.equal((await call('m6','GET','/rma')).statusCode,403);
+  // A restart does not hand it back
+  await (await import('../src/wms.js')).migrateReturnsAccess(db);assert.equal((await acc('m6')).returns,'none');
+  // Managers set returns (and warehouse) for their own reports only
+  assert.equal((await call('m4','POST','/erp/access',{userId:'m6',area:'returns',level:'manage'})).statusCode,200);
+  assert.equal((await call('m4','POST','/erp/access',{userId:'m2',area:'returns',level:'view'})).statusCode,403);
+  assert.equal((await call('m4','POST','/erp/access',{userId:'m6',area:'pricing',level:'msrp'})).statusCode,403);
+ }finally{await app.close();}
+});

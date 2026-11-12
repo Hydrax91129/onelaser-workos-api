@@ -288,6 +288,30 @@ export async function registerMemberRoutes(app: FastifyInstance, db: Database, o
     return signIn(reply, user.id);
   });
 
+  // Email + password sign-in for an account that signs in with DingTalk (or changing the sign-in email). The person does it
+  // themselves while signed in; the email must not be anyone else's sign-in email; an existing password is required to change it.
+  app.get('/me/login', async req => {
+    const user = actorOf(req);
+    const r = (await db.query('SELECT login_email,(password_hash IS NOT NULL) AS has_password FROM users WHERE id=$1', [user.id])).rows[0];
+    return { loginEmail: r?.login_email || '', hasPassword: !!r?.has_password };
+  });
+  app.post('/me/login', async req => {
+    const user = actorOf(req);
+    const input = z.object({ email, newPassword: password, currentPassword: z.string().max(200).optional() }).strict().parse(req.body);
+    limit('me-login:' + user.id, 10, 15 * 60_000);
+    return db.transaction(async tx => {
+      const row = (await tx.query('SELECT login_email,password_hash FROM users WHERE id=$1 FOR UPDATE', [user.id])).rows[0];
+      if (row?.password_hash && !(await verifyPassword(input.currentPassword || '', row.password_hash))) deny(401, 'INVALID_CREDENTIALS', 'Email or password is incorrect');
+      if ((await tx.query("SELECT 1 FROM users WHERE lower(login_email)=$1 AND login_email<>'' AND id<>$2", [input.email, user.id])).rows.length)
+        deny(409, 'LOGIN_EMAIL_TAKEN', 'Another account already signs in with this email', '这个邮箱已经被别的账号用来登录了，请换一个。');
+      await tx.query('UPDATE users SET login_email=$2,password_hash=$3 WHERE id=$1', [user.id, input.email, await hashPassword(input.newPassword)]);
+      await tx.query('DELETE FROM sessions WHERE user_id=$1 AND token_hash<>$2', [user.id, hash(req.sessionToken || '')]);
+      await tx.query('INSERT INTO audit_events(id,org_id,department_id,owner_id,actor_id,action,object_id,details) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',
+        [randomUUID(), user.org_id, user.department_id, user.id, user.id, 'auth.login_email_set', user.id, JSON.stringify({ email: input.email, hadPassword: !!row?.password_hash })]);
+      return { loginEmail: input.email, hasPassword: true };
+    });
+  });
+
   app.post('/me/password', async req => {
     const user = actorOf(req);
     const input = z.object({ currentPassword: z.string().max(200).optional(), newPassword: password }).strict().parse(req.body);

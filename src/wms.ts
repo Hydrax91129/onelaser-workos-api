@@ -10,6 +10,7 @@
  *   pricing   none / msrp (pricing_msrp) / full (product_cost_detail)
  *   supply    none / view (supply) / manage (supply_manage)
  *   warehouse none / view (warehouse) / manage (warehouse_manage)
+ *   returns   none / view (returns) / manage (returns_manage)   — returns and repairs (rma.ts), set on its own
  * Company admins can do everything. Managers can view stock and set warehouse access
  * for the people who report to them.
  *
@@ -38,6 +39,7 @@ CREATE INDEX IF NOT EXISTS wms_movements_pending ON wms_movements(org_id,created
 ALTER TABLE wms_movements ADD COLUMN IF NOT EXISTS op_date date;
 CREATE TABLE IF NOT EXISTS wms_bins(org_id text NOT NULL, sku text NOT NULL, location text NOT NULL, bin1 text NOT NULL DEFAULT '', bin2 text NOT NULL DEFAULT '',
   bin3 text NOT NULL DEFAULT '', updated_by text, updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(org_id,sku,location));
+CREATE TABLE IF NOT EXISTS erp_migrations(id text PRIMARY KEY, done_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS wms_imports(id text PRIMARY KEY, org_id text NOT NULL, as_of date NOT NULL, rows integer NOT NULL, created_by text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
 `;
 
@@ -55,7 +57,7 @@ const returnSkuDenied = (skus: string[]) => deny(400, 'WMS_RETURN_SKU', `Returne
   `REF- 开头的退货 SKU 在“退货维修”里管理，不进常规库存：${skus.slice(0, 10).join('、')}`);
 const LOC_IDS = LOCATIONS.map(l => l.id) as [string, ...string[]];
 
-export const ERP_GRANTS = ['products_manage', 'products_import', 'pricing_msrp', 'supply', 'supply_manage', 'warehouse', 'warehouse_manage', 'dealers', 'dealers_manage'] as const;
+export const ERP_GRANTS = ['products_manage', 'products_import', 'pricing_msrp', 'supply', 'supply_manage', 'warehouse', 'warehouse_manage', 'returns', 'returns_manage', 'dealers', 'dealers_manage'] as const;
 const AREAS: Record<string, Record<string, string[]>> = {
   products: { none: [], view: ['products'], manage: ['products', 'products_manage'] },
   /** 批量更新（SKU 与价格）: upload, preview, confirm and undo bulk updates of the product library. Main admins choose who. */
@@ -63,6 +65,8 @@ const AREAS: Record<string, Record<string, string[]>> = {
   pricing: { none: [], msrp: ['pricing_msrp'], full: ['product_cost_detail'] },
   supply: { none: [], view: ['supply'], manage: ['supply', 'supply_manage'] },
   warehouse: { none: [], view: ['warehouse'], manage: ['warehouse', 'warehouse_manage'] },
+  /** 退货维修 has its own access (set on the returns page); until 2026-11 it followed warehouse access, see migrateReturnsAccess. */
+  returns: { none: [], view: ['returns'], manage: ['returns', 'returns_manage'] },
   dealers: { none: [], view: ['dealers'], manage: ['dealers', 'dealers_manage'] },
 };
 const areaGrants = (area: string) => [...new Set(Object.values(AREAS[area]).flat())];
@@ -77,6 +81,21 @@ export const warehouseLevelFor = (u: any, admin: boolean) => {
   if (lv !== 'none') return lv;
   return u.role === 'manager' || g.includes('products') ? 'view' : 'none';
 };
+/** Returns and repairs access: admins manage; otherwise from the returns grants; managers and product people can view. */
+export const returnsLevelFor = (u: any, admin: boolean) => {
+  if (admin) return 'manage';
+  const g: string[] = Array.isArray(u.grants) ? u.grants : [], lv = levelOf(g, 'returns');
+  if (lv !== 'none') return lv;
+  return u.role === 'manager' || g.includes('products') ? 'view' : 'none';
+};
+/** Once: people who had warehouse access keep the same access to returns when returns get their own grants. */
+export async function migrateReturnsAccess(db: Database) {
+  await db.transaction(async tx => {
+    if (!(await tx.query(`INSERT INTO erp_migrations(id) VALUES('returns_grants_v1') ON CONFLICT DO NOTHING RETURNING id`)).rows.length) return;
+    for (const [from, add] of [['warehouse', 'returns'], ['warehouse_manage', 'returns_manage']])
+      await tx.query(`UPDATE users SET grants = grants || $2::jsonb WHERE grants ? $1 AND NOT grants ? $3`, [from, JSON.stringify([add]), add]);
+  });
+}
 export const accessOf = (grants: string[]) => Object.fromEntries(Object.keys(AREAS).map(a => [a, levelOf(grants, a)]));
 
 /** Operation date (操作日期): defaults to today in the form, the operator may change it; not before 2000 and not after tomorrow. */
@@ -116,6 +135,7 @@ export async function adoptCatalogItems(tx: Queryable, org: string, actorId: str
 }
 
 export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: { isAdmin: (u: User) => boolean }) {
+  await migrateReturnsAccess(db);
   const actorOf = (req: FastifyRequest): User => req.actor || deny(401, 'UNAUTHENTICATED', 'Authentication is required');
   const grantsOf = (u: any): string[] => Array.isArray(u.grants) ? u.grants : [];
   const warehouseLevel = (u: User) => {
@@ -399,12 +419,12 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     const rows = (await db.query('SELECT id,display_name,name_zh,name_en,title,location,grants FROM users WHERE org_id=$1 AND active=true ORDER BY display_name,id', [u.org_id])).rows
       .filter((p: any) => admin || mine.has(p.id));
     return {
-      canAdmin: admin, canWarehouse: admin || manager,
+      canAdmin: admin, canWarehouse: admin || manager, canReturns: admin || manager,
       people: rows.map((p: any) => ({ id: p.id, name: nameOf(p), title: p.title || '', location: p.location || '', reportsToMe: mine.has(p.id), access: accessOf(grantsOf(p)) })),
     };
   });
 
-  const accessInput = z.object({ userId: uid, area: z.enum(['products', 'import', 'pricing', 'supply', 'warehouse', 'dealers']), level: z.string().min(1).max(20) }).strict();
+  const accessInput = z.object({ userId: uid, area: z.enum(['products', 'import', 'pricing', 'supply', 'warehouse', 'returns', 'dealers']), level: z.string().min(1).max(20) }).strict();
   app.post('/erp/access', async req => {
     const u = actorOf(req), v = accessInput.parse(req.body), admin = o.isAdmin(u);
     if (!(v.level in AREAS[v.area])) deny(400, 'INVALID_ACCESS_LEVEL', 'Choose a valid access level');
@@ -412,8 +432,8 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
       const p = (await tx.query('SELECT id,grants FROM users WHERE id=$1 AND org_id=$2 AND active=true FOR UPDATE', [v.userId, u.org_id])).rows[0];
       if (!p) deny(404, 'NOT_FOUND', 'Member not found');
       if (!admin) {
-        if (v.area !== 'warehouse' || (u as any).role !== 'manager' || !(await reportsOf(tx, u.org_id, u.id)).has(p.id))
-          deny(403, 'ERP_ACCESS_FORBIDDEN', 'Managers can only set warehouse access for their own reports');
+        if (!['warehouse', 'returns'].includes(v.area) || (u as any).role !== 'manager' || !(await reportsOf(tx, u.org_id, u.id)).has(p.id))
+          deny(403, 'ERP_ACCESS_FORBIDDEN', 'Managers can only set warehouse and returns access for their own reports', '主管只能给自己的下属设置仓库库存和退货维修权限。');
       }
       const before = grantsOf(p);
       let next = [...before.filter(g => !areaGrants(v.area).includes(g)), ...AREAS[v.area][v.level]];
