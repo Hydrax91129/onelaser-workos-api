@@ -13,7 +13,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
 import { deny } from './errors.js';
-import { LOCATIONS, adoptCatalogItems } from './wms.js';
+import { LOCATIONS, adoptCatalogItems, binsAfterChange } from './wms.js';
 import { accountOut, CARRIERS, money, ORDER_STATUSES, orderLines, orderOut, sendMail, setStatus, profileComplete, type DealerOptions } from './dealer.js';
 
 const uuid = z.string().uuid();
@@ -166,6 +166,7 @@ export async function registerDealerAdminRoutes(app: FastifyInstance, db: Databa
           const have = Number((await tx.query('SELECT qty FROM wms_stock WHERE org_id=$1 AND sku=$2 AND location=$3 FOR UPDATE', [orgId, item.sku, v.location])).rows[0]?.qty ?? 0);
           if (have < l.qty) deny(409, 'WMS_NEGATIVE_STOCK', `Not enough stock of ${l.sku}: ${have} on hand, ${l.qty} needed`, `${l.sku} 库存不足：现有 ${have} 件，需要 ${l.qty} 件`);
           await tx.query('UPDATE wms_stock SET qty=$4 WHERE org_id=$1 AND sku=$2 AND location=$3', [orgId, item.sku, v.location, have - l.qty]);
+          await binsAfterChange(tx, orgId!, item.sku, v.location!, -l.qty, have - l.qty);
           await tx.query(`INSERT INTO wms_movements(id,org_id,type,sku,location,qty,reason,reference,status,created_by) VALUES($1,$2,'out',$3,$4,$5,$6,$7,'done',$8)`,
             [randomUUID(), orgId, item.sku, v.location, -l.qty, `Dealer order ${order.number} · ${dealer.company}`.slice(0, 500), order.number, u.id]);
         }
