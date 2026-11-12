@@ -1,9 +1,9 @@
-# OneLaser WorkOS（craftos.app）— 所有 Claude Code 会话必读
+# OneLaser WorkOS（erp.1laser.com）— 所有 Claude Code 会话必读
 
 这份文件放在两个仓库的根目录（onelaser-workos 前端、onelaser-workos-api 后端），内容相同。
 新增模块、新增共享数据表或改了下面任何约定，必须在同一个提交里更新这份文件（两个仓库都改）。
 
-产品名统一叫 **WorkOS**（不再用 CraftOS）；正式域名仍是 craftos.app，不要改域名。
+产品名统一叫 **WorkOS**（不再用 CraftOS）。正式域名改为 **erp.1laser.com**（2026-11-12 老板定），不再改。切换期间 craftos.app 照常可用；Render 环境变量 `APP_PUBLIC_URL` 改成 `https://erp.1laser.com` 后，旧域名（craftos.app、onrender.com）的页面自动跳到新域名（deploy/Caddyfile 的 `@old_origin_pages`；`/api`、`/.well-known`、健康检查不跳，外部回调不受影响）。切换步骤见后端 deploy/README.md。代码里不要写死域名，用 `appPublicUrl`。
 
 仓库是公开的：这里和代码里都不能出现密钥、真实成本、真实库存、员工薪资或任何客户数据。
 
@@ -36,7 +36,7 @@
 | 质量追踪 | quality.ts | quality.js | quality_issues、quality_plans |
 | KOL ROI | — | kol.js | （待补充） |
 | Bug 与建议、版本记录 | feedback.ts | feedback.js, changelog.js | feedback |
-| AI 连接（WorkOS MCP） | mcp.ts | mcp-connect.js | mcp_clients、mcp_auth_codes、mcp_tokens、mcp_calls。`https://craftos.app/api/mcp` 给老板自己的 Claude（OAuth）或 Composio（个人令牌）用；只有 `WORKOS_MCP_USER_IDS` 里、同时是主管理员的人能连，见第 3 节第 10 条 |
+| AI 连接（WorkOS MCP） | mcp.ts | mcp-connect.js | mcp_clients、mcp_auth_codes、mcp_tokens、mcp_calls。`https://erp.1laser.com/api/mcp`（切换前是 craftos.app）给老板自己的 Claude（OAuth）或 Composio（个人令牌）用；只有 `WORKOS_MCP_USER_IDS` 里、同时是主管理员的人能连，见第 3 节第 10 条 |
 | CalDock（Mac mini 托管） | caldock*.ts | 独立前端仓库 | caldock_*，与 WorkOS 用户完全隔离 |
 
 ## 3. 共享数据规则（最重要）
@@ -113,5 +113,5 @@
 2. 后端 `main` 有新提交且 CI 通过后，Render 自动部署 `main`（Auto-Deploy：After CI checks pass）。
 3. **禁止**：在 Render 点手动部署、通过 API 触发部署、修改 Render 服务的分支或其他设置、部署不在 `main` 上的提交、强推任何不属于自己的分支。
    需要改环境变量或 Render 设置时，请用户本人在 Render 后台操作。
-4. 核对上线：打开 https://craftos.app/build-info.json，`frontendCommit` 等于（或包含）你的前端提交才算上线。没核对之前不能说"已上线"。
+4. 核对上线：打开 https://erp.1laser.com/build-info.json（切换前用 craftos.app），`frontendCommit` 等于（或包含）你的前端提交才算上线。没核对之前不能说"已上线"。
 5. 线上出问题需要回滚：在 `main` 上用 `git revert` 撤销有问题的提交并走 PR，不要部署旧分支（旧分支会把别人已上线的功能一起回滚掉）。

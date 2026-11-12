@@ -12,7 +12,7 @@
  *
  * To preview a pull request: check out its branch in ../onelaser-workos (and here, for backend changes), then run this.
  * Hosted test site: Dockerfile.preview builds this with the frontend commit in deploy/preview-frontend-revision.txt;
- * a separate Render service deploys the claude/preview branch. It never shares a database with craftos.app. */
+ * a separate Render service deploys the claude/preview branch. It never shares a database with production (erp.1laser.com). */
 import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize, resolve } from 'node:path';
@@ -26,7 +26,7 @@ const PORT = Number(process.env.PORT || 4174), HOST = process.env.HOST || '127.0
 const ORIGIN = (process.env.RENDER_EXTERNAL_URL || process.env.PREVIEW_PUBLIC_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
 const DIST = resolve(process.env.FRONTEND_DIST || resolve(import.meta.dirname, '..', '..', 'onelaser-workos', 'dist'));
 const FRONTEND_COMMIT = (await readFile(process.env.PREVIEW_FRONTEND_COMMIT_FILE || '/nonexistent', 'utf8').catch(() => 'local')).trim();
-// A strip on every page so nobody mistakes the test site for craftos.app.
+// A strip on every page so nobody mistakes the test site for production.
 const BANNER = `<div style="position:fixed;left:50%;bottom:10px;transform:translateX(-50%);z-index:9999;background:#a15c00;color:#fff;font:600 12px system-ui;padding:5px 12px;border-radius:999px;box-shadow:0 4px 14px #0003;pointer-events:none">测试站 · 虚构数据，每次部署都会重置 · Test site, fictional data · ${FRONTEND_COMMIT.slice(0, 7)}</div>`;
 const PASSWORD = process.env.PREVIEW_PASSWORD || 'workos-preview', ORG = 'demo';
 if (process.env.RENDER && !process.env.PREVIEW_PASSWORD) throw new Error('Set PREVIEW_PASSWORD on the hosted test site; the default password is public.');

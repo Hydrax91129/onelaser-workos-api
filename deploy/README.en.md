@@ -43,6 +43,17 @@ An enterprise administrator must grant the independent app its login identity, e
 
 See the [Bot integration guide](../docs/integrations/GROK_BOT_SETUP.en.md). Deploy the base service and DingTalk login, configure administrator-verified callbacks and any required pinned client ID, then connect OAuth MCP. A manager explicitly approves and clicks Return to Bot. OAuth can connect before webhook settings are complete; actual assessments still require the dedicated Routine URL, secret and hostname. An empty callback allowlist disables OAuth, without static-secret or anonymous fallback. The template requires no model API credits. Webhook acceptance only starts execution; completion returns separately. Bot usage has plan limits, and account-wide shared computer/logins mean a separate workflow does not replace server authorization.
 
+### Move to erp.1laser.com (owner, 2026-11-12)
+
+1. Render → onelaser-workos-migration → Settings → Custom Domains: add `erp.1laser.com` and note the CNAME target Render shows.
+2. In the 1laser.com DNS add a CNAME: host `erp`, value the target above. Wait until Render shows the domain verified and the certificate issued. Both domains then open; sign-in and saving wait for step 4.
+3. DingTalk developer console: point the homepage and login callback at `https://erp.1laser.com/...` (and `DINGTALK_REDIRECT_URI` if set).
+4. Set the Render environment variable `APP_PUBLIC_URL=https://erp.1laser.com` (saving redeploys). Pages on craftos.app and onrender.com then redirect (307) to the new domain (`@old_origin_pages`); `/api/*`, `/.well-known/*`, health checks and `/caldock` do not, so callbacks registered on the old domain (payments, Bot, webhooks) keep working until each is moved.
+5. Everyone signs in once on the new domain (sessions are per domain; data is unchanged). Reconnect the owner's Claude / Composio at `https://erp.1laser.com/api/mcp`; update the Grok Bot MCP URL; move the Stripe webhook if dealer payments are live.
+6. Check `https://erp.1laser.com/build-info.json` and that `https://craftos.app/` redirects. Keep craftos.app renewed for a few months for the redirect.
+
+Roll back by setting `APP_PUBLIC_URL` back to `https://craftos.app` (the redirect is a temporary 307, browsers do not cache it).
+
 ### Cut over to craftos.app
 
 Verify `craftos.app` DNS, Render domain verification and HTTPS before setting `APP_PUBLIC_URL=https://craftos.app`. Update the DingTalk homepage and login callback together, including `DINGTALK_REDIRECT_URI` if it is explicitly set. Only this exact origin (optionally ending in `/`) enables a 307 redirect from `onelaser-workos.onrender.com`, preserving the path, query and method with `no-store`. `/healthz` and `/api/health` continue to answer health probes directly. All URLs retain their previous behavior before cutover; restoring the old `APP_PUBLIC_URL` disables the redirect.
