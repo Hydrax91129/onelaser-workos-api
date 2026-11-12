@@ -92,9 +92,11 @@ jobs:
         # The optional repository secret _GITHUB_FETCH_TOKEN (GitHub rejects secret names that start with
         # GITHUB_) lets the build download the frontend and Wiki once those repositories are private. It
         # reaches the build as the BuildKit secret GITHUB_FETCH_TOKEN, not as a build arg.
+        # CALDOCK_FETCH_TOKEN does the same for the private CalDock repository, which has a different owner.
         env:
           FETCH_TOKEN: ${{ secrets['_GITHUB_FETCH_TOKEN'] }}
-        run: docker build --secret id=GITHUB_FETCH_TOKEN,env=FETCH_TOKEN -t workos-ci .
+          CALDOCK_TOKEN: ${{ secrets.CALDOCK_FETCH_TOKEN }}
+        run: docker build --secret id=GITHUB_FETCH_TOKEN,env=FETCH_TOKEN --secret id=CALDOCK_FETCH_TOKEN,env=CALDOCK_TOKEN -t workos-ci .
       - name: Verify private import CLI is included in the production image
         run: docker run --rm --entrypoint node workos-ci build/src/cli/import-okr.js --help
       - name: Test canonical redirect with production Caddy

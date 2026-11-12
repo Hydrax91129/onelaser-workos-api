@@ -59,7 +59,8 @@ The Docker build downloads the pinned frontend (`Hydrax91129/onelaser-workos`) a
 2. Render: add a **Secret File** named `GITHUB_FETCH_TOKEN` (Environment → Secret Files) containing the token; plain environment variables do not reach the Docker build. The Dockerfile reads it as a BuildKit secret (`RUN --mount=type=secret,id=GITHUB_FETCH_TOKEN,dst=/etc/secrets/GITHUB_FETCH_TOKEN`), not ARG/ENV, so it never lands in an image layer.
 3. GitHub CI: add the Actions secret `_GITHUB_FETCH_TOKEN` to this repository (GitHub rejects secret names starting with `GITHUB_`); `ci.yml` passes it with `docker build --secret`.
 4. Check: the build log prints `GITHUB_FETCH_TOKEN: used` (whether it was used, never the value). Make the repositories private only after both the Render and CI logs say `used`. `not provided` means the token did not reach the build.
-5. Without a token the scripts download anonymously; an invalid token fails the build (401/404) instead of silently falling back. CalDock (`Yonge6/mac-mini-rental`) is unaffected and stays anonymous.
+5. Without a token the scripts download anonymously; an invalid token fails the build (401/404) instead of silently falling back. 
+6. CalDock (`Yonge6/mac-mini-rental`) belongs to a different GitHub account and a fine-grained token covers only one owner, so it has its own token, `CALDOCK_FETCH_TOKEN`: created in the Yonge6 account, limited to that one repository, Contents: Read-only. Use that name for both the Render Secret File and the backend repository's Actions secret; build logs print `CALDOCK_FETCH_TOKEN: used`. When the token expires the build fails and the live site stays on the previous version until the token is replaced. `deploy/compose.yaml` does not pass this token.
 
 ## Existing server alternative
 

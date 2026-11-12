@@ -17,7 +17,8 @@ RUN --mount=type=secret,id=GITHUB_FETCH_TOKEN,dst=/etc/secrets/GITHUB_FETCH_TOKE
     node tools/fetch-wiki.mjs /wiki
 COPY tools/fetch-caldock.mjs ./tools/fetch-caldock.mjs
 COPY deploy/caldock-revision.txt ./deploy/caldock-revision.txt
-RUN node tools/fetch-caldock.mjs /caldock-source
+RUN --mount=type=secret,id=CALDOCK_FETCH_TOKEN,dst=/etc/secrets/CALDOCK_FETCH_TOKEN \
+    node tools/fetch-caldock.mjs /caldock-source
 RUN cd /caldock-source && npm ci --no-audit --no-fund && npm run build
 
 FROM caddy:2 AS edge
