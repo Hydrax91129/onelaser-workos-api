@@ -67,13 +67,13 @@ test('WMS batch goods in and batch transfer: all lines or none',async()=>{
  const call=async(who:string,method:'GET'|'POST',url:string,payload?:any)=>{tokens[who]??=(await issueSession(db,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who]}});};
  try{
   await call('m1','POST','/wms/import',{asOf:'2026-10-31',rows:[{sku:'A-1',qty:{us:0,transit:5}},{sku:'B-2',qty:{us:1}}]});
-  const bad=await call('m1','POST','/wms/movements/batch',{type:'in',location:'us',reason:'柜子到货',lines:[{sku:'A-1',qty:2},{sku:'NOPE',qty:1}]});assert.equal(bad.statusCode,400);
+  const bad=await call('m1','POST','/wms/movements/batch',{opDate:'2026-11-05',type:'in',location:'us',reason:'柜子到货',lines:[{sku:'A-1',qty:2},{sku:'NOPE',qty:1}]});assert.equal(bad.statusCode,400);
   const q=async(s:string,l:string)=>Number((await call('m1','GET','/wms/summary')).json().items.find((i:any)=>i.sku===s).qty[l]||0);
   assert.equal(await q('A-1','us'),0,'nothing applied when one line is wrong');
-  const ok=await call('m1','POST','/wms/movements/batch',{type:'in',location:'us',reason:'柜子到货',reference:'MSKU-1',lines:[{sku:'a-1',qty:2},{sku:'B-2',qty:3},{sku:'A-1',qty:1}]});assert.equal(ok.statusCode,201,ok.body);assert.deepEqual(ok.json(),{lines:2,units:6});
+  const ok=await call('m1','POST','/wms/movements/batch',{opDate:'2026-11-05',type:'in',location:'us',reason:'柜子到货',reference:'MSKU-1',lines:[{sku:'a-1',qty:2},{sku:'B-2',qty:3},{sku:'A-1',qty:1}]});assert.equal(ok.statusCode,201,ok.body);assert.equal(ok.json().lines,2);assert.equal(ok.json().units,6);
   assert.equal(await q('A-1','us'),3);assert.equal(await q('B-2','us'),4);
-  assert.equal((await call('m1','POST','/wms/movements/batch',{type:'transfer',location:'transit',toLocation:'us',reason:'到港入仓',lines:[{sku:'A-1',qty:9}]})).statusCode,409,'cannot move more than is there');
-  assert.equal((await call('m1','POST','/wms/movements/batch',{type:'transfer',location:'transit',toLocation:'us',reason:'到港入仓',lines:[{sku:'A-1',qty:5}]})).statusCode,201);
+  assert.equal((await call('m1','POST','/wms/movements/batch',{opDate:'2026-11-05',type:'transfer',location:'transit',toLocation:'us',reason:'到港入仓',lines:[{sku:'A-1',qty:9}]})).statusCode,409,'cannot move more than is there');
+  assert.equal((await call('m1','POST','/wms/movements/batch',{opDate:'2026-11-05',type:'transfer',location:'transit',toLocation:'us',reason:'到港入仓',lines:[{sku:'A-1',qty:5}]})).statusCode,201);
   assert.equal(await q('A-1','us'),8);assert.equal(await q('A-1','transit'),0);
  }finally{await app.close();}
 });
@@ -115,11 +115,55 @@ test('WMS: SKUs in the product library are warehouse SKUs without adding them ag
 
   const one=await call('POST','/wms/movements',{type:'in',sku:'LIB-HOST-01',location:'us',qty:1,reason:'采购到货'});assert.equal(one.statusCode,201,one.body);
   assert.equal((await item('LIB-HOST-01')).qty.us,1);
-  const batch=await call('POST','/wms/movements/batch',{type:'in',location:'us',reason:'采购到货',lines:[{sku:'lib-part-02',qty:4},{sku:'LIB-HOST-01',qty:2}]});
+  const batch=await call('POST','/wms/movements/batch',{opDate:'2026-11-05',type:'in',location:'us',reason:'采购到货',lines:[{sku:'lib-part-02',qty:4},{sku:'LIB-HOST-01',qty:2}]});
   assert.equal(batch.statusCode,201,batch.body);
   assert.equal((await item('LIB-PART-02')).qty.us,4);assert.equal((await item('LIB-HOST-01')).qty.us,3);
   assert.equal((await call('GET','/wms/summary')).json().items.filter((i:any)=>i.sku.startsWith('LIB-')).length,2,'listed once after the first movement');
-  assert.equal((await call('POST','/wms/movements/batch',{type:'in',location:'us',reason:'采购到货',lines:[{sku:'NOT-IN-LIBRARY',qty:1}]})).statusCode,400);
+  assert.equal((await call('POST','/wms/movements/batch',{opDate:'2026-11-05',type:'in',location:'us',reason:'采购到货',lines:[{sku:'NOT-IN-LIBRARY',qty:1}]})).statusCode,400);
   assert.equal((await call('POST','/wms/movements',{type:'in',sku:'NOT-IN-LIBRARY',location:'us',qty:1,reason:'采购到货'})).statusCode,404);
+ }finally{await app.close();}
+});
+
+test('WMS: one order with many SKUs (out), a count of many SKUs, operation dates, how each movement was made, shelf bins, product filters',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ const app=await buildApp({db,integrations:{executiveUserIds:['m1']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
+ const tokens:Record<string,string>={};
+ const call=async(who:string,method:'GET'|'POST',url:string,payload?:any,lang='en')=>{tokens[who]??=(await issueSession(db,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who],'accept-language':lang}});};
+ const sum=async()=>(await call('m1','GET','/wms/summary')).json();
+ const q=async(s:string,l:string)=>Number((await sum()).items.find((i:any)=>i.sku===s).qty[l]||0);
+ try{
+  await call('m1','POST','/wms/import',{asOf:'2026-10-31',rows:[{sku:'X-1',qty:{us:10}},{sku:'X-2',qty:{us:4}},{sku:'X-3',qty:{us:7}}]});
+  const base={type:'out',location:'us',reason:'销售发货',opDate:'2026-11-06'};
+  // Goods out: the order number is required, every line must have enough stock, all or nothing
+  assert.equal((await call('m1','POST','/wms/movements/batch',{...base,lines:[{sku:'X-1',qty:1}]})).json().error.code,'WMS_REFERENCE_REQUIRED');
+  const short=await call('m1','POST','/wms/movements/batch',{...base,reference:'SO-9001',lines:[{sku:'X-1',qty:2},{sku:'X-2',qty:5}]},'zh-CN');
+  assert.equal(short.statusCode,409);assert.match(short.json().error.message,/X-2 库存不足/);assert.equal(await q('X-1','us'),10,'nothing applied');
+  const out=await call('m1','POST','/wms/movements/batch',{...base,reference:'SO-9001',lines:[{sku:'X-1',qty:2},{sku:'X-2',qty:1}]});
+  assert.equal(out.statusCode,201,out.body);assert.equal(await q('X-1','us'),8);assert.equal(await q('X-2','us'),3);
+  // Operation date: required for a batch, not in the future, not before 2000
+  const {opDate:_d,...noDate}=base;
+  assert.equal((await call('m1','POST','/wms/movements/batch',{...noDate,reference:'SO-1',lines:[{sku:'X-1',qty:1}]})).statusCode,400);
+  for(const d of ['1999-12-31','2099-01-01']){const r=await call('m1','POST','/wms/movements/batch',{...base,opDate:d,reference:'SO-1',lines:[{sku:'X-1',qty:1}]},'zh-CN');assert.equal(r.json().error.code,'WMS_OP_DATE');assert.match(r.json().error.message,/操作日期/);}
+  // A count of several SKUs: lines that match the system are skipped; the rest wait for the manager
+  const cnt=await call('m1','POST','/wms/movements/batch',{type:'adjust',location:'us',reason:'月底盘点',opDate:'2026-11-07',lines:[{sku:'X-1',counted:8},{sku:'X-2',counted:2},{sku:'X-3',counted:9}]});
+  assert.equal(cnt.statusCode,201,cnt.body);assert.deepEqual([cnt.json().lines,cnt.json().unchanged,cnt.json().status],[2,1,'pending']);
+  assert.equal(await q('X-3','us'),7,'a count changes nothing until it is confirmed');
+  assert.equal((await call('m1','POST','/wms/movements/batch',{type:'adjust',location:'us',reason:'月底盘点',opDate:'2026-11-07',lines:[{sku:'X-1',counted:1},{sku:'x-1',counted:2}]})).json().error.code,'WMS_DUPLICATE_LINE');
+  // The log says how each movement was made and when
+  const s1=await sum(), mv=(sku:string,type:string)=>s1.movements.find((m:any)=>m.sku===sku&&m.type===type);
+  assert.deepEqual([mv('X-1','out').method,mv('X-1','out').batchSkus,mv('X-1','out').batchUnits,mv('X-1','out').opDate],['batch',2,3,'2026-11-06']);
+  assert.equal(mv('X-3','adjust').status,'pending');assert.equal(mv('X-3','adjust').opDate,'2026-11-07');
+  const imp=s1.movements.find((m:any)=>m.reference==='IMPORT');assert.equal(imp.method,'import');assert.equal(imp.opDate,'2026-10-31','the import is dated as of the stock sheet');
+  await call('m1','POST','/wms/movements',{type:'in',sku:'X-3',location:'us',qty:1,reason:'采购到货',opDate:'2026-11-08'});
+  const one=(await sum()).movements.find((m:any)=>m.sku==='X-3'&&m.type==='in');assert.deepEqual([one.method,one.opDate],['manual','2026-11-08']);
+  // Shelf bins: a preferred bin and two alternates per warehouse
+  assert.equal((await call('m1','POST','/wms/bins',{sku:'X-1',location:'us',bins:['','B-02']})).json().error.code,'WMS_BIN_PRIMARY');
+  assert.equal((await call('m1','POST','/wms/bins',{sku:'X-1',location:'us',bins:['A-01-03','B-02','C-07']})).statusCode,200);
+  assert.deepEqual((await sum()).items.find((i:any)=>i.sku==='X-1').bins,{us:['A-01-03','B-02','C-07']});
+  assert.equal((await call('m4','POST','/wms/bins',{sku:'X-1',location:'us',bins:['Z-1']})).statusCode,403,'view access cannot change bins');
+  // Product facts for the filters come from the product library
+  await db.query(`INSERT INTO product_catalog(org_id,sku,name_zh,msrp,family,attrs) SELECT org_id,'X-2','示例配件',59,'acc','{"series":"XRF"}' FROM users WHERE id='m1'`);
+  const s2=await sum(), x2=s2.items.find((i:any)=>i.sku==='X-2');
+  assert.deepEqual([x2.family,x2.series,x2.msrp],['acc','XRF',59]);assert.ok(s2.families.some((f:any)=>f.key==='acc'));
  }finally{await app.close();}
 });

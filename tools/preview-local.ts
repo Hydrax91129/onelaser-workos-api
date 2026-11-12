@@ -186,6 +186,13 @@ const app = await buildApp({
   }
 }
 
+// Example shelf bins in the US LA warehouse (fictional).
+{
+  const token = (await issueSession(db, 'm1')).accessToken;
+  for (const [sku, bins] of [['DEMO-F2-60W', ['A-01-01', 'A-01-02', '']], ['DEMO-F2-100W', ['A-02-01', '', '']], ['DEMO-LENS-2', ['C-10-03', 'C-10-04', 'D-01-01']]] as const)
+    await app.inject({ method: 'POST', url: '/wms/bins', payload: { sku, location: 'us', bins: [...bins] }, headers: { authorization: `Bearer ${token}` } });
+}
+
 const TYPES: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.otf': 'font/otf', '.woff2': 'font/woff2', '.png': 'image/png', '.json': 'application/json', '.webp': 'image/webp', '.ico': 'image/x-icon' };
 createServer(async (req, res) => {
   try {
