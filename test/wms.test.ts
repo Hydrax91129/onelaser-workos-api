@@ -5,7 +5,7 @@ import {buildApp} from '../src/app.js';
 import {issueSession} from '../src/auth.js';
 
 // Demo org: m1 is the executive admin (marketing manager), m2/m3 report to m1; m4 manages product, m5/m6 report to m4.
-test('WMS: import, goods in/out/transfer, count adjustments confirmed by the manager, ERP access levels',async()=>{
+test('WMS: import, goods in/out/transfer, count adjustments confirmed by another warehouse manager, ERP access levels',async()=>{
  const db=await createDatabase();await db.exec(schema);await seedDemo(db);
  await db.query(`UPDATE users SET manager_id='m1' WHERE id IN ('m2','m3')`);await db.query(`UPDATE users SET manager_id='m4' WHERE id IN ('m5','m6')`);
  const app=await buildApp({db,integrations:{executiveUserIds:['m1']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
@@ -30,7 +30,7 @@ test('WMS: import, goods in/out/transfer, count adjustments confirmed by the man
   assert.equal((await call('m4','POST','/erp/access',{userId:'m2',area:'warehouse',level:'view'})).statusCode,403,'not m4’s report');
   assert.equal((await call('m4','POST','/erp/access',{userId:'m5',area:'products',level:'view'})).statusCode,403,'managers set warehouse only');
   const set=await call('m4','POST','/erp/access',{userId:'m5',area:'warehouse',level:'manage'});assert.equal(set.statusCode,200,set.body);assert.equal(set.json().access.warehouse,'manage');
-  const full=await call('m1','POST','/erp/access',{userId:'m6',area:'pricing',level:'full'});assert.equal(full.json().access.products,'view','full price build-up brings product access');
+  const full=await call('m1','POST','/erp/access',{userId:'m6',area:'pricing',level:'view'});assert.equal(full.json().access.products,'view','price access brings product access');
   const list=(await call('m4','GET','/erp/access')).json();assert.deepEqual(list.people.map((p:any)=>p.id).sort(),['m5','m6'],'managers only see their reports');
 
   // Movements by the warehouse manager m5.
@@ -44,12 +44,20 @@ test('WMS: import, goods in/out/transfer, count adjustments confirmed by the man
   assert.equal(await qty('DEMO-A','dg'),6);assert.equal(await qty('DEMO-A','transit'),6);
   assert.equal((await call('m5','POST','/wms/movements',{type:'in',sku:'NOPE',location:'us',qty:1,reason:'采购到货'})).statusCode,404);
 
-  // Count adjustment: pending until m5's manager (m4) or an admin confirms; m6 cannot.
+  // Count adjustment: pending until ANOTHER person with 库存·管理 confirms; with nobody else, the main admins (owner, 2026-11-12).
   const adj=await call('m5','POST','/wms/movements',{type:'adjust',sku:'DEMO-A',location:'us',counted:4,reason:'盘点差异'});assert.equal(adj.statusCode,201,adj.body);assert.equal(adj.json().status,'pending');
   assert.equal(await qty('DEMO-A','us'),6,'pending adjustments do not change stock');
   assert.equal((await call('m5','POST',`/wms/movements/${adj.json().id}/approve`,{})).statusCode,403,'cannot confirm your own');
-  assert.equal((await summary('m4')).movements.find((m:any)=>m.id===adj.json().id).canDecide,true);
-  assert.equal((await call('m4','POST',`/wms/movements/${adj.json().id}/approve`,{})).statusCode,200);
+  const pend=(who:string)=>summary(who).then((x:any)=>x.movements.find((m:any)=>m.id===adj.json().id));
+  assert.equal((await pend('m4')).canDecide,false,'a line manager without 库存·管理 cannot confirm');
+  const deny=await call('m4','POST',`/wms/movements/${adj.json().id}/approve`,{});assert.equal(deny.statusCode,403);assert.match(deny.json().error.message,/另一位有库存管理权限/);
+  const m1name=(await db.query("SELECT display_name FROM users WHERE id='m1'")).rows[0].display_name;
+  assert.deepEqual((await pend('m5')).confirmers,[m1name],'nobody else manages the warehouse: the main admin confirms, and the page says so');
+  // Another warehouse manager (m6) becomes the one to confirm
+  await call('m1','POST','/erp/access',{userId:'m6',area:'warehouse',level:'manage'});
+  const m6name=(await db.query("SELECT display_name FROM users WHERE id='m6'")).rows[0].display_name;
+  assert.deepEqual((await pend('m5')).confirmers,[m6name]);assert.equal((await pend('m6')).canDecide,true);
+  assert.equal((await call('m6','POST',`/wms/movements/${adj.json().id}/approve`,{})).statusCode,200);
   assert.equal(await qty('DEMO-A','us'),4);
   assert.equal((await call('m1','POST',`/wms/movements/${adj.json().id}/reject`,{})).statusCode,409,'already decided');
 
@@ -187,7 +195,7 @@ test('returns and repairs have their own access: warehouse people keep it once, 
   // Managers set returns (and warehouse) for their own reports only
   assert.equal((await call('m4','POST','/erp/access',{userId:'m6',area:'returns',level:'manage'})).statusCode,200);
   assert.equal((await call('m4','POST','/erp/access',{userId:'m2',area:'returns',level:'view'})).statusCode,403);
-  assert.equal((await call('m4','POST','/erp/access',{userId:'m6',area:'pricing',level:'msrp'})).statusCode,403);
+  assert.equal((await call('m4','POST','/erp/access',{userId:'m6',area:'pricing',level:'view'})).statusCode,403);
  }finally{await app.close();}
 });
 

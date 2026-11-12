@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS user_avatars(user_id text PRIMARY KEY REFERENCES user
 export const PUBLIC_USER_COLUMNS = 'id,display_name,name_zh,name_en,department_id,role,title,phone,email,wechat,location,timezone,manager_id,second_manager_id,avatar_version,quality_factory';
 
 /** Feature grants an admin can give in the app. `products` opens the product test area; `product_cost_detail` shows how prices are calculated. */
-export const GRANTS = ['products', 'product_cost_detail', 'products_manage', 'products_import', 'finance_view', 'finance_manage', 'pricing_msrp', 'supply', 'supply_manage', 'warehouse', 'warehouse_manage', 'returns', 'returns_manage', 'dealers', 'dealers_manage',
+export const GRANTS = ['products', 'products_secret', 'product_cost_detail', 'pricing_edit', 'products_manage', 'products_import', 'finance_view', 'finance_manage', 'pricing_msrp', 'supply', 'supply_manage', 'warehouse', 'warehouse_manage', 'returns', 'returns_manage', 'dealers', 'dealers_manage',
   /* HR records per region (hr.ts): view = read-only, manage = edit */ ...HR_GRANTS] as const;
 const id = z.string().min(1).max(100).regex(/^[A-Za-z0-9_-]+$/);
 const text = (max: number) => z.string().trim().max(max);

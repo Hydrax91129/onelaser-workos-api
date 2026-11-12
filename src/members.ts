@@ -142,7 +142,11 @@ export async function registerMemberRoutes(app: FastifyInstance, db: Database, o
         heir = (await tx.query('SELECT * FROM users WHERE id=$1 AND org_id=$2 AND active=true', [input.reassignTo, user.org_id])).rows[0];
         if (!heir || heir.id === member.id || heir.department_id !== member.department_id) deny(400, 'INVALID_REASSIGNEE', 'Choose an active member of the same department to take over open tasks');
       }
-      await tx.query('UPDATE users SET active=false,disabled_at=now(),disabled_by=$2 WHERE id=$1', [member.id, user.id]);
+      // Leaving the company ends every permission (owner's rule, 2026-11-12): feature grants and the admin tick are cleared in the
+      // same transaction and are not given back when the account is re-enabled; what was cleared is kept in the audit log.
+      await tx.query(`UPDATE users SET active=false,disabled_at=now(),disabled_by=$2,grants='[]'::jsonb,is_admin=false WHERE id=$1`, [member.id, user.id]);
+      if ((Array.isArray(member.grants) && member.grants.length) || member.is_admin)
+        await audit(tx, user, 'org.member_access_cleared', member.id, { grants: member.grants || [], isAdmin: !!member.is_admin }, member.id);
       await tx.query('DELETE FROM sessions WHERE user_id=$1', [member.id]);
       await hrMarkLeft(tx, user.org_id, member.id, user.id);
       // Direct reports move up one level so their reporting line stays intact.

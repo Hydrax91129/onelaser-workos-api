@@ -15,7 +15,7 @@ async function setup(){
  const db=await createDatabase();await db.exec(schema);await seedDemo(db);
  // m1 main admin; m2 product area (ops); m3 products + products_manage; m5 products + cost; m6 no grants (全员 only)
  await db.query(`UPDATE users SET grants='["products"]' WHERE id='m2'`);
- await db.query(`UPDATE users SET grants='["products","products_manage"]' WHERE id='m3'`);
+ await db.query(`UPDATE users SET grants='["products","products_secret","products_manage"]' WHERE id='m3'`);
  await db.query(`UPDATE users SET grants='["products","product_cost_detail"]' WHERE id='m5'`);
  await db.query(`UPDATE users SET grants='[]' WHERE id='m6'`);
  const app=await buildApp({db,integrations:{executiveUserIds:['m1']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
@@ -83,8 +83,9 @@ test('product library: visibility on every response, editing rights, SKU and REF
   assert.equal(c.statusCode,201,c.body);
   assert.equal((await call('m3','POST','/products/library',{sku:'odl-demo-1'})).statusCode,409);
   assert.equal((await call('m3','POST','/products/library',{sku:'bad sku!'})).statusCode,400);
-  // Product managers cannot write cost or sensitive fields; cost holders can.
-  assert.equal((await call('m3','PATCH','/products/library/ODL-DEMO-1',{values:{supplier:'示例工厂'}})).statusCode,400);
+  // 管理信息 (m3) edits every field, the confidential ones too; a view-only person (m2) cannot.
+  assert.equal((await call('m2','PATCH','/products/library/ODL-DEMO-1',{values:{supplier:'示例工厂'}})).statusCode,400);
+  assert.equal((await call('m3','PATCH','/products/library/ODL-DEMO-1',{values:{supplier:'示例工厂'}})).statusCode,200);
   const s=await call('m5','PATCH','/products/library/odl-demo-1',{values:{supplier:'示例工厂',landed:1000,lastMile:100,hsCode:'0000.00.0000'}});assert.equal(s.statusCode,200,s.body);
   assert.equal((await call('m1','PATCH','/products/library/ODL-DEMO-1',{values:{msrp:2000,map:1900}})).statusCode,200);
   // Core fields cannot be cleared; return SKU rules
@@ -115,7 +116,7 @@ test('product library: visibility on every response, editing rights, SKU and REF
   assert.equal(admin.viewer.canImport,true);assert.equal(cost.viewer.canImport,false);
   // Files: sensitive slots for cost holders only; PDF-only slots; main image for product managers
   const pdf=Buffer.from('%PDF-1.4 fictional').toString('base64');
-  assert.equal((await call('m3','POST','/products/library/ODL-DEMO-1/files/manual',{name:'manual.pdf',dataBase64:pdf})).statusCode,403);
+  assert.equal((await call('m2','POST','/products/library/ODL-DEMO-1/files/manual',{name:'manual.pdf',dataBase64:pdf})).statusCode,403,'view-only cannot upload files');
   assert.equal((await call('m5','POST','/products/library/ODL-DEMO-1/files/spareParts',{name:'parts.csv',dataBase64:pdf})).statusCode,400,'PDF only');
   assert.equal((await call('m5','POST','/products/library/ODL-DEMO-1/files/manual',{name:'manual.docx',dataBase64:pdf})).statusCode,400,'Word not accepted');
   const up=await call('m5','POST','/products/library/ODL-DEMO-1/files/manual',{name:'manual-v1.pdf',dataBase64:pdf});assert.equal(up.statusCode,201,up.body);

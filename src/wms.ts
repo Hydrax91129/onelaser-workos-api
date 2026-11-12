@@ -3,11 +3,11 @@
  * Stock is kept per SKU and location. Every change is a movement row (who, when, how many,
  * why, reference); the stock table is only ever changed in the same transaction as the
  * movement that explains it, and can never go negative. Count adjustments wait for the
- * submitter's manager (or a company admin) to confirm before they touch stock.
+ * another person with 库存·管理 (or, when there is none, a main admin) to confirm before they touch stock.
  *
  * Access levels come from user grants and are set on the ERP permissions page:
- *   products  none / view (products) / manage (products_manage)
- *   pricing   none / msrp (pricing_msrp) / full (product_cost_detail)
+ *   products  none / view (products) / secret (+ products_secret) / manage (+ products_manage)
+ *   pricing   none / view (product_cost_detail) / edit (+ pricing_edit) / manage (+ products_import: bulk updates)
  *   supply    none / view (supply) / manage (supply_manage)
  *   warehouse none / view (warehouse) / manage (warehouse_manage)
  *   returns   none / view (returns) / manage (returns_manage)   — returns and repairs (rma.ts), set on its own
@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS wms_bins(org_id text NOT NULL, sku text NOT NULL, loc
 ALTER TABLE wms_bins ADD COLUMN IF NOT EXISTS qty1 integer NOT NULL DEFAULT 0;
 ALTER TABLE wms_bins ADD COLUMN IF NOT EXISTS qty2 integer NOT NULL DEFAULT 0;
 ALTER TABLE wms_bins ADD COLUMN IF NOT EXISTS qty3 integer NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS wms_bin_codes(org_id text NOT NULL, location text NOT NULL, code text NOT NULL, note text NOT NULL DEFAULT '',
+  created_by text, created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(org_id,location,code));
 CREATE TABLE IF NOT EXISTS erp_migrations(id text PRIMARY KEY, done_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS wms_imports(id text PRIMARY KEY, org_id text NOT NULL, as_of date NOT NULL, rows integer NOT NULL, created_by text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
 `;
@@ -60,12 +62,12 @@ const returnSkuDenied = (skus: string[]) => deny(400, 'WMS_RETURN_SKU', `Returne
   `REF- 开头的退货 SKU 在“退货维修”里管理，不进常规库存：${skus.slice(0, 10).join('、')}`);
 const LOC_IDS = LOCATIONS.map(l => l.id) as [string, ...string[]];
 
-export const ERP_GRANTS = ['products_manage', 'products_import', 'pricing_msrp', 'supply', 'supply_manage', 'warehouse', 'warehouse_manage', 'returns', 'returns_manage', 'dealers', 'dealers_manage'] as const;
+export const ERP_GRANTS = ['products_secret', 'products_manage', 'product_cost_detail', 'pricing_edit', 'products_import', 'supply', 'supply_manage', 'warehouse', 'warehouse_manage', 'returns', 'returns_manage', 'dealers', 'dealers_manage'] as const;
 const AREAS: Record<string, Record<string, string[]>> = {
-  products: { none: [], view: ['products'], manage: ['products', 'products_manage'] },
-  /** 批量更新（SKU 与价格）: upload, preview, confirm and undo bulk updates of the product library. Main admins choose who. */
-  import: { none: [], allow: ['products_import'] },
-  pricing: { none: [], msrp: ['pricing_msrp'], full: ['product_cost_detail'] },
+  /** 产品资料 (owner's levels, 2026-11-12): 无 / 查看普通信息 / 查看保密信息 (suppliers, landed cost, files…) / 管理信息 (edit everything). */
+  products: { none: [], view: ['products'], secret: ['products', 'products_secret'], manage: ['products', 'products_secret', 'products_manage'] },
+  /** 价格: 无 / 查看 (price build-up, cost and margin) / 单项修改 (one SKU at a time) / 管理 (also bulk updates). Price parameters stay main-admin only. */
+  pricing: { none: [], view: ['product_cost_detail'], edit: ['product_cost_detail', 'pricing_edit'], manage: ['product_cost_detail', 'pricing_edit', 'products_import'] },
   supply: { none: [], view: ['supply'], manage: ['supply', 'supply_manage'] },
   warehouse: { none: [], view: ['warehouse'], manage: ['warehouse', 'warehouse_manage'] },
   /** 退货维修 has its own access (set on the returns page); until 2026-11 it followed warehouse access, see migrateReturnsAccess. */
@@ -122,9 +124,10 @@ const changeStock = async (tx: Queryable, org: string, s: string, loc: string, d
 /** Stock movements for other modules (SCM shipments): goods in, or a transfer between warehouses, many SKUs, in the
  *  caller's transaction, logged like the warehouse's own batch. WMS stays the only writer of stock. Returns the lines
  *  with the stored SKU spelling. */
-export async function wmsMoveLines(tx: Queryable, u: User, v: { type: 'in' | 'transfer'; from: string; to: string; lines: { sku: string; qty: number }[]; reason: string; reference?: string; opDate: string }) {
+export async function wmsMoveLines(tx: Queryable, u: User, v: { type: 'in' | 'transfer'; from: string; to: string; lines: { sku: string; qty: number; slot?: number }[]; reason: string; reference?: string; opDate: string }) {
   const ref = v.lines.map(l => l.sku).filter(isReturnSku); if (ref.length) returnSkuDenied(ref);
-  const merged = new Map<string, number>(); for (const l of v.lines) merged.set(l.sku.toLowerCase(), (merged.get(l.sku.toLowerCase()) || 0) + l.qty);
+  const merged = new Map<string, number>(), slots = new Map<string, number>();
+  for (const l of v.lines) { merged.set(l.sku.toLowerCase(), (merged.get(l.sku.toLowerCase()) || 0) + l.qty); if (l.slot) slots.set(l.sku.toLowerCase(), l.slot); }
   await adoptCatalogItems(tx, u.org_id, u.id, [...merged.keys()]);
   const known = new Map(((await tx.query('SELECT sku FROM wms_items WHERE org_id=$1', [u.org_id])).rows as { sku: string }[]).map(i => [i.sku.toLowerCase(), i.sku]));
   const missing = [...merged.keys()].filter(k => !known.has(k));
@@ -132,8 +135,9 @@ export async function wmsMoveLines(tx: Queryable, u: User, v: { type: 'in' | 'tr
   const out: { sku: string; qty: number }[] = [];
   for (const [k, qty] of merged) {
     const s = known.get(k)!;
-    if (v.type === 'in') await changeStock(tx, u.org_id, s, v.to, qty);
-    else { await changeStock(tx, u.org_id, s, v.from, -qty); await changeStock(tx, u.org_id, s, v.to, qty); }
+    const into = slots.has(k) ? { slot: slots.get(k) } : {};
+    if (v.type === 'in') await changeStock(tx, u.org_id, s, v.to, qty, into);
+    else { await changeStock(tx, u.org_id, s, v.from, -qty); await changeStock(tx, u.org_id, s, v.to, qty, into); }
     await tx.query(`INSERT INTO wms_movements(id,org_id,type,sku,location,to_location,qty,reason,reference,status,created_by,op_date) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'done',$10,$11)`,
       [randomUUID(), u.org_id, v.type, s, v.type === 'in' ? v.to : v.from, v.type === 'transfer' ? v.to : null, qty, v.reason.slice(0, 200), v.reference || null, u.id, v.opDate]);
     out.push({ sku: s, qty });
@@ -153,6 +157,23 @@ export async function migrateReturnsAccess(db: Database) {
     if (!(await tx.query(`INSERT INTO erp_migrations(id) VALUES('returns_grants_v1') ON CONFLICT DO NOTHING RETURNING id`)).rows.length) return;
     for (const [from, add] of [['warehouse', 'returns'], ['warehouse_manage', 'returns_manage']])
       await tx.query(`UPDATE users SET grants = grants || $2::jsonb WHERE grants ? $1 AND NOT grants ? $3`, [from, JSON.stringify([add]), add]);
+  });
+}
+/** Once (2026-11-12): products and pricing move to four levels each. Nobody gains visibility they did not have:
+ *  - the old full price build-up (product_cost_detail: see and edit cost) becomes pricing 单项修改, plus 查看保密信息 with product access,
+ *    and pricing 管理 when they also had bulk updates;
+ *  - product managers without cost access drop to 查看普通信息 (管理 now includes the confidential fields), bulk updates likewise;
+ *  - the old MSRP-only level (pricing_msrp) ends. */
+export async function migrateProductPricingLevels(db: Database) {
+  await db.transaction(async tx => {
+    if (!(await tx.query(`INSERT INTO erp_migrations(id) VALUES('product_pricing_levels_v1') ON CONFLICT DO NOTHING RETURNING id`)).rows.length) return;
+    for (const r of (await tx.query(`SELECT id,grants FROM users WHERE grants ?| array['product_cost_detail','products_manage','products_import','pricing_msrp']`)).rows) {
+      const g = new Set<string>(Array.isArray(r.grants) ? r.grants : []), cost = g.has('product_cost_detail');
+      if (cost) { g.add('pricing_edit'); if (g.has('products')) g.add('products_secret'); }
+      else if (!g.has('products_secret')) { g.delete('products_manage'); g.delete('products_import'); }
+      g.delete('pricing_msrp');
+      await tx.query('UPDATE users SET grants=$2 WHERE id=$1', [r.id, JSON.stringify([...g])]);
+    }
   });
 }
 export const accessOf = (grants: string[]) => Object.fromEntries(Object.keys(AREAS).map(a => [a, levelOf(grants, a)]));
@@ -195,6 +216,7 @@ export async function adoptCatalogItems(tx: Queryable, org: string, actorId: str
 
 export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: { isAdmin: (u: User) => boolean }) {
   await migrateReturnsAccess(db);
+  await migrateProductPricingLevels(db);
   const actorOf = (req: FastifyRequest): User => req.actor || deny(401, 'UNAUTHENTICATED', 'Authentication is required');
   const grantsOf = (u: any): string[] => Array.isArray(u.grants) ? u.grants : [];
   const warehouseLevel = (u: User) => {
@@ -215,10 +237,19 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     if (!it) deny(404, 'WMS_UNKNOWN_SKU', 'This SKU does not exist yet; add it first');
     return it;
   };
-  // A count adjustment is confirmed by the submitter's manager; company admins can confirm any.
-  const canDecide = (u: User, m: any, submitter: any) => m.status === 'pending' && (o.isAdmin(u) || (!!submitter && (submitter.manager_id === u.id || submitter.second_manager_id === u.id) && submitter.id !== u.id));
-
-  const peopleOf = async (org: string) => new Map((await db.query('SELECT id,display_name,name_zh,name_en,manager_id,second_manager_id FROM users WHERE org_id=$1', [org])).rows.map((p: any) => [p.id, p]));
+  /* A count adjustment takes effect once someone else with 库存·管理 confirms it (owner, 2026-11-12). When nobody else has it,
+     the main admins confirm (the submitter too, if they are the only main admin). The page names who can confirm. */
+  const peopleOf = async (org: string, q: Queryable = db) => new Map((await q.query('SELECT id,display_name,name_zh,name_en,manager_id,second_manager_id,grants,active,is_admin,quality_factory FROM users WHERE org_id=$1', [org])).rows.map((p: any) => [p.id, p]));
+  const confirmersOf = (people: Map<any, any>, submitterId: string) => {
+    const live = [...people.values()].filter((p: any) => p.active && !p.quality_factory);
+    const wms = live.filter((p: any) => Array.isArray(p.grants) && p.grants.includes('warehouse_manage') && p.id !== submitterId);
+    if (wms.length) return wms.map((p: any) => p.id as string);
+    const admins = live.filter((p: any) => o.isAdmin(p));
+    const others = admins.filter((p: any) => p.id !== submitterId);
+    return (others.length ? others : admins).map((p: any) => p.id as string);
+  };
+  const canDecide = (u: User, m: any, people: Map<any, any>) => m.status === 'pending'
+    && (confirmersOf(people, m.created_by).includes(u.id) || (o.isAdmin(u) && u.id !== m.created_by));
   /** Movements written together (one batch, one import, one dealer shipment) share the transaction's timestamp. */
   const batchesOf = async (org: string, rows: any[]) => {
     const at = [...new Set(rows.map(r => new Date(r.created_at).toISOString()))];
@@ -233,7 +264,8 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     id: m.id, type: m.type, sku: m.sku, opDate: ymd(m.op_date) || ymd(m.created_at), method: methodOf(m, b.n), batchSkus: b.n, batchUnits: b.units, location: m.location, toLocation: m.to_location || undefined, qty: Number(m.qty), counted: m.counted, systemQty: m.system_qty,
     reason: m.reason, reference: m.reference || '', status: m.status, createdAt: m.created_at, byName: nameOf(people.get(m.created_by)),
     approvedByName: m.status !== 'pending' && m.decided_by ? nameOf(people.get(m.decided_by)) : '',
-    canDecide: canDecide(u, m, people.get(m.created_by)),
+    canDecide: canDecide(u, m, people),
+    ...(m.status === 'pending' ? { confirmers: confirmersOf(people, m.created_by).map(id => nameOf(people.get(id))) } : {}),
   }; };
 
   app.get('/wms/summary', async req => {
@@ -390,7 +422,8 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
       }
       if (!lines) deny(400, 'WMS_NO_DIFFERENCE', 'The counted quantity matches the system; nothing to adjust');
       await audit(tx, u, 'wms.batch', batch, { type: v.type, location: v.location, toLocation: v.toLocation, opDate: v.opDate, lines, units, unchanged: same, reference: v.reference });
-      return { lines, units, unchanged: same, status: adjust ? 'pending' : 'done' };
+      return { lines, units, unchanged: same, status: adjust ? 'pending' : 'done',
+        ...(adjust ? { confirmers: await (async () => { const people = await peopleOf(u.org_id, tx); return confirmersOf(people, u.id).map(id => nameOf(people.get(id))); })() } : {}) };
     });
     reply.code(201);
     return out;
@@ -410,9 +443,73 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
       await tx.query(`INSERT INTO wms_bins(org_id,sku,location,bin1,bin2,bin3,updated_by,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,now())
         ON CONFLICT(org_id,sku,location) DO UPDATE SET bin1=$4,bin2=$5,bin3=$6,updated_by=$7,updated_at=now(),
           qty1=CASE WHEN $4='' THEN 0 ELSE wms_bins.qty1 END,qty2=CASE WHEN $5='' THEN 0 ELSE wms_bins.qty2 END,qty3=CASE WHEN $6='' THEN 0 ELSE wms_bins.qty3 END`, [u.org_id, it.sku, v.location, b1, b2, b3, u.id]);
+      for (const c of [b1, b2, b3].filter(Boolean)) await tx.query('INSERT INTO wms_bin_codes(org_id,location,code,created_by) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING', [u.org_id, v.location, c, u.id]);
       await audit(tx, u, 'wms.bins', it.sku, { location: v.location, bins: [b1, b2, b3] });
       const q = (await tx.query('SELECT qty1,qty2,qty3 FROM wms_bins WHERE org_id=$1 AND sku=$2 AND location=$3', [u.org_id, it.sku, v.location])).rows[0];
       return { sku: it.sku, location: v.location, bins: [b1, b2, b3], qty: [q.qty1, q.qty2, q.qty3] };
+    });
+  });
+
+  /* 库位管理 (owner, 2026-11-12): the list of shelf bins per warehouse. Bins a SKU already uses are adopted into the list;
+     renaming a bin renames it for every SKU that uses it; a bin that still holds stock cannot be deleted (move the stock first). */
+  const binCode = z.string().trim().min(1).max(40).regex(/^[^<>,，\n]*$/);
+  const adoptBinCodes = (tx: Queryable, org: string) => tx.query(`INSERT INTO wms_bin_codes(org_id,location,code)
+    SELECT DISTINCT org_id,location,c FROM wms_bins, LATERAL unnest(array[bin1,bin2,bin3]) AS c WHERE org_id=$1 AND c<>'' ON CONFLICT DO NOTHING`, [org]);
+  app.get('/wms/bin-codes', async req => {
+    const u = actorOf(req); if (warehouseLevelFor(u, o.isAdmin(u)) === 'none') deny(403, 'WMS_FORBIDDEN', 'You do not have access to inventory', '你没有库存管理的权限。');
+    return db.transaction(async tx => {
+      await adoptBinCodes(tx, u.org_id);
+      const codes = (await tx.query('SELECT location,code,note FROM wms_bin_codes WHERE org_id=$1 ORDER BY location,code', [u.org_id])).rows;
+      const use = new Map<string, { sku: string; slot: number; qty: number }[]>();
+      for (const r of (await tx.query('SELECT sku,location,bin1,bin2,bin3,qty1,qty2,qty3 FROM wms_bins WHERE org_id=$1', [u.org_id])).rows)
+        [r.bin1, r.bin2, r.bin3].forEach((c: string, i: number) => { if (!c) return; const k = r.location + '\u0000' + c; if (!use.has(k)) use.set(k, []); use.get(k)!.push({ sku: r.sku, slot: i + 1, qty: Number([r.qty1, r.qty2, r.qty3][i]) || 0 }); });
+      return { codes: codes.map((c: any) => { const list = use.get(c.location + '\u0000' + c.code) || []; return { location: c.location, code: c.code, note: c.note, skus: list, qty: list.reduce((a, x) => a + x.qty, 0) }; }) };
+    });
+  });
+  app.post('/wms/bin-codes', async (req, reply) => {
+    const u = actorOf(req), v = z.object({ location: z.enum(LOC_IDS), codes: z.array(binCode).min(1).max(200), note: z.string().trim().max(120).default('') }).strict().parse(req.body); requireManage(u);
+    const out = await db.transaction(async tx => {
+      const added: string[] = [], existing: string[] = [];
+      for (const code of [...new Set(v.codes)]) {
+        const r = await tx.query('INSERT INTO wms_bin_codes(org_id,location,code,note,created_by) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING RETURNING code', [u.org_id, v.location, code, v.note, u.id]);
+        (r.rows.length ? added : existing).push(code);
+      }
+      if (added.length) await audit(tx, u, 'wms.bin_codes_added', v.location, { location: v.location, codes: added });
+      return { added, existing };
+    });
+    reply.code(201); return out;
+  });
+  app.post('/wms/bin-codes/rename', async req => {
+    const u = actorOf(req), v = z.object({ location: z.enum(LOC_IDS), code: binCode, to: binCode, note: z.string().trim().max(120).optional() }).strict().parse(req.body); requireManage(u);
+    return db.transaction(async tx => {
+      await adoptBinCodes(tx, u.org_id);
+      const cur = (await tx.query('SELECT code FROM wms_bin_codes WHERE org_id=$1 AND location=$2 AND code=$3 FOR UPDATE', [u.org_id, v.location, v.code])).rows[0];
+      if (!cur) deny(404, 'WMS_BIN_CODE_NOT_FOUND', 'This bin does not exist in this warehouse', '这个仓库没有这个库位。');
+      if (v.to !== v.code) {
+        if ((await tx.query('SELECT 1 FROM wms_bin_codes WHERE org_id=$1 AND location=$2 AND code=$3', [u.org_id, v.location, v.to])).rows.length)
+          deny(409, 'WMS_BIN_CODE_EXISTS', `Bin ${v.to} already exists in this warehouse`, `这个仓库已经有库位 ${v.to}。`);
+        await tx.query('UPDATE wms_bin_codes SET code=$4 WHERE org_id=$1 AND location=$2 AND code=$3', [u.org_id, v.location, v.code, v.to]);
+        for (const c of ['bin1', 'bin2', 'bin3']) await tx.query(`UPDATE wms_bins SET ${c}=$4,updated_by=$5,updated_at=now() WHERE org_id=$1 AND location=$2 AND ${c}=$3`, [u.org_id, v.location, v.code, v.to, u.id]);
+      }
+      if (v.note !== undefined) await tx.query('UPDATE wms_bin_codes SET note=$4 WHERE org_id=$1 AND location=$2 AND code=$3', [u.org_id, v.location, v.to, v.note]);
+      await audit(tx, u, 'wms.bin_code_renamed', v.location, { location: v.location, from: v.code, to: v.to, note: v.note });
+      return { location: v.location, code: v.to };
+    });
+  });
+  app.post('/wms/bin-codes/delete', async req => {
+    const u = actorOf(req), v = z.object({ location: z.enum(LOC_IDS), code: binCode }).strict().parse(req.body); requireManage(u);
+    return db.transaction(async tx => {
+      await adoptBinCodes(tx, u.org_id);
+      const held = (await tx.query(`SELECT sku FROM wms_bins WHERE org_id=$1 AND location=$2 AND ((bin1=$3 AND qty1>0) OR (bin2=$3 AND qty2>0) OR (bin3=$3 AND qty3>0)) ORDER BY sku`, [u.org_id, v.location, v.code])).rows.map((r: any) => r.sku);
+      if (held.length) deny(409, 'WMS_BIN_CODE_HAS_STOCK', `Bin ${v.code} still holds stock (${held.slice(0, 5).join(', ')}); move it first`,
+        `库位 ${v.code} 里还有货（${held.slice(0, 5).join('、')}），请先移库再删除。`);
+      // Empty assignments are cleared; a cleared preferred bin takes the next bin up so the preferred slot stays filled.
+      for (const c of ['bin1', 'bin2', 'bin3']) await tx.query(`UPDATE wms_bins SET ${c}='',updated_by=$4,updated_at=now() WHERE org_id=$1 AND location=$2 AND ${c}=$3`, [u.org_id, v.location, v.code, u.id]);
+      await tx.query(`UPDATE wms_bins SET bin1=bin2,qty1=qty2,bin2=bin3,qty2=qty3,bin3='',qty3=0 WHERE org_id=$1 AND location=$2 AND bin1='' AND bin2<>''`, [u.org_id, v.location]);
+      const r = await tx.query('DELETE FROM wms_bin_codes WHERE org_id=$1 AND location=$2 AND code=$3 RETURNING code', [u.org_id, v.location, v.code]);
+      if (!r.rows.length) deny(404, 'WMS_BIN_CODE_NOT_FOUND', 'This bin does not exist in this warehouse', '这个仓库没有这个库位。');
+      await audit(tx, u, 'wms.bin_code_deleted', v.location, { location: v.location, code: v.code });
+      return { location: v.location, code: v.code, deleted: true };
     });
   });
 
@@ -450,8 +547,9 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
         const m = (await tx.query('SELECT * FROM wms_movements WHERE id=$1 AND org_id=$2 FOR UPDATE', [mid, u.org_id])).rows[0];
         if (!m) deny(404, 'NOT_FOUND', 'Movement not found');
         if (m.status !== 'pending') deny(409, 'WMS_ALREADY_DECIDED', 'This adjustment has already been decided');
-        const submitter = (await tx.query('SELECT id,manager_id,second_manager_id FROM users WHERE id=$1', [m.created_by])).rows[0];
-        if (!canDecide(u, m, submitter)) deny(403, 'WMS_APPROVER_ONLY', 'Only the submitter’s manager or an administrator can confirm this adjustment');
+        const people = await peopleOf(u.org_id, tx);
+        if (!canDecide(u, m, people)) deny(403, 'WMS_APPROVER_ONLY', `Only another warehouse manager can confirm this adjustment: ${confirmersOf(people, m.created_by).map(id => nameOf(people.get(id))).join(', ')}`,
+          `盘点调整要由另一位有库存管理权限的同事确认：${confirmersOf(people, m.created_by).map(id => nameOf(people.get(id))).join('、')}。`);
         if (decision === 'approve') await addStock(tx, u.org_id, m.sku, m.location, Number(m.qty), { mode: 'count' });
         await tx.query('UPDATE wms_movements SET status=$2,decided_by=$3,decided_at=now() WHERE id=$1', [m.id, decision === 'approve' ? 'done' : 'rejected', u.id]);
         await audit(tx, u, 'wms.adjust_' + decision, m.id, { sku: m.sku, location: m.location, qty: m.qty });
@@ -519,7 +617,7 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     };
   });
 
-  const accessInput = z.object({ userId: uid, area: z.enum(['products', 'import', 'pricing', 'supply', 'warehouse', 'returns', 'dealers']), level: z.string().min(1).max(20) }).strict();
+  const accessInput = z.object({ userId: uid, area: z.enum(['products', 'pricing', 'supply', 'warehouse', 'returns', 'dealers']), level: z.string().min(1).max(20) }).strict();
   app.post('/erp/access', async req => {
     const u = actorOf(req), v = accessInput.parse(req.body), admin = o.isAdmin(u);
     if (!(v.level in AREAS[v.area])) deny(400, 'INVALID_ACCESS_LEVEL', 'Choose a valid access level');
@@ -532,13 +630,9 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
       }
       const before = grantsOf(p);
       let next = [...before.filter(g => !areaGrants(v.area).includes(g)), ...AREAS[v.area][v.level]];
-      // Keep the product-hub dependency consistent: the full price build-up needs product access,
-      // and removing product access removes the full price build-up.
-      if (v.area === 'pricing' && v.level === 'full' && !next.includes('products')) next.push('products');
-      if (v.area === 'products' && v.level === 'none') next = next.filter(g => g !== 'product_cost_detail' && g !== 'products_import');
-      // Bulk update of SKUs and prices comes with what it changes: product data (manage) and retail prices (MSRP, MAP, promotion floor).
-      // Cost columns still need the full price build-up (价格组成 + 修改).
-      if (v.area === 'import' && v.level === 'allow') next.push('products', 'products_manage', 'pricing_msrp');
+      // Pricing lives inside the product library: any price access brings product access, and removing product access removes price access.
+      if (v.area === 'pricing' && v.level !== 'none' && !next.includes('products')) next.push('products');
+      if (v.area === 'products' && v.level === 'none') next = next.filter(g => !areaGrants('pricing').includes(g));
       next = [...new Set(next)];
       await tx.query('UPDATE users SET grants=$2 WHERE id=$1', [p.id, JSON.stringify(next)]);
       await tx.query('INSERT INTO audit_events(id,org_id,department_id,owner_id,actor_id,action,object_id,details) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',

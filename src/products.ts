@@ -13,7 +13,7 @@ import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
 import { deny } from './errors.js';
 import { FIELD, canSee, viewerOf } from './product-spec.js';
-import { normalizeWorksheet, dtcRate, whRate, type Worksheet } from './product-worksheet.js';
+import { normalizeWorksheet, dtcRate, whRate, skuRate, type Worksheet } from './product-worksheet.js';
 
 export const productSchema = `
 CREATE TABLE IF NOT EXISTS product_catalog(org_id text NOT NULL, sku text NOT NULL, name_zh text NOT NULL DEFAULT '', name_en text NOT NULL DEFAULT '',
@@ -113,11 +113,11 @@ export function worksheetPriceCheck(ws: Worksheet, cat: any, pr: any, target: Pr
   if (landed == null) return { cmPct: null, needs: null };
   const delivered = landed + (pr?.last_mile_usd == null ? 0 : Number(pr.last_mile_usd)), round = (n: number) => Math.round(n * 10) / 10;
   if (isWholesale(target)) {
-    const rate = whRate(ws); if (rate == null) return { cmPct: null, needs: null };
+    const rate = skuRate(pr?.attrs?.whRate, whRate(ws)); if (rate == null) return { cmPct: null, needs: null };
     const cost = cat?.attrs?.whFreight === 'us' ? delivered : landed, cm = round((price * (1 - rate) - cost) / price * 100);
     return { cmPct: cm, needs: cm < 0 ? 'loss' : ws.whFloor != null && cm < ws.whFloor ? 'floor' : null };
   }
-  const base = dtcRate(ws); if (base == null) return { cmPct: null, needs: null };
+  const base = skuRate(pr?.attrs?.dtcRate, dtcRate(ws)); if (base == null) return { cmPct: null, needs: null };
   const rate = base + (target === 'amazon' || target === 'ebay' ? (ws.mktExtra ?? 0) / 100 : 0), cm = round((price * (1 - rate) - delivered) / price * 100);
   return { cmPct: cm, needs: cm < 0 ? 'loss' : ws.dtcFloor != null && cm < ws.dtcFloor ? 'floor' : null };
 }
@@ -142,8 +142,10 @@ export async function registerProductRoutes(app: FastifyInstance, db: Database, 
   };
 
   // MSRP, low price and checkout shipping: catalog managers and anyone with a pricing grant. Channel prices: seen with any pricing grant, set with the full build-up.
-  const canEditMsrp = (u: User) => canEditCatalog(u) || grants(u).includes('pricing_msrp') || canPricing(u);
-  const canSeeChannels = (u: User) => canPricing(u) || grants(u).includes('pricing_msrp');
+  /** 价格·单项修改: change prices, channel prices and cost inputs one SKU at a time. 价格·查看 (canPricing) is read-only. */
+  const canPricingEdit = (u: User) => o.isAdmin(u) || grants(u).includes('pricing_edit');
+  const canEditMsrp = (u: User) => canEditCatalog(u) || canPricingEdit(u);
+  const canSeeChannels = (u: User) => canPricing(u);
   const canSeeTarget = (u: User, target: string) => target === 'msrp' || canSeeChannels(u);
   const rulesFor = async (org: string, q: Queryable = db) => {
     const r = (await q.query('SELECT rules,updated_at,updated_by FROM pricing_rules WHERE org_id=$1', [org])).rows[0];
@@ -227,8 +229,8 @@ export async function registerProductRoutes(app: FastifyInstance, db: Database, 
           ...(pending.get(r.sku) ? { pendingPrices: pending.get(r.sku) } : {}),
         };
       }),
-      canImportCatalog: canEditCatalog(u), canImportPricing: canPricing(u), canSeePricing: canPricing(u),
-      canEditCatalog: canEditCatalog(u), canEditMsrp: canEditMsrp(u), canSeeChannels: canSeeChannels(u), canEditChannels: canPricing(u), canApprovePrices: o.isAdmin(u),
+      canImportCatalog: canEditCatalog(u), canImportPricing: canPricingEdit(u) && grants(u).includes('products_import') || o.isAdmin(u), canSeePricing: canPricing(u),
+      canEditCatalog: canEditCatalog(u), canEditMsrp: canEditMsrp(u), canSeeChannels: canSeeChannels(u), canEditChannels: canPricingEdit(u), canApprovePrices: o.isAdmin(u),
       statusNext: STATUS_NEXT, channelKeys: CHANNELS,
       ...(canPricing(u) ? { pricingRules: await rulesFor(u.org_id), canEditRules: o.isAdmin(u) } : {}),
       lastCatalogImport: await lastImport(u.org_id, 'catalog'), lastPricingImport: canPricing(u) ? await lastImport(u.org_id, 'pricing') : null,
@@ -367,7 +369,7 @@ export async function registerProductRoutes(app: FastifyInstance, db: Database, 
 
   app.put('/products/:sku/channel-prices/:channel', async req => {
     const u = actorOf(req);
-    if (!canPricing(u)) deny(403, 'CHANNEL_PRICE_FORBIDDEN', 'Only people with the full price build-up can set channel prices');
+    if (!canPricingEdit(u)) deny(403, 'CHANNEL_PRICE_FORBIDDEN', 'Only people with the full price build-up can set channel prices');
     const channel = z.enum(CHANNELS).parse((req.params as any).channel);
     const v = z.object({ price: num, listed: z.boolean().optional(), reason: z.string().trim().max(300).optional() }).strict().parse(req.body);
     return db.transaction(async tx => {
@@ -427,7 +429,7 @@ export async function registerProductRoutes(app: FastifyInstance, db: Database, 
   const pricingRow = z.object({ sku, factoryRmb: num, factoryUsd: num, extraRmb: num, ddpRate: num, lastMileRmb: num }).strict();
   app.post('/products/pricing/import', async req => {
     const u = actorOf(req);
-    if (!canPricing(u)) deny(403, 'PRICING_IMPORT_FORBIDDEN', 'Only people with the full price build-up can import cost data');
+    if (!(o.isAdmin(u) || (canPricingEdit(u) && grants(u).includes('products_import')))) deny(403, 'PRICING_IMPORT_FORBIDDEN', 'Only people with the full price build-up can import cost data');
     const v = z.object({ rows: z.array(pricingRow).min(1).max(5000) }).strict().parse(req.body);
     unique(v.rows);
     return db.transaction(async tx => {
@@ -471,7 +473,7 @@ export async function registerProductRoutes(app: FastifyInstance, db: Database, 
   const planBody = z.object({ priceClass: z.enum(PRICE_CLASSES).nullable().optional(), landedUsd: num, lastMileUsd: num, actualPrice: num, reason: z.string().trim().max(300).optional() }).strict();
   app.patch('/products/:sku/pricing-plan', async req => {
     const u = actorOf(req);
-    if (!canPricing(u)) deny(403, 'PRICING_PLAN_FORBIDDEN', 'Only people with the full price build-up can change pricing inputs');
+    if (!canPricingEdit(u)) deny(403, 'PRICING_PLAN_FORBIDDEN', 'Only people with the full price build-up can change pricing inputs');
     const v = planBody.parse(req.body);
     return db.transaction(async tx => {
       const cat = await catalogOf(tx, u.org_id, skuParam(req));
