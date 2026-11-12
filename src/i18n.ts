@@ -186,6 +186,8 @@ const zh:Record<string,string>={
   'The photo could not be read':'照片无法读取。',
   'Photos must be 5 MB or smaller':'每张照片不能超过 5 MB。',
   'A case can have at most 40 photos':'每条记录最多 40 张照片。',
+  'This photo was not found':'找不到这张照片，可能已被删除。',
+  'Only a warehouse manager can delete a photo someone else uploaded':'别人上传的照片只有库存管理权限的人可以删除。',
   'Photo not found':'找不到这张照片。',
   'Use a date like 2026-11-02':'日期格式应为 2026-11-02。',
   'Your work email was set by an administrator and cannot be changed':'你的工作邮箱已由管理员设置，本人不能修改；如需更改请联系管理员。',
