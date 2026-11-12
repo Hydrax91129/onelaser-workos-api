@@ -243,6 +243,8 @@ const app = await buildApp({
   const po = (await call('POST', '/scm/orders', { supplier: '示例东莞工厂', orderedOn: ago(10), readyOn: ahead(15), note: '示例采购单', lines: skus.slice(0, 2).map((sku: string, i: number) => ({ sku, qty: [120, 60][i] })) })).json();
   if (po?.id && skus[0]) { await call('POST', `/scm/orders/${po.id}/issue`, {}); await call('POST', `/scm/orders/${po.id}/finish`, { opDate: ago(1), location: 'dg', lines: [{ sku: skus[0], qty: 40 }] }); }
   if (skus[2]) await call('POST', '/scm/orders', { supplier: '示例东莞工厂', orderedOn: ago(0), readyOn: ahead(25), note: '示例草稿：等工厂确认', lines: [{ sku: skus[2], qty: 50 }] });
+}
+
 // Example pricing parameters (fictional rates, tiers and NPCR steps) and landed / last-mile costs, so 定价 shows the NPCR calculation.
 {
   const token = (await issueSession(db, 'm1')).accessToken, call = (method: string, url: string, payload?: unknown) => app.inject({ method: method as any, url, payload: payload as any, headers: { authorization: `Bearer ${token}` } });

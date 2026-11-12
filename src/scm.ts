@@ -115,6 +115,14 @@ export function reorderOf(o: { ds: number; us: number; transit: number; factory:
   return { need, gap, ship, make, cover, coverFinished, coverAll, finished, pipeline, monthly: Math.ceil(o.ds * 30), status, shortDays, horizon };
 }
 
+/** SKUs on their way out (PIM 生命周期: 清库存 / 计划停售 / 停售) are sold down, not made again (owner, 2026-11-12):
+ *  no production suggestion, and running out is the goal, so no stockout risk. Shipping factory stock still shows. */
+export const STOPPING = ['clearance', 'eolPlanned', 'eol'];
+export function stoppingAdjust<T extends { make: number; status: string; shortDays: number }>(lifecycle: string, r: T): T & { stopping: boolean } {
+  if (!STOPPING.includes(lifecycle)) return { ...r, stopping: false };
+  return { ...r, make: 0, status: r.status === 'risk' ? 'ok' : r.status, shortDays: 0, stopping: true };
+}
+
 export async function registerScmRoutes(app: FastifyInstance, db: Database, o: { isAdmin: (u: User) => boolean; shopify?: ShopifyOptions; now?: () => number }) {
   const now = o.now || Date.now, today = () => new Date(now()).toISOString().slice(0, 10);
   const actorOf = (req: FastifyRequest): User => req.actor || deny(401, 'UNAUTHENTICATED', 'Authentication is required');
@@ -170,7 +178,7 @@ export async function registerScmRoutes(app: FastifyInstance, db: Database, o: {
         productionFromLibrary: prodLib != null, firstLegFromLibrary: legLib != null, supplyDays: days.full, stockDays: days.fromStock, leadDays,
         arriveOn: addDays(t, leadDays), leadFromLibrary: prodLib != null && legLib != null,
         wip: wipOf.get(k) || 0,
-        ...reorderOf({ ds: fc.ds, us, transit, factory, leadDays, targetDays: s.targetDays, safetyDays: s.safetyDays, wip: wipOf.get(k) || 0 }) };
+        ...stoppingAdjust(c.status, reorderOf({ ds: fc.ds, us, transit, factory, leadDays, targetDays: s.targetDays, safetyDays: s.safetyDays, wip: wipOf.get(k) || 0 })) };
     });
     const ships = (await db.query(`SELECT * FROM scm_shipments WHERE org_id=$1 AND (status IN ('in_transit','at_port') OR arrived_on >= $2) ORDER BY eta, number`, [u.org_id, addDays(t, -60)])).rows;
     const lines = ships.length ? (await db.query('SELECT * FROM scm_shipment_lines WHERE shipment_id=ANY($1::text[]) ORDER BY sku', [ships.map((x: any) => x.id)])).rows : [];

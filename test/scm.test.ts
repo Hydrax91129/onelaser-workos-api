@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createDatabase, schema, seedDemo } from '../src/db.js';
 import { buildApp } from '../src/app.js';
 import { issueSession } from '../src/auth.js';
-import { reorderOf, leadDaysOf, forecastOf } from '../src/scm.js';
+import { reorderOf, leadDaysOf, forecastOf, stoppingAdjust } from '../src/scm.js';
 
 // Fictional SKUs, orders and shipments only.
 const NOW = Date.parse('2026-11-12T18:00:00Z');
@@ -17,6 +17,18 @@ test('reorder: DS × (lead + target + safety) against US + in transit; factory s
   assert.equal(reorderOf({ ds: 0, us: 3, transit: 0, factory: 0, leadDays: 30, targetDays: 30, safetyDays: 14 }).status, 'overstock', 'stock without sales');
   assert.equal(reorderOf({ ds: 1, us: 50, transit: 0, factory: 0, leadDays: 30, targetDays: 30, safetyDays: 14 }).status, 'ok');
   assert.equal(reorderOf({ ds: 2, us: 50, transit: 0, factory: 0, leadDays: 37, targetDays: 30, safetyDays: 14 }).shortDays, 12, 'runs out 12 days before a reorder arrives');
+
+});
+
+test('reorder: clearance and discontinued SKUs are sold down, never made again', () => {
+  const r = reorderOf({ ds: 2, us: 50, transit: 30, factory: 40, leadDays: 60, targetDays: 30, safetyDays: 14 });
+  for (const life of ['clearance', 'eolPlanned', 'eol']) {
+    const x = stoppingAdjust(life, r);
+    assert.deepEqual([x.make, x.ship, x.status, x.shortDays, x.stopping], [0, 40, 'ok', 0, true], life);
+  }
+  assert.deepEqual([stoppingAdjust('live', r).make, stoppingAdjust('live', r).status, stoppingAdjust('live', r).stopping], [88, 'risk', false]);
+  const over = reorderOf({ ds: 1, us: 400, transit: 0, factory: 0, leadDays: 30, targetDays: 30, safetyDays: 14 });
+  assert.equal(stoppingAdjust('clearance', over).status, 'overstock', 'too much left to clear still shows');
 });
 
 test('forecast daily sales: recent weighted, seasonality from last year, bursts counted in only partly, dips fully', () => {
