@@ -15,14 +15,14 @@ test('returns & repairs: register, diagnose, photos, repaired, put away for sale
   assert.equal((await call('m1','GET','/capabilities')).json().rma,true);
   await call('m1','POST','/wms/import',{asOf:'2026-10-31',rows:[{sku:'DEMO-A',name:'Demo machine A',type:'整机',qty:{us:5}}]});
   await db.query("INSERT INTO product_catalog(org_id,sku,msrp) SELECT org_id,'DEMO-A',4000 FROM users WHERE id='m1'");
-  assert.equal((await call('m2','GET','/rma')).statusCode,403,'no warehouse access');
+  assert.equal((await call('m2','GET','/rma')).statusCode,403,'no returns access');
   assert.equal((await call('m1','POST','/rma',{sku:'NOPE',serial:'S1',productClass:'machine',repairable:'yes',condition:'外观完好',reason:'坏了',receivedAt:'2026-11-01'})).statusCode,400,'unknown SKUs that are not RE- are refused');
   assert.equal((await call('m1','POST','/rma',{sku:'DEMO-A',serial:'S1',productClass:'machine',repairable:'yes',condition:'外观完好',reason:'坏了',receivedAt:'2026-12-30'})).statusCode,400,'no future dates');
   const c=await call('m1','POST','/rma',{sku:'demo-a',serial:'SN123',kind:'warranty',productClass:'machine',repairable:'yes',condition:'外观完好',channel:'website',customer:'John',orderRef:'#1001',reason:'开机不出光',receivedAt:'2026-11-01'});
   assert.equal(c.statusCode,201,c.body);assert.equal(c.json().number,'RMA-2026-0001');const id=c.json().id;
-  // technicians need warehouse access; m3 gets view, then can work on this case only
-  assert.equal((await call('m1','POST',`/rma/${id}/update`,{technicianId:'m2'})).statusCode,400,'m2 has no warehouse access');
-  await db.query(`UPDATE users SET grants='["warehouse"]' WHERE id='m3'`);
+  // technicians need returns access (its own grant, set on the returns page); m3 gets view, then can work on this case only
+  assert.equal((await call('m1','POST',`/rma/${id}/update`,{technicianId:'m2'})).statusCode,400,'m2 has no returns access');
+  await db.query(`UPDATE users SET grants='["returns"]' WHERE id='m3'`);
   assert.equal((await call('m3','POST',`/rma/${id}/update`,{diagnosis:'x'})).statusCode,403);
   assert.equal((await call('m1','POST',`/rma/${id}/update`,{technicianId:'m3'})).statusCode,200);
   assert.equal((await call('m1','GET',`/rma/${id}`)).json().status,'diagnosing');

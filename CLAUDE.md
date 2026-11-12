@@ -60,6 +60,9 @@
    停用账号（members.ts）会在同一事务里调用 hr.ts 的 `hrMarkLeft`，把人事档案改为已离职、最后工作日取停用日期并记一条离职记录；恢复账号调用 `hrMarkReturned` 改回在职。反过来，把人事状态改为已离职不会停用账号。
    员工所属地区只有主管理员能改。有权限的人看到完整资料（数据库里加密保存）。员工本人只看自己的基本雇佣信息，自助填写个人资料是第二期。
    婚姻、子女、受抚养人和 EEO 只放在加密字段里，只能用于 payroll、福利和合规统计，不能用于聘用决定。
+   供应链运营（左侧一组：PIM / WMS / SCM）的权限不再有单独菜单：每个模块右上角的“权限”按钮打开 `#erp-access/<area>`（erp-access.js 的 `button(area)`，只显示这个模块的列），area：products（含批量更新）、pricing、warehouse、returns、supply、dealers、kol。
+   退货维修有自己的 grants `returns` / `returns_manage`（wms.ts 的 `returnsLevelFor`，rma.ts 用它）；2026-11 起从仓库权限拆出，`migrateReturnsAccess` 只跑一次，让原来有仓库权限的人保留同样的退货权限。主管可以给自己的下属设仓库库存和退货维修权限，其余只有主管理员能设。
+   登录：钉钉登录的人可以在个人设置里自己加“邮箱密码登录”（members.ts 的 `/me/login`：登录邮箱全局唯一，已有密码时改要输入当前密码）。不要替任何人在后台写密码。
    财务（finance.ts）：grants `finance_view`（只读）/ `finance_manage`（新建、修改、记收款、附件），只有主管理员在财务模块的“权限”页分配；主管理员自动可管理。
    发票上的负责人只看自己负责的单子，并可以记收款、上传附件、写跟进（SOP：谁登记谁负责催收），不能新建或改金额。
 7. **工厂对接人**：`users.quality_factory` 非空（邀请时选“工厂对接人”，或管理员在成员列表里改）的账号只能用质量追踪，后端会拦截其他接口。

@@ -22,7 +22,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
 import { deny } from './errors.js';
-import { warehouseLevelFor, ensureReturnItem } from './wms.js';
+import { returnsLevelFor, ensureReturnItem } from './wms.js';
 
 export const rmaSchema = `
 CREATE TABLE IF NOT EXISTS rma_cases(id text PRIMARY KEY, org_id text NOT NULL, number text NOT NULL, sku text NOT NULL, serial text NOT NULL DEFAULT '',
@@ -68,7 +68,7 @@ const ymd = (v: any) => v ? (v instanceof Date ? v.toISOString().slice(0, 10) : 
 export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: { isAdmin: (u: User) => boolean; now?: () => number }) {
   const now = o.now || Date.now;
   const actorOf = (req: FastifyRequest): User => req.actor || deny(401, 'UNAUTHENTICATED', 'Authentication is required');
-  const level = (u: User) => warehouseLevelFor(u, o.isAdmin(u));
+  const level = (u: User) => returnsLevelFor(u, o.isAdmin(u));
   const requireView = (u: User) => { if (level(u) === 'none') deny(403, 'RMA_FORBIDDEN', 'You do not have access to returns and repairs'); };
   const requireManage = (u: User) => { if (level(u) !== 'manage') deny(403, 'RMA_MANAGE_ONLY', 'Only warehouse managers can do this'); };
   const canPrice = (u: User) => o.isAdmin(u) || ((u as any).grants || []).includes('pricing_msrp');
