@@ -20,6 +20,11 @@ test('canonical origin switches only the approved Render host and retains health
   await writeFile(resolve(wikiRoot, 'index.html'), 'complete public wiki');
   await writeFile(resolve(wikiRoot, 'assets/app.js'), 'public wiki script');
   await writeFile(resolve(wikiRoot, 'data/library.json'), '{"articles":[{"id":"public-article"}]}');
+  const caldockRoot = resolve(root, 'caldock');
+  await mkdir(resolve(caldockRoot, 'guides'), { recursive: true });
+  await writeFile(resolve(caldockRoot, 'index.html'), 'storefront landing');
+  await writeFile(resolve(caldockRoot, 'en.html'), 'storefront English landing');
+  await writeFile(resolve(caldockRoot, 'guides/index.html'), 'public storefront guides');
   const upstream = createServer((req, res) => {
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify({ path: req.url, method: req.method }));
@@ -30,7 +35,8 @@ test('canonical origin switches only the approved Render host and retains health
   const config = (await readFile(resolve('deploy/Caddyfile'), 'utf8'))
     .replaceAll('127.0.0.1:3001', `127.0.0.1:${upstreamPort}`)
     .replace('root * /app/public', `root * ${root}`)
-    .replace('root * /app/wiki', `root * ${wikiRoot}`);
+    .replace('root * /app/wiki', `root * ${wikiRoot}`)
+    .replaceAll('root * /app/caldock', `root * ${caldockRoot}`);
   const configPath = resolve(root, 'Caddyfile');
   await writeFile(configPath, config);
   await writeFile(resolve(root, 'index.html'), 'workos frontend');
@@ -55,12 +61,13 @@ test('canonical origin switches only the approved Render host and retains health
         edge.stderr.on('data', chunk => { diagnostics += chunk; });
         const exited = once(edge, 'exit');
         const get = (host: string, path: string, method = 'GET', headers: Record<string, string> = {}) =>
-          new Promise<{ status: number; location?: string; cacheControl?: string; csp: string; frameOptions: string; body: string }>((resolve, reject) => {
+          new Promise<{ status: number; location?: string; cacheControl?: string; csp: string; frameOptions: string; robots: string; body: string }>((resolve, reject) => {
             const req = request({ hostname: '127.0.0.1', port, path, method, headers: { host, ...headers } }, res => {
               let body = ''; res.setEncoding('utf8'); res.on('data', chunk => { body += chunk; });
               res.on('end', () => resolve({ status: res.statusCode!, location: res.headers.location,
                 cacheControl: res.headers['cache-control'],
                 csp: String(res.headers['content-security-policy'] || ''),
+                robots: String(res.headers['x-robots-tag'] || ''),
                 frameOptions: String(res.headers['x-frame-options'] || ''), body }));
             });
             req.on('error', reject); req.end();
@@ -98,6 +105,25 @@ test('canonical origin switches only the approved Render host and retains health
           }
           assert.equal((await get('wodemac.com', '/healthz')).status, 200);
           assert.equal((await get('wodemac.com', '/api/tasks')).status, 404);
+          for (const path of ['/?view=checkout&interval=quarter&lang=zh', '/?view=account',
+            '/?view=login', '/?view=orders', '/?view=affiliate', '/?view=admin',
+            '/?view=unknown', '/?view=CHECKOUT', '/?view=', '/?view',
+            '/?view=&view=checkout', '/?v%69ew=account',
+            '/index.html?view=account', '/en.html?lang=en&view=checkout']) {
+            const page = await get('wodemac.com', path);
+            assert.equal(page.status, 200, path);
+            assert.equal(page.robots, 'noindex, follow', path + ' must opt out before JavaScript');
+            assert.equal(page.cacheControl, 'no-store', path);
+            assert.match(page.body, /storefront/, path + ' still serves the application');
+          }
+          for (const path of ['/', '/?lang=zh', '/?interval=month&lang=en',
+            '/?VIEW=checkout', '/?preview=checkout', '/?viewish=checkout',
+            '/?next=%3Fview%3Dcheckout', '/en.html?lang=en', '/guides/?view=checkout']) {
+            const page = await get('wodemac.com', path);
+            assert.equal(page.status, 200, path);
+            assert.equal(page.robots, '', path + ' must remain indexable');
+          }
+          assert.equal((await get('craftos.app', '/?view=checkout')).robots, '', 'Other hosts are unchanged');
           const moved = await get('craftos.app', '/caldock/?lang=zh');
           assert.equal(moved.status, 308); assert.equal(moved.location, 'https://wodemac.com/?lang=zh');
           assert.equal((await get('craftos.app', '/caldock')).location?.startsWith('https://wodemac.com/'), true);

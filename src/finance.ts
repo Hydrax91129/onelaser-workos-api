@@ -1,6 +1,7 @@
 /* Finance (财务) — accounts receivable (应收账款). Accounts payable comes later.
  *
- * One record per invoice: who is responsible (sales or account manager), customer company and contact,
+ * One record per invoice: who is responsible (sales or account manager), customer company (optional) and contact
+ * (name, email and phone required), the shipping address (street, line 2 optional, city, state, ZIP, country),
  * invoice date, payment term and due date, our order number, total, whether the goods were dispatched,
  * the expected payment method, invoice files, payments received and a follow-up log.
  *
@@ -25,7 +26,9 @@ import { deny } from './errors.js';
 export const financeSchema = `
 CREATE TABLE IF NOT EXISTS fin_receivables(id text PRIMARY KEY, org_id text NOT NULL, number text NOT NULL, responsible_id text,
   invoice_date date NOT NULL, payment_term text NOT NULL DEFAULT '', term_days integer, due_date date,
-  customer text NOT NULL, contact text NOT NULL DEFAULT '', contact_email text NOT NULL DEFAULT '', kind text NOT NULL DEFAULT '', order_ref text NOT NULL DEFAULT '',
+  customer text NOT NULL DEFAULT '', contact text NOT NULL DEFAULT '', contact_email text NOT NULL DEFAULT '', contact_phone text NOT NULL DEFAULT '',
+  ship_street text NOT NULL DEFAULT '', ship_line2 text NOT NULL DEFAULT '', ship_city text NOT NULL DEFAULT '', ship_state text NOT NULL DEFAULT '', ship_zip text NOT NULL DEFAULT '',
+  ship_country text NOT NULL DEFAULT 'US', kind text NOT NULL DEFAULT '', order_ref text NOT NULL DEFAULT '',
   amount numeric NOT NULL CHECK (amount >= 0), currency text NOT NULL DEFAULT 'USD', dispatched boolean NOT NULL DEFAULT false, dispatched_on date,
   pay_method text NOT NULL DEFAULT '', note text NOT NULL DEFAULT '', created_by text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(), archived_at timestamptz);
@@ -57,6 +60,54 @@ const money = z.number().finite().min(0).max(100_000_000);
 const ymd = (d: unknown) => d ? (d instanceof Date ? d.toISOString() : String(d)).slice(0, 10) : null;
 const round2 = (n: number) => Math.round(n * 100) / 100;
 const addDays = (date: string, n: number) => { const d = new Date(date + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+
+/* Contact and shipping address checks (format only; no address lookup service yet). The page uses the same rules. */
+export const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+/** USPS two-letter codes: states, DC, territories and military (AA/AE/AP). */
+export const US_STATES = new Set(('AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY ' +
+  'DC PR GU VI AS MP AA AE AP').split(' '));
+/** A phone number in one stored form. US numbers (10 digits, or 11 starting with 1, any punctuation) become +1XXXXXXXXXX;
+ *  other countries are written with + and the country code (8–15 digits). null when it is not a valid number. */
+export function normalizePhone(raw: string): string | null {
+  const s = String(raw || '').trim();
+  if (!s || /[^\d\s()+.\-]/.test(s) || s.indexOf('+') > 0 || (s.match(/\+/g) || []).length > 1) return null;
+  const d = s.replace(/\D/g, '');
+  const us = (ten: string) => /^[2-9]\d{2}[2-9]\d{6}$/.test(ten) ? '+1' + ten : null;
+  if (s.startsWith('+')) return d.startsWith('1') ? (d.length === 11 ? us(d.slice(1)) : null) : d.length >= 8 && d.length <= 15 ? '+' + d : null;
+  if (d.length === 10) return us(d);
+  if (d.length === 11 && d.startsWith('1')) return us(d.slice(1));
+  return null;
+}
+/** ZIP: 5 digits or ZIP+4; 9 digits without the dash are written as 12345-6789. null when invalid. */
+export function normalizeZip(raw: string): string | null {
+  const s = String(raw || '').trim();
+  if (/^\d{5}(-\d{4})?$/.test(s)) return s;
+  if (/^\d{9}$/.test(s)) return s.slice(0, 5) + '-' + s.slice(5);
+  return null;
+}
+type Contact = { customer: string; contact: string; contactEmail: string; contactPhone: string; shipStreet: string; shipLine2: string; shipCity: string; shipState: string; shipZip: string; shipCountry: string };
+/** Checks the contact and address, and returns them in the stored form (phone +1…, state and country upper case). */
+export function checkContact(v: Contact): Contact {
+  const t = (x: unknown) => String(x ?? '').trim();
+  const contact = t(v.contact), contactEmail = t(v.contactEmail), shipCountry = (t(v.shipCountry) || 'US').toUpperCase();
+  if (!contact) deny(400, 'FINANCE_CONTACT', 'Enter the contact name', '请填写联系人姓名。');
+  if (!EMAIL_RE.test(contactEmail)) deny(400, 'FINANCE_EMAIL', 'Enter a valid contact email, like name@example.com', '请填写正确的联系人邮箱，例如 name@example.com。');
+  const contactPhone = normalizePhone(v.contactPhone);
+  if (!contactPhone) deny(400, 'FINANCE_PHONE', 'Enter a valid phone number: 10 digits for the US, or + and the country code', '请填写正确的联系电话：美国号码 10 位，其他国家请以 + 和国家代码开头。');
+  if (!/^[A-Z]{2}$/.test(shipCountry)) deny(400, 'FINANCE_COUNTRY', 'Use the two-letter country code, e.g. US', '国家请用两位字母代码，例如 US。');
+  const shipStreet = t(v.shipStreet), shipCity = t(v.shipCity), us = shipCountry === 'US';
+  let shipState = t(v.shipState), shipZip = t(v.shipZip);
+  if (!shipStreet || !shipCity || (us && (!shipState || !shipZip))) deny(400, 'FINANCE_ADDRESS', 'Enter the shipping address: street, city, state and ZIP', '请填写完整的收货地址：街道地址、城市、州和邮编。');
+  if (us) {
+    shipState = shipState.toUpperCase();
+    if (!US_STATES.has(shipState)) deny(400, 'FINANCE_STATE', 'Use the two-letter state code, e.g. CA', '州请用两位字母缩写，例如 CA。');
+    const zip = normalizeZip(shipZip);
+    if (!zip) deny(400, 'FINANCE_ZIP', 'ZIP must be 5 digits, or ZIP+4 like 12345-6789', '邮编要 5 位数字，或 5+4 位，例如 12345-6789。');
+    shipZip = zip;
+  }
+  return { customer: t(v.customer), contact, contactEmail, contactPhone, shipStreet, shipLine2: t(v.shipLine2), shipCity, shipState, shipZip, shipCountry };
+}
+const CONTACT_KEYS = ['customer', 'contact', 'contactEmail', 'contactPhone', 'shipStreet', 'shipLine2', 'shipCity', 'shipState', 'shipZip', 'shipCountry'] as const;
 
 /** Status and amounts of one invoice from its payments. */
 export function arState(amount: number, payments: { amount: number; state: string }[], dueDate: string | null, today: string) {
@@ -95,7 +146,8 @@ export async function registerFinanceRoutes(app: FastifyInstance, db: Database, 
   const shape = (r: any, pays: any[], files: number, ppl: Map<string, any>) => {
     const s = arState(Number(r.amount), pays.map(p => ({ amount: Number(p.amount), state: p.state })), ymd(r.due_date), today());
     return { id: r.id, number: r.number, responsibleId: r.responsible_id, responsibleName: nameOf(ppl.get(r.responsible_id)), invoiceDate: ymd(r.invoice_date),
-      paymentTerm: r.payment_term, termDays: r.term_days, dueDate: ymd(r.due_date), customer: r.customer, contact: r.contact, contactEmail: r.contact_email, kind: r.kind,
+      paymentTerm: r.payment_term, termDays: r.term_days, dueDate: ymd(r.due_date), customer: r.customer, contact: r.contact, contactEmail: r.contact_email, contactPhone: r.contact_phone,
+      shipStreet: r.ship_street, shipLine2: r.ship_line2, shipCity: r.ship_city, shipState: r.ship_state, shipZip: r.ship_zip, shipCountry: r.ship_country, kind: r.kind,
       orderRef: r.order_ref, amount: Number(r.amount), currency: r.currency, dispatched: r.dispatched, dispatchedOn: ymd(r.dispatched_on), payMethod: r.pay_method, note: r.note,
       fileCount: files, createdAt: r.created_at, updatedAt: r.updated_at, ...s };
   };
@@ -137,15 +189,21 @@ export async function registerFinanceRoutes(app: FastifyInstance, db: Database, 
 
   const fields = {
     responsibleId: id.nullable(), invoiceDate: day, paymentTerm: z.string().trim().max(40), termDays: z.number().int().min(0).max(365).nullable(), dueDate: day.nullable(),
-    customer: z.string().trim().min(1).max(200), contact: z.string().trim().max(120), contactEmail: z.string().trim().max(200), kind: z.string().trim().max(60),
+    customer: z.string().trim().max(200), contact: z.string().trim().max(120), contactEmail: z.string().trim().max(200), contactPhone: z.string().trim().max(40),
+    shipStreet: z.string().trim().max(200), shipLine2: z.string().trim().max(200), shipCity: z.string().trim().max(100), shipState: z.string().trim().max(60), shipZip: z.string().trim().max(20),
+    shipCountry: z.string().trim().max(60), kind: z.string().trim().max(60),
     orderRef: z.string().trim().max(80), amount: money, dispatched: z.boolean(), dispatchedOn: day.nullable(), payMethod: z.string().trim().max(40), note: z.string().trim().max(4000),
   };
+  // Contact name, email, phone and the address are checked by checkContact (with clear messages), so zod only caps their length.
   const createInput = z.object({ ...fields, responsibleId: id.nullable().optional(), paymentTerm: fields.paymentTerm.optional(), termDays: fields.termDays.optional(), dueDate: fields.dueDate.optional(),
-    contact: fields.contact.optional(), contactEmail: fields.contactEmail.optional(), kind: fields.kind.optional(), orderRef: fields.orderRef.optional(), dispatched: fields.dispatched.optional(),
+    customer: fields.customer.optional(), contact: fields.contact.optional(), contactEmail: fields.contactEmail.optional(), contactPhone: fields.contactPhone.optional(),
+    shipStreet: fields.shipStreet.optional(), shipLine2: fields.shipLine2.optional(), shipCity: fields.shipCity.optional(), shipState: fields.shipState.optional(), shipZip: fields.shipZip.optional(),
+    shipCountry: fields.shipCountry.optional(), kind: fields.kind.optional(), orderRef: fields.orderRef.optional(), dispatched: fields.dispatched.optional(),
     dispatchedOn: fields.dispatchedOn.optional(), payMethod: fields.payMethod.optional(), note: fields.note.optional() }).strict();
   const updateInput = z.object(fields).partial().strict().refine(v => Object.keys(v).length > 0, 'Nothing to change');
   const col: Record<string, string> = { responsibleId: 'responsible_id', invoiceDate: 'invoice_date', paymentTerm: 'payment_term', termDays: 'term_days', dueDate: 'due_date', customer: 'customer',
-    contact: 'contact', contactEmail: 'contact_email', kind: 'kind', orderRef: 'order_ref', amount: 'amount', dispatched: 'dispatched', dispatchedOn: 'dispatched_on', payMethod: 'pay_method', note: 'note' };
+    contact: 'contact', contactEmail: 'contact_email', contactPhone: 'contact_phone', shipStreet: 'ship_street', shipLine2: 'ship_line2', shipCity: 'ship_city', shipState: 'ship_state',
+    shipZip: 'ship_zip', shipCountry: 'ship_country', kind: 'kind', orderRef: 'order_ref', amount: 'amount', dispatched: 'dispatched', dispatchedOn: 'dispatched_on', payMethod: 'pay_method', note: 'note' };
   const checkDates = (v: any) => {
     for (const k of ['invoiceDate', 'dueDate', 'dispatchedOn']) if (v[k] && (v[k] < '2000-01-01' || v[k] > addDays(today(), 366))) deny(400, 'FINANCE_DATE', 'Check the date', '日期不对，请检查。');
   };
@@ -159,14 +217,17 @@ export async function registerFinanceRoutes(app: FastifyInstance, db: Database, 
   app.post('/finance/receivables', async (req, reply) => {
     const u = actorOf(req); requireManage(u);
     const v = createInput.parse(req.body); checkDates(v);
+    const c = checkContact(v as any);
     const out = await db.transaction(async tx => {
       await responsibleOk(tx, u.org_id, v.responsibleId);
       const year = v.invoiceDate.slice(0, 4);
       const n = Number((await tx.query("SELECT count(*)::int n FROM fin_receivables WHERE org_id=$1 AND number LIKE $2", [u.org_id, `AR-${year}-%`])).rows[0].n) + 1;
       const rid = randomUUID(), number = `AR-${year}-${String(n).padStart(4, '0')}`;
-      await tx.query(`INSERT INTO fin_receivables(id,org_id,number,responsible_id,invoice_date,payment_term,term_days,due_date,customer,contact,contact_email,kind,order_ref,amount,dispatched,dispatched_on,pay_method,note,created_by)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
-        [rid, u.org_id, number, v.responsibleId || null, v.invoiceDate, v.paymentTerm || '', v.termDays ?? null, dueOf(v), v.customer, v.contact || '', v.contactEmail || '', v.kind || '', v.orderRef || '',
+      await tx.query(`INSERT INTO fin_receivables(id,org_id,number,responsible_id,invoice_date,payment_term,term_days,due_date,customer,contact,contact_email,contact_phone,
+          ship_street,ship_line2,ship_city,ship_state,ship_zip,ship_country,kind,order_ref,amount,dispatched,dispatched_on,pay_method,note,created_by)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)`,
+        [rid, u.org_id, number, v.responsibleId || null, v.invoiceDate, v.paymentTerm || '', v.termDays ?? null, dueOf(v), c.customer, c.contact, c.contactEmail, c.contactPhone,
+          c.shipStreet, c.shipLine2, c.shipCity, c.shipState, c.shipZip, c.shipCountry, v.kind || '', v.orderRef || '',
           v.amount, !!v.dispatched, v.dispatched ? (v.dispatchedOn || null) : null, v.payMethod || '', v.note || '', u.id]);
       await note(tx, u, rid, 'created', `${number} · $${v.amount}`);
       await audit(tx, u, 'finance.receivable_created', rid, { number, amount: v.amount });
@@ -182,6 +243,14 @@ export async function registerFinanceRoutes(app: FastifyInstance, db: Database, 
       const r = await recordOf(tx, u, id.parse(req.params.id), true);
       if (v.responsibleId !== undefined) await responsibleOk(tx, u.org_id, v.responsibleId);
       const next: any = { ...v };
+      // Contact or address touched: check the whole set as it will be saved, so nothing required can be cleared.
+      if (CONTACT_KEYS.some(k => (v as any)[k] !== undefined)) {
+        const merged: any = { customer: r.customer, contact: r.contact, contactEmail: r.contact_email, contactPhone: r.contact_phone, shipStreet: r.ship_street, shipLine2: r.ship_line2,
+          shipCity: r.ship_city, shipState: r.ship_state, shipZip: r.ship_zip, shipCountry: r.ship_country };
+        for (const k of CONTACT_KEYS) if ((v as any)[k] !== undefined) merged[k] = (v as any)[k];
+        const c = checkContact(merged);
+        for (const k of CONTACT_KEYS) next[k] = c[k];
+      }
       if (v.dispatched === false) next.dispatchedOn = null;
       // The due date follows the invoice date and term unless it was entered.
       if ((v.invoiceDate !== undefined || v.termDays !== undefined) && v.dueDate === undefined) {

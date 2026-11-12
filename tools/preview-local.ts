@@ -97,6 +97,8 @@ for (const [sku, name, type, status, msrp, dealer, qty] of products) {
   await db.query('INSERT INTO wms_items(org_id,sku,name,type) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING', [ORG, sku, name, type]);
   if (qty) await db.query("INSERT INTO wms_stock(org_id,sku,location,qty) VALUES($1,$2,'us',$3) ON CONFLICT DO NOTHING", [ORG, sku, qty]);
 }
+// Only in the product library (as after a bulk import): Inventory lists it at zero and can receive it.
+await db.query("INSERT INTO product_catalog(org_id,sku,name_zh,name_en,type,status,msrp) VALUES($1,'DEMO-H7-PRO','示例 H7 Pro 主机','Demo H7 Pro','主机','live',11999) ON CONFLICT DO NOTHING", [ORG]);
 
 // Sample AI for the test site: "AI 拆任务" splits the text at sentence breaks and hands the pieces round the members,
 // so the draft-and-confirm flow can be tried without an AI account. Other AI features stay off here.
@@ -179,7 +181,8 @@ const app = await buildApp({
     ['m2', 'Demo Woodshop', 2, 'PO', '3115', 4577.49, false, 'check', []],
   ];
   for (const [owner, customer, days, kind, order, amount, shipped, method, pays] of rows) {
-    const r = (await call('POST', '/finance/receivables', { responsibleId: owner, invoiceDate: ago(days), paymentTerm: 'net30', termDays: 30, customer, contact: '示例联系人', kind, orderRef: order, amount, dispatched: shipped, dispatchedOn: shipped ? ago(days - 1) : null, payMethod: method })).json();
+    const r = (await call('POST', '/finance/receivables', { responsibleId: owner, invoiceDate: ago(days), paymentTerm: 'net30', termDays: 30, customer, contact: '示例联系人', contactEmail: 'ap@example.com', contactPhone: '(626) 555-0' + String(100 + rows.findIndex(x => x[1] === customer)),
+      shipStreet: '100 Example Ave', shipCity: 'Pasadena', shipState: 'CA', shipZip: '91101', kind, orderRef: order, amount, dispatched: shipped, dispatchedOn: shipped ? ago(days - 1) : null, payMethod: method })).json();
     for (const [d, state, amt] of pays) await call('POST', `/finance/receivables/${r.id}/payments`, { receivedOn: ago(d), amount: amt, method, state });
   }
 }
@@ -190,17 +193,6 @@ createServer(async (req, res) => {
     const url = new URL(req.url || '/', 'http://preview.local'), method = req.method || 'GET';
     res.setHeader('x-robots-tag', 'noindex, nofollow');
     if (url.pathname === '/healthz') { res.writeHead(200, { 'content-type': 'text/plain' }); return res.end('ok'); }
-    // No login on the test site: /preview-enter signs in as one of the fictional accounts and goes to the app.
-    if (url.pathname === '/preview-enter') {
-      const who = ({ owner: 'owner', hr: 'hr', staff: 'staff' } as Record<string, string>)[url.searchParams.get('as') || 'owner'] || 'owner';
-      const r = await app.inject({ method: 'POST', url: '/auth/password', payload: { email: `${who}@workos.test`, password: PASSWORD }, headers: { origin: ORIGIN } });
-      res.writeHead(302, { location: '/', 'set-cookie': r.headers['set-cookie'] as any, 'cache-control': 'no-store' }); return res.end();
-    }
-    // Opening the site with no session, or with one from before the last reset (every deploy wipes the data), goes straight in.
-    const signedIn = async () => !!req.headers.cookie && (await app.inject({ method: 'GET', url: '/me', headers: { cookie: String(req.headers.cookie) } })).statusCode === 200;
-    if ((url.pathname === '/' || url.pathname === '/index.html') && !(await signedIn())) {
-      res.writeHead(302, { location: '/preview-enter?as=owner', 'cache-control': 'no-store' }); return res.end();
-    }
     if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/.well-known/')) {
       const chunks: Buffer[] = []; for await (const c of req) chunks.push(c as Buffer);
       const headers = { ...req.headers }; delete headers['content-length']; delete headers.host;
