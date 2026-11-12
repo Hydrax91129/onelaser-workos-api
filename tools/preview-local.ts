@@ -212,6 +212,14 @@ const app = await buildApp({
   }
 }
 
+// Product facts the supply chain needs (fictional): family, production lead time, first leg and MOQ.
+{
+  const org = (await db.query("SELECT org_id FROM users WHERE id='m1'")).rows[0].org_id;
+  for (const [sku, family, lead, firstLeg, moq] of [['DEMO-H7-PRO', 'main', '25 天', '海运 35 天', '5 台'], ['DEMO-F2-100W', 'main', '20 天', '海运 35 天', '10 台'], ['DEMO-F2-60W', 'main', '20 天', '海运 35 天', '10 台'],
+    ['DEMO-AF-200', 'acc', '15 天', '海运 30 天', '20 件'], ['DEMO-RA-1', 'acc', '15 天', '', '20 件'], ['DEMO-LENS-2', 'cons', '', '空运 7 天', '50 片']] as const)
+    await db.query(`UPDATE product_catalog SET family=$3, lead=$4::text, attrs=COALESCE(attrs,'{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object('firstLeg', NULLIF($5::text,''), 'moqUnit', $6::text)) WHERE org_id=$1 AND sku=$2`, [org, sku, family, lead, firstLeg, moq]);
+}
+
 // SCM: a year of fictional daily sales per SKU (as if synced from Shopify) and two shipments on the water.
 {
   const token = (await issueSession(db, 'm1')).accessToken, call = (method: string, url: string, payload?: unknown) => app.inject({ method: method as any, url, payload: payload as any, headers: { authorization: `Bearer ${token}` } });
@@ -232,6 +240,14 @@ const app = await buildApp({
   if (atFactory.length) await call('POST', '/wms/movements/batch', { type: 'in', location: 'dg', opDate: ago(5), reason: '示例：工厂成品入库', lines: atFactory });
   if (skus[0]) await call('POST', '/scm/shipments', { number: 'DEMO-MSKU-0001', mode: 'sea', carrier: '示例船公司', tracking: 'https://track.example.com/DEMO-MSKU-0001', source: 'new', shippedOn: ago(18), etaDays: 35, lines: skus.slice(0, 3).map((sku: string, i: number) => ({ sku, qty: [40, 25, 60][i] })) });
   if (skus[1]) await call('POST', '/scm/shipments', { number: 'DEMO-AIR-0002', mode: 'air', carrier: '示例快递', tracking: 'DEMO1234567890', source: 'new', shippedOn: ago(2), etaDays: 7, lines: [{ sku: skus[skus.length - 1], qty: 12 }] });
+  // Ship position, an arrival notice waiting for the warehouse, shelf bins and a purchase order partly finished (all fictional).
+  const board = (await call('GET', '/scm/board')).json();
+  const sea = board.shipments?.find((x: any) => x.number === 'DEMO-MSKU-0001'), air = board.shipments?.find((x: any) => x.number === 'DEMO-AIR-0002');
+  if (sea) await call('POST', `/scm/shipments/${sea.id}/position`, { position: '示例：已过夏威夷，按计划航行' });
+  if (air) await call('POST', `/scm/shipments/${air.id}/notify`, {});
+  await call('POST', '/wms/bin-codes', { location: 'us', codes: ['A-01-01', 'A-01-02', 'A-01-03', 'A-02-01', 'A-02-02', 'C-10-03', 'C-10-04', 'D-01-01', 'D-01-02'], note: '示例货架' });
+  const po = (await call('POST', '/scm/orders', { factory: 'dg', orderedOn: ago(10), note: '示例采购单', lines: skus.slice(0, 2).map((sku: string, i: number) => ({ sku, qty: [120, 60][i] })) })).json();
+  if (po?.id && skus[0]) await call('POST', `/scm/orders/${po.id}/finish`, { opDate: ago(1), lines: [{ sku: skus[0], qty: 40 }] });
 }
 
 const TYPES: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.otf': 'font/otf', '.woff2': 'font/woff2', '.png': 'image/png', '.json': 'application/json', '.webp': 'image/webp', '.ico': 'image/x-icon' };

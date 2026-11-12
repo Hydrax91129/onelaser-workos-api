@@ -23,8 +23,8 @@ test('in-app admins do not bypass grants on sensitive ERP data and cannot change
   // Warehouse
   assert.equal((await call('m2','POST','/wms/import',{rows:[]})).statusCode,403,'in-app admin cannot import opening stock');
   // ERP permission page and grant changes
-  assert.equal((await call('m2','POST','/erp/access',{userId:'m2',area:'pricing',level:'full'})).statusCode,403,'cannot grant itself cost access');
-  assert.equal((await call('m2','POST','/erp/access',{userId:'m6',area:'pricing',level:'full'})).statusCode,403,'cannot grant others cost access');
+  assert.equal((await call('m2','POST','/erp/access',{userId:'m2',area:'pricing',level:'view'})).statusCode,403,'cannot grant itself cost access');
+  assert.equal((await call('m2','POST','/erp/access',{userId:'m6',area:'pricing',level:'view'})).statusCode,403,'cannot grant others cost access');
   const self=await call('m2','PATCH','/org/members/m2',{grants:['products','product_cost_detail']});
   assert.equal(self.statusCode,403,self.body);assert.equal(self.json().error.code,'GRANTS_EXECUTIVE_ONLY');
   assert.equal((await call('m2','PATCH','/org/members/m6',{grants:['products']})).statusCode,403,'cannot grant others');

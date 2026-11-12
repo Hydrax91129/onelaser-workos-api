@@ -19,6 +19,7 @@ import { deny } from './errors.js';
 import {
   FAMILIES, FIELD, GROUPS, CLEAR, CORE_REQUIRED, fieldOf, VIS_NAMES, allFields, canSee, canWrite, completeness, enumLabel, famCode, parseValue, viewerOf, relationIssues,
   type Field, type Viewer,
+  canBulkImport,
 } from './product-spec.js';
 import { worksheet, type Worksheet } from './product-worksheet.js';
 import { loadRecords, findRec, worksheetOf, writeRecord, validateValues, recordIssues, same, type Rec, type WriteOpts, type Change } from './product-library.js';
@@ -40,16 +41,11 @@ const MAX_ROWS = 5000;
 const REQ_ZH: Record<string, string> = { req: '必填', opt: '选填', na: '不适用' };
 const header = (f: Field) => f.zh + (f.unit ? `（${f.unit}）` : f.type === 'price' ? '（USD）' : '');
 /** Template columns: everything the viewer may see except the main image (uploaded on the product page). */
-// SKU 管理 and 定价管理 each download their own template: pricing groups (4, 5) go only into the pricing one, which keeps
-// the identifying columns (SKU, family, names) so each row is easy to recognise. Upload accepts either file.
-export type TemplateScope = 'all' | 'sku' | 'pricing';
-const PRICING_GROUPS = new Set(['4', '5']), PRICING_ID = new Set(['sku', 'family', 'nameZh', 'nameEn']);
-const inScope = (f: Field, scope: TemplateScope) => scope === 'all' || (scope === 'pricing' ? PRICING_GROUPS.has(f.group) || PRICING_ID.has(f.key) : !PRICING_GROUPS.has(f.group));
-export const templateFields = (v: Viewer, ws: Worksheet, scope: TemplateScope = 'all') => allFields(ws.whTiers).filter(f => f.type !== 'image' && canSee(v, f.vis) && inScope(f, scope));
+export const templateFields = (v: Viewer, ws: Worksheet) => allFields(ws.whTiers).filter(f => f.type !== 'image' && canSee(v, f.vis));
 const cellOf = (f: Field, val: any) => val == null ? '' : f.type === 'enum' ? enumLabel(f, val) : val;
 
-export function templateRows(v: Viewer, ws: Worksheet, recs: Rec[], scope: TemplateScope = 'all') {
-  const fields = templateFields(v, ws, scope);
+export function templateRows(v: Viewer, ws: Worksheet, recs: Rec[]) {
+  const fields = templateFields(v, ws);
   return { fields, rows: [fields.map(header), fields.map(f => f.key), ...recs.map(r => fields.map(f => cellOf(f, r.values[f.key])))] };
 }
 function notesSheet(fields: Field[]) {
@@ -78,8 +74,8 @@ function notesSheet(fields: Field[]) {
     ],
   };
 }
-export function buildTemplate(format: 'xlsx' | 'csv', v: Viewer, ws: Worksheet, recs: Rec[], scope: TemplateScope = 'all') {
-  const { fields, rows } = templateRows(v, ws, recs, scope);
+export function buildTemplate(format: 'xlsx' | 'csv', v: Viewer, ws: Worksheet, recs: Rec[]) {
+  const { fields, rows } = templateRows(v, ws, recs);
   if (format === 'csv') return Buffer.from(writeCsv(rows), 'utf8');
   const last = Math.max(rows.length + 500, 1000);
   return writeXlsx([
@@ -265,20 +261,18 @@ export async function registerProductImportRoutes(app: FastifyInstance, db: Data
 }) {
   const actorOf = (req: FastifyRequest): User => req.actor || deny(401, 'UNAUTHENTICATED', 'Authentication is required');
   const viewer = (u: User) => viewerOf(Array.isArray((u as any).grants) ? (u as any).grants : [], o.isAdmin(u));
-  /** Main admins, and the people they allow in 供应链权限管理 (grant products_import). Which columns each person can change still follows their field access. */
-  const canImport = (u: User) => o.isAdmin(u) || (Array.isArray((u as any).grants) && (u as any).grants.includes('products_import'));
+  /** Main admins, 价格·管理 and 产品资料·管理信息 (product-spec.ts canBulkImport). Which columns each person can change still follows their field access. */
+  const canImport = (u: User) => canBulkImport(Array.isArray((u as any).grants) ? (u as any).grants : [], o.isAdmin(u));
   const adminOnly = (u: User) => { if (!canImport(u)) deny(403, 'PRODUCT_IMPORT_FORBIDDEN', 'Only people allowed to bulk-update products can do this', '只有主管理员授权的人可以批量更新 SKU 和价格。'); };
   const stamp = () => new Date().toISOString().slice(0, 10);
 
   // Anyone who can open the product library may download what they can see; the columns follow their level.
   app.get('/products/library/template', async (req, reply) => {
     const u = actorOf(req), v = viewer(u), format = z.enum(['xlsx', 'csv']).default('xlsx').parse((req.query as any)?.format);
-    const scope = z.enum(['all', 'sku', 'pricing']).default('all').parse((req.query as any)?.scope);
-    if (scope === 'pricing' && !templateFields(v, (await worksheetOf(db, u.org_id)).settings, 'pricing').some(f => PRICING_GROUPS.has(f.group))) deny(403, 'PRICING_TEMPLATE_FORBIDDEN', 'You cannot see any price columns', '你没有可以查看的价格列。');
     const ws = (await worksheetOf(db, u.org_id)).settings, recs = [...(await loadRecords(db, u.org_id)).values()];
-    const file = buildTemplate(format, v, ws, recs, scope), name = `OneLaser_${scope === 'pricing' ? '定价' : scope === 'sku' ? 'SKU资料' : '产品资料'}_${stamp()}.${format}`;
+    const file = buildTemplate(format, v, ws, recs), name = `OneLaser_产品资料_${stamp()}.${format}`;
     await db.query('INSERT INTO audit_events(id,org_id,department_id,owner_id,actor_id,action,object_id,details) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',
-      [randomUUID(), u.org_id, u.department_id, u.id, u.id, 'products.template_downloaded', format, JSON.stringify({ rows: recs.length, scope, levels: [...v.levels] })]);
+      [randomUUID(), u.org_id, u.department_id, u.id, u.id, 'products.template_downloaded', format, JSON.stringify({ rows: recs.length, levels: [...v.levels] })]);
     return reply.header('content-type', format === 'xlsx' ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : 'text/csv; charset=utf-8')
       .header('cache-control', 'private, no-store').header('content-disposition', `attachment; filename*=UTF-8''${encodeURIComponent(name)}`).send(file);
   });

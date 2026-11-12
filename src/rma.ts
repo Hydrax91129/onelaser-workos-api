@@ -73,7 +73,7 @@ export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: {
   const level = (u: User) => returnsLevelFor(u, o.isAdmin(u));
   const requireView = (u: User) => { if (level(u) === 'none') deny(403, 'RMA_FORBIDDEN', 'You do not have access to returns and repairs'); };
   const requireManage = (u: User) => { if (level(u) !== 'manage') deny(403, 'RMA_MANAGE_ONLY', 'Only warehouse managers can do this'); };
-  const canPrice = (u: User) => o.isAdmin(u) || ((u as any).grants || []).includes('pricing_msrp');
+  const canPrice = (u: User) => o.isAdmin(u) || ((u as any).grants || []).includes('pricing_edit');
   const canWork = (u: User, c: any) => level(u) === 'manage' || (!!c.technician_id && c.technician_id === u.id);
   const event = (tx: Queryable, u: User, caseId: string, action: string, note = '') =>
     tx.query('INSERT INTO rma_events(id,org_id,case_id,actor_id,action,note) VALUES($1,$2,$3,$4,$5,$6)', [randomUUID(), u.org_id, caseId, u.id, action, note.slice(0, 2000)]);

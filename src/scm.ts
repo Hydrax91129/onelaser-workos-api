@@ -18,7 +18,8 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
 import { deny } from './errors.js';
-import { wmsMoveLines, isReturnSku } from './wms.js';
+import { pushInbox } from './inbox.js';
+import { wmsMoveLines, isReturnSku, warehouseLevelFor } from './wms.js';
 import type { ShopifyOptions } from './shopify.js';
 import { SHOPIFY_API_VERSION } from './shopify.js';
 
@@ -28,11 +29,26 @@ CREATE TABLE IF NOT EXISTS scm_sync(org_id text PRIMARY KEY, last_at timestamptz
   since date, note text NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS scm_settings(org_id text PRIMARY KEY, target_days integer NOT NULL DEFAULT 30, safety_days integer NOT NULL DEFAULT 14, lead_days integer NOT NULL DEFAULT 60,
   updated_by text, updated_at timestamptz NOT NULL DEFAULT now());
+ALTER TABLE scm_settings ADD COLUMN IF NOT EXISTS order_days integer NOT NULL DEFAULT 2;
+ALTER TABLE scm_settings ADD COLUMN IF NOT EXISTS receive_days integer NOT NULL DEFAULT 5;
+ALTER TABLE scm_settings ADD COLUMN IF NOT EXISTS buffer_days integer NOT NULL DEFAULT 0;
+ALTER TABLE scm_settings ADD COLUMN IF NOT EXISTS production_days integer NOT NULL DEFAULT 30;
+ALTER TABLE scm_settings ADD COLUMN IF NOT EXISTS first_leg_days integer NOT NULL DEFAULT 35;
 CREATE TABLE IF NOT EXISTS scm_shipments(id text PRIMARY KEY, org_id text NOT NULL, number text NOT NULL, mode text NOT NULL DEFAULT 'sea', carrier text NOT NULL DEFAULT '',
   tracking text NOT NULL DEFAULT '', source text NOT NULL, shipped_on date NOT NULL, eta date NOT NULL, status text NOT NULL DEFAULT 'in_transit', arrived_on date,
   note text NOT NULL DEFAULT '', created_by text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
 CREATE UNIQUE INDEX IF NOT EXISTS scm_shipments_number ON scm_shipments(org_id, number);
+ALTER TABLE scm_shipments ADD COLUMN IF NOT EXISTS order_id text;
+ALTER TABLE scm_shipments ADD COLUMN IF NOT EXISTS position text NOT NULL DEFAULT '';
+ALTER TABLE scm_shipments ADD COLUMN IF NOT EXISTS position_on date;
+CREATE TABLE IF NOT EXISTS scm_orders(id text PRIMARY KEY, org_id text NOT NULL, number text NOT NULL, factory text NOT NULL, ordered_on date NOT NULL,
+  ready_on date, status text NOT NULL DEFAULT 'open', note text NOT NULL DEFAULT '', created_by text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), closed_on date);
+CREATE UNIQUE INDEX IF NOT EXISTS scm_orders_number ON scm_orders(org_id, number);
+CREATE TABLE IF NOT EXISTS scm_order_lines(order_id text NOT NULL, sku text NOT NULL, qty integer NOT NULL CHECK (qty >= 0), shipped integer NOT NULL DEFAULT 0, PRIMARY KEY(order_id, sku));
+ALTER TABLE scm_shipments ADD COLUMN IF NOT EXISTS notified_on date;
+ALTER TABLE scm_shipments ADD COLUMN IF NOT EXISTS notified_by text;
 CREATE TABLE IF NOT EXISTS scm_shipment_lines(shipment_id text NOT NULL, sku text NOT NULL, qty integer NOT NULL CHECK (qty > 0), PRIMARY KEY(shipment_id, sku));
+ALTER TABLE scm_shipment_lines ADD COLUMN IF NOT EXISTS received integer;
 `;
 
 const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use a date like 2026-11-12');
@@ -46,13 +62,36 @@ export const leadDaysOf = (production: unknown, firstLeg: unknown) => {
   const a = num(production), b = num(firstLeg);
   return a == null && b == null ? null : Math.round((a || 0) + (b || 0));
 };
-/** Reorder suggestion for one SKU. ds = daily units sold; stock in units. */
-export function reorderOf(o: { ds: number; us: number; transit: number; factory: number; leadDays: number; targetDays: number; safetyDays: number }) {
-  const need = Math.ceil(o.ds * (o.leadDays + o.targetDays + o.safetyDays)), have = o.us + o.transit;
-  const gap = Math.max(0, need - have), ship = Math.min(gap, o.factory), make = gap - ship;
+export const daysIn = (s: unknown) => { const m = String(s ?? '').match(/\d+(?:\.\d+)?/); return m ? Math.round(Number(m[0])) : null; };
+/** Supply-chain days to the US warehouse (owner, 2026-11-12): order + production + first leg + customs & receiving + buffer.
+ *  Goods already finished at the factory skip production. */
+export const supplyDaysOf = (o: { order: number; production: number; firstLeg: number; receive: number; buffer: number }) => ({
+  full: o.order + o.production + o.firstLeg + o.receive + o.buffer, fromStock: o.order + o.firstLeg + o.receive + o.buffer });
+/** Forecast daily sales (owner, 2026-11-12: weigh seasonality and short bursts or dips).
+ *  40 % the last 30 days, 30 % the last 90, 30 % the year — the year scaled by last year's next 90 days against the yearly
+ *  average (seasonality, 0.5–2×, only with ≥ 300 days of history). A burst (30-day rate ≥ 1.3 × the 90-day rate) counts
+ *  in only up to 2 × the 90-day rate so one viral week does not triple the order; a dip (≤ 0.7 ×) counts in fully. */
+export function forecastOf(o: { ds30: number; ds90: number; ds365: number; nextLastYear: number | null; history: number }) {
+  const season = o.history >= 300 && o.ds365 > 0 && o.nextLastYear != null ? Math.min(2, Math.max(0.5, o.nextLastYear / o.ds365)) : 1;
+  const signal = o.ds90 > 0 && o.ds30 >= 1.3 * o.ds90 ? 'spike' : o.ds90 > 0 && o.ds30 <= 0.7 * o.ds90 ? 'dip' : o.ds90 <= 0 && o.ds30 > 0 ? 'spike' : 'steady';
+  const recent = signal === 'spike' && o.ds90 > 0 ? Math.min(o.ds30, 2 * o.ds90) : o.ds30;
+  const ds = Math.max(0, 0.4 * recent + 0.3 * o.ds90 + 0.3 * o.ds365 * season);
+  return { ds, season: Math.round(season * 100) / 100, signal, trendPct: o.ds90 > 0 ? Math.round((o.ds30 / o.ds90 - 1) * 100) : null };
+}
+/** Reorder suggestion for one SKU (owner, 2026-11-12). ds = forecast daily units. Two totals drive it:
+ *  finished goods (US + in transit + factory warehouses) decide what to ship from the factory; finished goods + work in
+ *  progress (open purchase orders not finished yet) decide what to order from production, so nothing is ordered twice.
+ *  Three statuses: 缺货风险 / 正常 / 库存过多. */
+export function reorderOf(o: { ds: number; us: number; transit: number; factory: number; leadDays: number; targetDays: number; safetyDays: number; wip?: number }) {
+  const horizon = o.leadDays + o.targetDays + o.safetyDays, wip = o.wip || 0;
+  const need = Math.ceil(o.ds * horizon), have = o.us + o.transit, finished = have + o.factory, pipeline = finished + wip;
+  const ship = Math.min(Math.max(0, need - have), o.factory), make = Math.max(0, need - pipeline), gap = Math.max(0, need - have);
   const cover = o.ds > 0 ? Math.floor(have / o.ds) : null;
-  const status = o.ds <= 0 ? (have > 0 ? 'no_sales' : 'idle') : cover! < o.leadDays ? 'risk' : gap > 0 ? 'reorder' : cover! > 180 ? 'overstock' : 'ok';
-  return { need, gap, ship, make, cover, monthly: Math.ceil(o.ds * 30), status };
+  const coverFinished = o.ds > 0 ? Math.floor(finished / o.ds) : null, coverAll = o.ds > 0 ? Math.floor(pipeline / o.ds) : null;
+  // risk: what is in the US or on the way runs out before a reorder can arrive; overstock: everything finished lasts 90+ days past the target
+  const status = cover == null ? (finished > 0 ? 'overstock' : 'ok') : cover < o.leadDays ? 'risk' : coverFinished! > horizon + 90 ? 'overstock' : 'ok';
+  const shortDays = cover != null && cover < o.leadDays ? o.leadDays - cover : 0;
+  return { need, gap, ship, make, cover, coverFinished, coverAll, finished, pipeline, monthly: Math.ceil(o.ds * 30), status, shortDays, horizon };
 }
 
 export async function registerScmRoutes(app: FastifyInstance, db: Database, o: { isAdmin: (u: User) => boolean; shopify?: ShopifyOptions; now?: () => number }) {
@@ -65,48 +104,76 @@ export async function registerScmRoutes(app: FastifyInstance, db: Database, o: {
   const audit = (tx: Queryable, u: User, action: string, objectId: string, details: unknown) =>
     tx.query('INSERT INTO audit_events(id,org_id,department_id,owner_id,actor_id,action,object_id,details) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',
       [randomUUID(), u.org_id, u.department_id, u.id, u.id, action, objectId, JSON.stringify(details)]);
-  const settingsOf = async (org: string) => {
-    const r = (await db.query('SELECT * FROM scm_settings WHERE org_id=$1', [org])).rows[0];
-    return { targetDays: r?.target_days ?? 30, safetyDays: r?.safety_days ?? 14, leadDays: r?.lead_days ?? 60 };
+  const settingsOf = async (org: string, q: Queryable = db) => {
+    const r = (await q.query('SELECT * FROM scm_settings WHERE org_id=$1', [org])).rows[0];
+    return { targetDays: r?.target_days ?? 30, safetyDays: r?.safety_days ?? 14, orderDays: r?.order_days ?? 2, receiveDays: r?.receive_days ?? 5,
+      bufferDays: r?.buffer_days ?? 0, productionDays: r?.production_days ?? 30, firstLegDays: r?.first_leg_days ?? 35 };
   };
 
   /* ---------- the board ---------- */
   app.get('/scm/board', async req => {
     const u = actorOf(req); requireView(u);
     const s = await settingsOf(u.org_id), t = today(), since365 = addDays(t, -365), since30 = addDays(t, -30);
-    const catalog = (await db.query(`SELECT sku,name_zh,name_en,family,status,lead,COALESCE(attrs->>'firstLeg','') first_leg FROM product_catalog WHERE org_id=$1 AND lower(sku) NOT LIKE 'ref-%'`, [u.org_id])).rows;
-    const sales = new Map<string, { d365: number; d30: number }>();
-    for (const r of (await db.query(`SELECT lower(sku) k, sum(qty)::int q365, sum(CASE WHEN day >= $3 THEN qty ELSE 0 END)::int q30 FROM scm_sales_daily WHERE org_id=$1 AND day >= $2 AND day < $4 GROUP BY 1`,
-      [u.org_id, since365, since30, t])).rows) sales.set(r.k, { d365: Number(r.q365), d30: Number(r.q30) });
+    const catalog = (await db.query(`SELECT sku,name_zh,name_en,family,status,lead,COALESCE(attrs->>'firstLeg','') first_leg,COALESCE(attrs->>'moqUnit','') moq FROM product_catalog WHERE org_id=$1 AND lower(sku) NOT LIKE 'ref-%'`, [u.org_id])).rows;
+    const sales = new Map<string, { d365: number; d30: number; d90: number; ly: number }>();
+    // Last year's next 90 days (seasonality): the 90 days that started a year ago.
+    const since90 = addDays(t, -90), nextLyEnd = addDays(t, -275);
+    for (const r of (await db.query(`SELECT lower(sku) k, sum(qty)::int q365, sum(CASE WHEN day >= $3 THEN qty ELSE 0 END)::int q30,
+        sum(CASE WHEN day >= $5 THEN qty ELSE 0 END)::int q90, sum(CASE WHEN day < $6 THEN qty ELSE 0 END)::int qly
+        FROM scm_sales_daily WHERE org_id=$1 AND day >= $2 AND day < $4 GROUP BY 1`,
+      [u.org_id, since365, since30, t, since90, nextLyEnd])).rows) sales.set(r.k, { d365: Number(r.q365), d30: Number(r.q30), d90: Number(r.q90), ly: Number(r.qly) });
     const stock = new Map<string, Record<string, number>>();
     for (const r of (await db.query('SELECT lower(sku) k, location, qty FROM wms_stock WHERE org_id=$1', [u.org_id])).rows) { if (!stock.has(r.k)) stock.set(r.k, {}); stock.get(r.k)![r.location] = Number(r.qty); }
     const sync = (await db.query('SELECT * FROM scm_sync WHERE org_id=$1', [u.org_id])).rows[0];
+    const wipOf = new Map<string, number>();
+    for (const r of (await db.query(`SELECT lower(l.sku) k, sum(GREATEST(l.qty - l.shipped, 0))::int q FROM scm_order_lines l JOIN scm_orders o ON o.id=l.order_id
+      WHERE o.org_id=$1 AND o.status='open' GROUP BY 1`, [u.org_id])).rows) wipOf.set(r.k, Number(r.q));
     // Days of sales in the table: up to 365, fewer when the history is shorter (DS is then over the days we have).
     const first = (await db.query('SELECT min(day) d FROM scm_sales_daily WHERE org_id=$1', [u.org_id])).rows[0]?.d;
-    const span365 = first ? Math.max(1, Math.min(365, Math.round((Date.parse(t) - Date.parse(ymd(first)!)) / 86400000))) : 365, span30 = Math.min(30, span365);
+    const span365 = first ? Math.max(1, Math.min(365, Math.round((Date.parse(t) - Date.parse(ymd(first)!)) / 86400000))) : 365, span30 = Math.min(30, span365), span90 = Math.min(90, span365);
     const items = catalog.map((c: any) => {
-      const k = String(c.sku).toLowerCase(), sl = sales.get(k) || { d365: 0, d30: 0 }, st = stock.get(k) || {};
-      const ds365 = sl.d365 / span365, ds30 = sl.d30 / span30, lead = leadDaysOf(c.lead, c.first_leg) ?? s.leadDays;
+      const k = String(c.sku).toLowerCase(), sl = sales.get(k) || { d365: 0, d30: 0, d90: 0, ly: 0 }, st = stock.get(k) || {};
+      const ds365 = sl.d365 / span365, ds30 = sl.d30 / span30, ds90 = sl.d90 / span90;
+      const fc = forecastOf({ ds30, ds90, ds365, nextLastYear: span365 >= 300 ? sl.ly / 90 : null, history: span365 });
       const us = st.us || 0, transit = st.transit || 0, factory = (st.dg || 0) + (st.jn || 0);
+      // Production and first leg come from the product library; settings fill in what is missing (shown with *).
+      const prodLib = daysIn(c.lead), legLib = daysIn(c.first_leg), production = prodLib ?? s.productionDays, firstLeg = legLib ?? s.firstLegDays;
+      const days = supplyDaysOf({ order: s.orderDays, production, firstLeg, receive: s.receiveDays, buffer: s.bufferDays });
+      // Finished goods at the factory ship first, so the clock is the shorter one while there is factory stock.
+      const leadDays = factory > 0 ? days.fromStock : days.full;
       return { sku: c.sku, nameZh: c.name_zh || '', nameEn: c.name_en || '', family: c.family || '', lifecycle: c.status || '', sold365: sl.d365, sold30: sl.d30,
-        ds365: r1(ds365), ds30: r1(ds30), us, transit, factory, leadDays: lead, leadFromLibrary: leadDaysOf(c.lead, c.first_leg) != null,
-        ...reorderOf({ ds: ds365, us, transit, factory, leadDays: lead, targetDays: s.targetDays, safetyDays: s.safetyDays }) };
+        ds365: r1(ds365), ds90: r1(ds90), ds30: r1(ds30), forecast: r1(fc.ds), season: fc.season, signal: fc.signal, trendPct: fc.trendPct, us, transit, dg: st.dg || 0, jn: st.jn || 0, factory, moq: c.moq || '', productionDays: production, firstLegDays: firstLeg,
+        productionFromLibrary: prodLib != null, firstLegFromLibrary: legLib != null, supplyDays: days.full, stockDays: days.fromStock, leadDays,
+        arriveOn: addDays(t, leadDays), leadFromLibrary: prodLib != null && legLib != null,
+        wip: wipOf.get(k) || 0,
+        ...reorderOf({ ds: fc.ds, us, transit, factory, leadDays, targetDays: s.targetDays, safetyDays: s.safetyDays, wip: wipOf.get(k) || 0 }) };
     });
-    const ships = (await db.query(`SELECT * FROM scm_shipments WHERE org_id=$1 AND (status='in_transit' OR arrived_on >= $2) ORDER BY eta, number`, [u.org_id, addDays(t, -60)])).rows;
+    const ships = (await db.query(`SELECT * FROM scm_shipments WHERE org_id=$1 AND (status IN ('in_transit','at_port') OR arrived_on >= $2) ORDER BY eta, number`, [u.org_id, addDays(t, -60)])).rows;
     const lines = ships.length ? (await db.query('SELECT * FROM scm_shipment_lines WHERE shipment_id=ANY($1::text[]) ORDER BY sku', [ships.map((x: any) => x.id)])).rows : [];
-    const shipments = ships.map((x: any) => { const ls = lines.filter((l: any) => l.shipment_id === x.id).map((l: any) => ({ sku: l.sku, qty: Number(l.qty) }));
+    const shipments = ships.map((x: any) => { const ls = lines.filter((l: any) => l.shipment_id === x.id).map((l: any) => ({ sku: l.sku, qty: Number(l.qty), ...(l.received != null ? { received: Number(l.received) } : {}) }));
       return { id: x.id, number: x.number, mode: x.mode, carrier: x.carrier, tracking: x.tracking, source: x.source, shippedOn: ymd(x.shipped_on), eta: ymd(x.eta), status: x.status,
         arrivedOn: ymd(x.arrived_on), note: x.note, lines: ls, units: ls.reduce((a: number, l: any) => a + l.qty, 0),
-        daysLeft: x.status === 'in_transit' ? Math.round((Date.parse(ymd(x.eta)!) - Date.parse(t)) / 86400000) : null }; });
-    return { settings: s, items, shipments, canManage: levelOf(u) === 'manage', shopify: { configured: shopifyConfigured(), lastAt: sync?.last_at || null, status: sync?.status || '',
+        notifiedOn: ymd(x.notified_on), orderId: x.order_id || null, position: x.position || '', positionOn: ymd(x.position_on),
+        daysTotal: Math.max(1, Math.round((Date.parse(ymd(x.eta)!) - Date.parse(ymd(x.shipped_on)!)) / 86400000)), daysGone: Math.max(0, Math.round((Date.parse(t) - Date.parse(ymd(x.shipped_on)!)) / 86400000)), daysLeft: x.status === 'in_transit' ? Math.round((Date.parse(ymd(x.eta)!) - Date.parse(t)) / 86400000) : null }; });
+    const ords = (await db.query(`SELECT * FROM scm_orders WHERE org_id=$1 AND (status='open' OR closed_on >= $2) ORDER BY ordered_on DESC, number`, [u.org_id, addDays(t, -120)])).rows;
+    const olines = ords.length ? (await db.query('SELECT * FROM scm_order_lines WHERE order_id=ANY($1::text[]) ORDER BY sku', [ords.map((x: any) => x.id)])).rows : [];
+    const orders = ords.map((x: any) => { const ls = olines.filter((l: any) => l.order_id === x.id).map((l: any) => ({ sku: l.sku, qty: Number(l.qty), done: Number(l.shipped) }));
+      return { id: x.id, number: x.number, factory: x.factory, orderedOn: ymd(x.ordered_on), readyOn: ymd(x.ready_on), status: x.status, closedOn: ymd(x.closed_on), note: x.note, lines: ls,
+        units: ls.reduce((a: number, l: any) => a + l.qty, 0), left: ls.reduce((a: number, l: any) => a + Math.max(0, l.qty - l.done), 0),
+        daysToReady: x.ready_on && x.status === 'open' ? Math.round((Date.parse(ymd(x.ready_on)!) - Date.parse(t)) / 86400000) : null }; });
+    return { settings: s, items, shipments, orders, canManage: levelOf(u) === 'manage', shopify: { configured: shopifyConfigured(), lastAt: sync?.last_at || null, status: sync?.status || '',
       orders: sync?.orders || 0, units: sync?.units || 0, since: ymd(sync?.since), note: sync?.note || '', daysOfHistory: first ? span365 : 0 } };
   });
 
   app.put('/scm/settings', async req => {
     const u = actorOf(req); requireManage(u);
-    const v = z.object({ targetDays: z.number().int().min(1).max(365), safetyDays: z.number().int().min(0).max(180), leadDays: z.number().int().min(1).max(365) }).strict().parse(req.body);
-    await db.query(`INSERT INTO scm_settings(org_id,target_days,safety_days,lead_days,updated_by,updated_at) VALUES($1,$2,$3,$4,$5,now())
-      ON CONFLICT(org_id) DO UPDATE SET target_days=$2,safety_days=$3,lead_days=$4,updated_by=$5,updated_at=now()`, [u.org_id, v.targetDays, v.safetyDays, v.leadDays, u.id]);
+    const d = (max: number) => z.number().int().min(0).max(max);
+    const v = z.object({ targetDays: z.number().int().min(1).max(365), safetyDays: d(180), orderDays: d(60), receiveDays: d(60), bufferDays: d(120),
+      productionDays: d(365), firstLegDays: d(180) }).strict().parse(req.body);
+    await db.query(`INSERT INTO scm_settings(org_id,target_days,safety_days,order_days,receive_days,buffer_days,production_days,first_leg_days,updated_by,updated_at)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,now()) ON CONFLICT(org_id) DO UPDATE SET target_days=$2,safety_days=$3,order_days=$4,receive_days=$5,buffer_days=$6,
+      production_days=$7,first_leg_days=$8,updated_by=$9,updated_at=now()`, [u.org_id, v.targetDays, v.safetyDays, v.orderDays, v.receiveDays, v.bufferDays, v.productionDays, v.firstLegDays, u.id]);
+    await audit(db, u, 'scm.settings', u.org_id, v);
     return v;
   });
 
@@ -166,7 +233,7 @@ export async function registerScmRoutes(app: FastifyInstance, db: Database, o: {
   const shipInput = z.object({
     number: z.string().trim().min(1).max(60), mode: z.enum(['sea', 'air', 'express', 'truck']), carrier: z.string().trim().max(80).optional(), tracking: z.string().trim().max(120).optional(),
     source: z.enum(['dg', 'jn', 'new']), shippedOn: day, etaDays: z.number().int().min(0).max(180).optional(), eta: day.optional(), note: z.string().trim().max(1000).optional(),
-    lines: z.array(z.object({ sku, qty: z.number().int().positive().max(1_000_000) }).strict()).min(1).max(300),
+    lines: z.array(z.object({ sku, qty: z.number().int().positive().max(1_000_000) }).strict()).min(1).max(300), orderId: z.string().uuid().optional(),
   }).strict();
   app.post('/scm/shipments', async (req, reply) => {
     const u = actorOf(req); requireManage(u);
@@ -181,8 +248,17 @@ export async function registerScmRoutes(app: FastifyInstance, db: Database, o: {
       // Into "in transit" through WMS: from a factory warehouse, or as new goods straight from production.
       const moved = await wmsMoveLines(tx, u, { type: v.source === 'new' ? 'in' : 'transfer', from: v.source === 'new' ? 'transit' : v.source, to: 'transit', lines: v.lines,
         reason: `发柜 ${v.number}${v.tracking ? ' · ' + v.tracking : ''}`, reference: v.number.slice(0, 80), opDate: v.shippedOn });
-      await tx.query(`INSERT INTO scm_shipments(id,org_id,number,mode,carrier,tracking,source,shipped_on,eta,note,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-        [sid, u.org_id, v.number, v.mode, v.carrier || '', v.tracking || '', v.source, v.shippedOn, eta, v.note || '', u.id]);
+      if (v.orderId && v.source === 'new') {
+        const po = (await tx.query("SELECT id,status FROM scm_orders WHERE id=$1 AND org_id=$2 FOR UPDATE", [v.orderId, u.org_id])).rows[0];
+        if (!po) deny(404, 'SCM_ORDER_NOT_FOUND', 'Purchase order not found', '找不到这张采购单。');
+        for (const l of moved) await tx.query('UPDATE scm_order_lines SET shipped=LEAST(qty, shipped+$3) WHERE order_id=$1 AND lower(sku)=lower($2)', [po.id, l.sku, l.qty]);
+        // All shipped: the order is done
+        if (!(await tx.query('SELECT 1 FROM scm_order_lines WHERE order_id=$1 AND shipped < qty', [po.id])).rows.length)
+          await tx.query("UPDATE scm_orders SET status='closed',closed_on=$2 WHERE id=$1", [po.id, v.shippedOn]);
+      }
+      if (v.orderId && v.source !== 'new' && !(await tx.query('SELECT 1 FROM scm_orders WHERE id=$1 AND org_id=$2', [v.orderId, u.org_id])).rows.length) deny(404, 'SCM_ORDER_NOT_FOUND', 'Purchase order not found', '找不到这张采购单。');
+      await tx.query(`INSERT INTO scm_shipments(id,org_id,number,mode,carrier,tracking,source,shipped_on,eta,note,created_by,order_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        [sid, u.org_id, v.number, v.mode, v.carrier || '', v.tracking || '', v.source, v.shippedOn, eta, v.note || '', u.id, v.orderId || null]);
       for (const l of moved) await tx.query('INSERT INTO scm_shipment_lines(shipment_id,sku,qty) VALUES($1,$2,$3)', [sid, l.sku, l.qty]);
       await audit(tx, u, 'scm.shipment_created', sid, { number: v.number, lines: moved.length });
       return { id: sid, number: v.number, eta };
@@ -190,18 +266,137 @@ export async function registerScmRoutes(app: FastifyInstance, db: Database, o: {
     reply.code(201);
     return out;
   });
-  app.post<{ Params: { id: string } }>('/scm/shipments/:id/arrive', async req => {
+  /* Where the ship is (owner, 2026-11-12): carriers do not push positions here, so supply chain notes it (e.g. "过巴拿马运河")
+     and can move the ETA when the schedule slips. */
+  app.post<{ Params: { id: string } }>('/scm/shipments/:id/position', async req => {
     const u = actorOf(req); requireManage(u);
-    const v = z.object({ arrivedOn: day.optional() }).strict().parse(req.body ?? {}), arrived = v.arrivedOn || today();
+    const v = z.object({ position: z.string().trim().max(160), eta: day.optional() }).strict().parse(req.body);
     return db.transaction(async tx => {
       const sh = (await tx.query('SELECT * FROM scm_shipments WHERE id=$1 AND org_id=$2 FOR UPDATE', [String(req.params.id), u.org_id])).rows[0];
       if (!sh) deny(404, 'NOT_FOUND', 'Shipment not found', '找不到这个货柜。');
-      if (sh.status !== 'in_transit') deny(409, 'SCM_ARRIVED', 'This shipment has already arrived', '这个货柜已经到港入仓了。');
-      const lines = (await tx.query('SELECT sku,qty FROM scm_shipment_lines WHERE shipment_id=$1', [sh.id])).rows.map((l: any) => ({ sku: l.sku, qty: Number(l.qty) }));
-      await wmsMoveLines(tx, u, { type: 'transfer', from: 'transit', to: 'us', lines, reason: `到港入仓 ${sh.number}`, reference: String(sh.number).slice(0, 80), opDate: arrived });
-      await tx.query("UPDATE scm_shipments SET status='arrived',arrived_on=$2 WHERE id=$1", [sh.id, arrived]);
-      await audit(tx, u, 'scm.shipment_arrived', sh.id, { number: sh.number });
+      if (v.eta && v.eta < ymd(sh.shipped_on)!) deny(400, 'SCM_DATES', 'Check the ship and arrival dates', '请检查发货日期和预计到港日期。');
+      await tx.query('UPDATE scm_shipments SET position=$2,position_on=$3,eta=COALESCE($4,eta) WHERE id=$1', [sh.id, v.position, today(), v.eta || null]);
+      await audit(tx, u, 'scm.shipment_position', sh.id, { number: sh.number, position: v.position, eta: v.eta, etaBefore: ymd(sh.eta) });
       return { ok: true };
+    });
+  });
+
+  /* 采购下单 (owner, 2026-11-12): which SKUs were ordered from which factory, how many, when, and when they should be ready.
+     Shipments can point at an order; what was shipped counts against it, and a fully shipped order is done. */
+  const orderInput = z.object({
+    number: z.string().trim().max(60).optional(), factory: z.enum(['dg', 'jn', 'other']), orderedOn: day, readyOn: day.optional(), note: z.string().trim().max(1000).optional(),
+    lines: z.array(z.object({ sku, qty: z.number().int().min(0).max(1_000_000) }).strict()).min(1).max(300),
+  }).strict();
+  app.post('/scm/orders', async (req, reply) => {
+    const u = actorOf(req); requireManage(u);
+    const v = orderInput.parse(req.body);
+    if (v.orderedOn < '2000-01-01' || (v.readyOn && v.readyOn < v.orderedOn)) deny(400, 'SCM_DATES', 'Check the order and ready dates', '请检查下单日期和预计完工日期。');
+    const out = await db.transaction(async tx => {
+      const cat = new Map((await tx.query(`SELECT sku,lead FROM product_catalog WHERE org_id=$1 AND lower(sku) = ANY($2::text[])`, [u.org_id, v.lines.map(l => l.sku.toLowerCase())])).rows.map((r: any) => [String(r.sku).toLowerCase(), r]));
+      const missing = v.lines.filter(l => !cat.has(l.sku.toLowerCase())).map(l => l.sku);
+      if (missing.length) deny(400, 'SCM_UNKNOWN_SKUS', `These SKUs are not in the product library: ${missing.join(', ')}`, `这些 SKU 不在产品资料里：${missing.join('、')}`);
+      const seq = Number((await tx.query("SELECT count(*)::int n FROM scm_orders WHERE org_id=$1 AND ordered_on=$2", [u.org_id, v.orderedOn])).rows[0].n) + 1;
+      const number = v.number || `PO-${v.orderedOn.replace(/-/g, '')}-${String(seq).padStart(2, '0')}`;
+      if ((await tx.query('SELECT 1 FROM scm_orders WHERE org_id=$1 AND lower(number)=lower($2)', [u.org_id, number])).rows.length)
+        deny(409, 'SCM_ORDER_EXISTS', 'A purchase order with this number already exists', '这个采购单号已经有了。');
+      // Ready date: given, or order date + the longest production lead time of its SKUs (product library, else the default).
+      const s = await settingsOf(u.org_id, tx);
+      const readyOn = v.readyOn || addDays(v.orderedOn, Math.max(...v.lines.map(l => daysIn(cat.get(l.sku.toLowerCase())?.lead) ?? s.productionDays)));
+      const id = randomUUID(), merged = new Map<string, { sku: string; qty: number }>();
+      for (const l of v.lines) { const k = l.sku.toLowerCase(), c = cat.get(k); merged.set(k, { sku: c.sku, qty: (merged.get(k)?.qty || 0) + l.qty }); }
+      await tx.query('INSERT INTO scm_orders(id,org_id,number,factory,ordered_on,ready_on,note,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8)', [id, u.org_id, number, v.factory, v.orderedOn, readyOn, v.note || '', u.id]);
+      for (const l of merged.values()) await tx.query('INSERT INTO scm_order_lines(order_id,sku,qty) VALUES($1,$2,$3)', [id, l.sku, l.qty]);
+      await audit(tx, u, 'scm.order_created', id, { number, factory: v.factory, lines: [...merged.values()] });
+      return { id, number, readyOn };
+    });
+    reply.code(201);
+    return out;
+  });
+  /* 完工入库: finished units of an order go into the factory warehouse (WMS goods in); work in progress drops by as much. */
+  app.post<{ Params: { id: string } }>('/scm/orders/:id/finish', async req => {
+    const u = actorOf(req); requireManage(u);
+    const v = z.object({ opDate: day, lines: z.array(z.object({ sku, qty: z.number().int().positive().max(1_000_000) }).strict()).min(1).max(300) }).strict().parse(req.body);
+    return db.transaction(async tx => {
+      const po = (await tx.query('SELECT * FROM scm_orders WHERE id=$1 AND org_id=$2 FOR UPDATE', [String(req.params.id), u.org_id])).rows[0];
+      if (!po) deny(404, 'SCM_ORDER_NOT_FOUND', 'Purchase order not found', '找不到这张采购单。');
+      if (po.status !== 'open') deny(409, 'SCM_ORDER_CLOSED', 'This purchase order is already closed', '这张采购单已经关闭了。');
+      if (!['dg', 'jn'].includes(po.factory)) deny(400, 'SCM_FINISH_FACTORY', 'Only orders from our factories go into a factory warehouse', '只有东莞、济南工厂的采购单可以完工入工厂仓；其他供应商的货请在新建货柜时直接关联采购单。');
+      const lines = new Map((await tx.query('SELECT sku,qty,shipped FROM scm_order_lines WHERE order_id=$1 FOR UPDATE', [po.id])).rows.map((l: any) => [String(l.sku).toLowerCase(), l]));
+      const bad = v.lines.filter(l => { const x = lines.get(l.sku.toLowerCase()); return !x || l.qty > Number(x.qty) - Number(x.shipped); });
+      if (bad.length) deny(400, 'SCM_FINISH_TOO_MANY', 'More than is still in production', `完工数量不能超过还在生产的数量：${bad.map(l => l.sku).join('、')}`);
+      const moves = v.lines.map(l => ({ sku: lines.get(l.sku.toLowerCase())!.sku, qty: l.qty }));
+      await wmsMoveLines(tx, u, { type: 'in', from: po.factory, to: po.factory, lines: moves, reason: `完工入库 ${po.number}`, reference: String(po.number).slice(0, 80), opDate: v.opDate });
+      for (const l of moves) await tx.query('UPDATE scm_order_lines SET shipped=shipped+$3 WHERE order_id=$1 AND sku=$2', [po.id, l.sku, l.qty]);
+      if (!(await tx.query('SELECT 1 FROM scm_order_lines WHERE order_id=$1 AND shipped < qty', [po.id])).rows.length)
+        await tx.query("UPDATE scm_orders SET status='closed',closed_on=$2 WHERE id=$1", [po.id, v.opDate]);
+      await audit(tx, u, 'scm.order_finished', po.id, { number: po.number, lines: moves });
+      return { ok: true, units: moves.reduce((a, l) => a + l.qty, 0) };
+    });
+  });
+  app.post<{ Params: { id: string } }>('/scm/orders/:id/close', async req => {
+    const u = actorOf(req); requireManage(u);
+    return db.transaction(async tx => {
+      const po = (await tx.query('SELECT * FROM scm_orders WHERE id=$1 AND org_id=$2 FOR UPDATE', [String(req.params.id), u.org_id])).rows[0];
+      if (!po) deny(404, 'SCM_ORDER_NOT_FOUND', 'Purchase order not found', '找不到这张采购单。');
+      if (po.status !== 'open') deny(409, 'SCM_ORDER_CLOSED', 'This purchase order is already closed', '这张采购单已经关闭了。');
+      await tx.query("UPDATE scm_orders SET status='closed',closed_on=$2 WHERE id=$1", [po.id, today()]);
+      await audit(tx, u, 'scm.order_closed', po.id, { number: po.number });
+      return { ok: true };
+    });
+  });
+
+  /* WMS 到港入仓: shipments the supply chain marked at port, received by the warehouse line by line. Each line is confirmed
+     with the quantity actually received and the bin (preferred or an alternate); what was not received stays in transit. */
+  const whLevel = (u: User) => warehouseLevelFor(u, o.isAdmin(u));
+  app.get('/wms/arrivals', async req => {
+    const u = actorOf(req); if (whLevel(u) === 'none') deny(403, 'WMS_FORBIDDEN', 'You do not have access to inventory', '你没有库存管理的权限。');
+    const ships = (await db.query(`SELECT s.*, (SELECT display_name FROM users WHERE id=s.notified_by) by_name FROM scm_shipments s WHERE org_id=$1 AND status='at_port' ORDER BY notified_on, number`, [u.org_id])).rows;
+    const lines = ships.length ? (await db.query(`SELECT l.shipment_id,l.sku,l.qty,c.name_zh,c.name_en,b.bin1,b.bin2,b.bin3 FROM scm_shipment_lines l
+      LEFT JOIN product_catalog c ON c.org_id=$2 AND lower(c.sku)=lower(l.sku) LEFT JOIN wms_bins b ON b.org_id=$2 AND lower(b.sku)=lower(l.sku) AND b.location='us'
+      WHERE l.shipment_id=ANY($1::text[]) ORDER BY l.sku`, [ships.map((x: any) => x.id), u.org_id])).rows : [];
+    return { canReceive: whLevel(u) === 'manage', arrivals: ships.map((x: any) => ({ id: x.id, number: x.number, mode: x.mode, carrier: x.carrier, tracking: x.tracking, eta: ymd(x.eta),
+      notifiedOn: ymd(x.notified_on), notifiedBy: x.by_name || '', lines: lines.filter((l: any) => l.shipment_id === x.id).map((l: any) => ({ sku: l.sku, qty: Number(l.qty),
+        nameZh: l.name_zh || '', nameEn: l.name_en || '', bins: [l.bin1 || '', l.bin2 || '', l.bin3 || ''] })) })) };
+  });
+  app.post<{ Params: { id: string } }>('/wms/arrivals/:id/receive', async req => {
+    const u = actorOf(req); if (whLevel(u) !== 'manage') deny(403, 'WMS_MANAGE_ONLY', 'Only warehouse managers can receive goods', '只有库存管理权限的人可以入库。');
+    const v = z.object({ opDate: day, lines: z.array(z.object({ sku: z.string().trim().min(1).max(80), received: z.number().int().min(0).max(1_000_000), slot: z.number().int().min(1).max(3).optional() }).strict()).min(1).max(500) }).strict().parse(req.body);
+    return db.transaction(async tx => {
+      const sh = (await tx.query('SELECT * FROM scm_shipments WHERE id=$1 AND org_id=$2 FOR UPDATE', [String(req.params.id), u.org_id])).rows[0];
+      if (!sh) deny(404, 'NOT_FOUND', 'Shipment not found', '找不到这个货柜。');
+      if (sh.status !== 'at_port') deny(409, 'SCM_NOT_AT_PORT', sh.status === 'arrived' ? 'This shipment has already been received' : 'Supply chain has not sent the arrival notice yet',
+        sh.status === 'arrived' ? '这个货柜已经入库了。' : '供应链还没有发到港通知。');
+      const shipped = new Map((await tx.query('SELECT sku,qty FROM scm_shipment_lines WHERE shipment_id=$1', [sh.id])).rows.map((l: any) => [String(l.sku).toLowerCase(), { sku: l.sku, qty: Number(l.qty) }]));
+      const got = new Map(v.lines.map(l => [l.sku.toLowerCase(), l]));
+      const missing = [...shipped.keys()].filter(k => !got.has(k)), extra = [...got.keys()].filter(k => !shipped.has(k));
+      if (missing.length || extra.length) deny(400, 'WMS_ARRIVAL_LINES', 'Confirm every line of the shipment (and only those)', `请逐行确认这个货柜的每一个 SKU：${[...missing, ...extra].slice(0, 10).join('、')}`);
+      const over = v.lines.filter(l => l.received > shipped.get(l.sku.toLowerCase())!.qty);
+      if (over.length) deny(400, 'WMS_ARRIVAL_OVER', 'Received more than was shipped', `实收不能多于发货数量：${over.map(l => l.sku).join('、')}。多出来的请用“入库”另外登记。`);
+      const moves = v.lines.filter(l => l.received > 0).map(l => ({ sku: shipped.get(l.sku.toLowerCase())!.sku, qty: l.received, ...(l.slot ? { slot: l.slot } : {}) }));
+      if (moves.length) await wmsMoveLines(tx, u, { type: 'transfer', from: 'transit', to: 'us', lines: moves, reason: `到港入仓 ${sh.number}`, reference: String(sh.number).slice(0, 80), opDate: v.opDate });
+      for (const l of v.lines) await tx.query('UPDATE scm_shipment_lines SET received=$3 WHERE shipment_id=$1 AND lower(sku)=lower($2)', [sh.id, l.sku, l.received]);
+      await tx.query("UPDATE scm_shipments SET status='arrived',arrived_on=$2 WHERE id=$1", [sh.id, v.opDate]);
+      const short = v.lines.map(l => ({ sku: l.sku, short: shipped.get(l.sku.toLowerCase())!.qty - l.received })).filter(x => x.short > 0);
+      await audit(tx, u, 'wms.arrival_received', sh.id, { number: sh.number, lines: v.lines, short });
+      return { ok: true, units: moves.reduce((a, l) => a + l.qty, 0), short };
+    });
+  });
+
+  /* 到港通知 (owner, 2026-11-12): supply chain says the goods are at port; the warehouse then receives them line by line in
+     WMS 到港入仓 (quantity and bin per SKU). Stock moves only on receipt. Warehouse managers get an in-app notice. */
+  app.post<{ Params: { id: string } }>('/scm/shipments/:id/notify', async req => {
+    const u = actorOf(req); requireManage(u);
+    return db.transaction(async tx => {
+      const sh = (await tx.query('SELECT * FROM scm_shipments WHERE id=$1 AND org_id=$2 FOR UPDATE', [String(req.params.id), u.org_id])).rows[0];
+      if (!sh) deny(404, 'NOT_FOUND', 'Shipment not found', '找不到这个货柜。');
+      if (sh.status !== 'in_transit') deny(409, 'SCM_ARRIVED', 'This shipment has already been sent to the warehouse', '这个货柜已经发过到港通知了。');
+      await tx.query("UPDATE scm_shipments SET status='at_port',notified_on=$2,notified_by=$3 WHERE id=$1", [sh.id, today(), u.id]);
+      const lines = (await tx.query('SELECT sku,qty FROM scm_shipment_lines WHERE shipment_id=$1', [sh.id])).rows;
+      const wh = (await tx.query(`SELECT id FROM users WHERE org_id=$1 AND active=true AND grants ? 'warehouse_manage'`, [u.org_id])).rows.map((r: any) => r.id);
+      await pushInbox(tx, { orgId: u.org_id, recipients: wh, actorId: u.id, kind: 'wms_arrival', title: `到港入仓：${sh.number}`,
+        body: `${lines.length} 个 SKU、${lines.reduce((a: number, l: any) => a + Number(l.qty), 0)} 件已到港，请在“库存管理 → 到港入仓”逐行确认数量和库位后入库。` });
+      await audit(tx, u, 'scm.shipment_notified', sh.id, { number: sh.number });
+      return { ok: true, notified: wh.length };
     });
   });
 }

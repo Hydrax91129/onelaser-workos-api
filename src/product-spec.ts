@@ -11,8 +11,9 @@
  *   cost   仅成本权限       grant `product_cost_detail`
  *   admin  仅管理员         deployment-configured main admins (WORKOS_EXECUTIVE_USER_IDS)
  *   sens   敏感 · 仅编辑者  grant `product_cost_detail` (suppliers, landed cost, last mile, file slots, margins)
- * Main admins see every level. Editing: `products_manage` for product fields, `product_cost_detail` for
- * cost/sensitive fields and files; retail prices follow the existing MSRP rule (products.ts canEditMsrp).
+ * `products_secret` (产品资料·查看保密信息) also opens cost and sens. Main admins see every level. Editing: `products_manage`
+ * (管理信息) for product fields, and with the confidential view also cost/sensitive fields and files; `pricing_edit`
+ * (价格·单项修改) for prices and cost fields; retail prices follow products.ts canEditMsrp.
  * No product data lives here: names, placeholders and allowed values only. */
 
 export const FAMILIES = [['main', '主机', 'Machine'], ['acc', '配件/备件', 'Accessory / spare part'], ['cons', '耗材', 'Consumable'],
@@ -38,12 +39,14 @@ export type Field = {
   key: string; zh: string; en: string; ph: string; code: string; vis: Vis; type: FieldType; group: string;
   opts?: readonly (readonly [string, string, string])[] | readonly string[]; unit?: string; store: Store; max?: number;
 };
-export type Group = { no: string; zh: string; en: string };
+export type Group = { no: string; zh: string; en: string; disp: string };
+/** `no` is the stored group key (fields, files, templates); `disp` is the order and number shown in 产品资料 (owner, 2026-11-12):
+ *  1 基本参数, 2 生命周期, 3 定价 (three numbers; the rest on the 定价 page), 4 包装物流, 5 供应商, 6 产品详情, 7 售后与库存. */
 export const GROUPS: Group[] = [
-  { no: '1', zh: '产品基本参数', en: 'Basic parameters' }, { no: '2', zh: '生命周期', en: 'Lifecycle' },
-  { no: '3', zh: '产品详细信息与文件', en: 'Details & files' }, { no: '4', zh: '定价（零售）', en: 'Pricing (retail)' },
-  { no: '5', zh: '定价（批发）', en: 'Pricing (wholesale)' }, { no: '6', zh: '包装与物流', en: 'Packaging & logistics' },
-  { no: '7', zh: '采购与供应商', en: 'Purchasing & suppliers' }, { no: '8', zh: '售后与库存控制', en: 'After-sales & stock control' },
+  { no: '1', zh: '产品基本参数', en: 'Basic parameters', disp: '1' }, { no: '2', zh: '生命周期', en: 'Lifecycle', disp: '2' },
+  { no: '3', zh: '产品详情', en: 'Product details & files', disp: '6' }, { no: '4', zh: '定价', en: 'Pricing', disp: '3' },
+  { no: '5', zh: '定价（批发）', en: 'Pricing (wholesale)', disp: '3' }, { no: '6', zh: '包装与物流', en: 'Packaging & logistics', disp: '4' },
+  { no: '7', zh: '采购与供应商', en: 'Purchasing & suppliers', disp: '5' }, { no: '8', zh: '售后与库存控制', en: 'After-sales & stock control', disp: '7' },
 ];
 /** Required (owner, 2026-11-11): every basic field except UPC / EAN / GTIN and the main image, plus landed cost and last-mile
  *  freight. The return SKU is required for returned goods only (completeness). Everything else is optional.
@@ -80,13 +83,12 @@ export const FIELDS: Field[] = [
   F('3', 'otherCerts', '其他认证要求', 'Other certification requirements', '如 Prop 65、各州特殊要求', 'roonn', 'ops', 'text', attr),
   F('4', 'landed', '到岸价', 'Landed cost', 'USD', 'rrrnr', 'sens', 'price', { t: 'pcol', col: 'landed_usd' }),
   F('4', 'lastMile', '尾程运费 / 台', 'Last-mile freight / unit', 'USD', 'rrrnn', 'sens', 'price', { t: 'pcol', col: 'last_mile_usd' }),
+  /** Per-SKU selling-cost rates (owner, 2026-11-12): blank = the company rate from 价格参数. Only the pricing page shows them. */
+  F('4', 'dtcRate', '零售销售费率', 'Retail selling-cost rate', '留空 = 价格参数的默认费率', 'ooooo', 'sens', 'number', sattr, { unit: '%' }),
   F('4', 'msrp', '零售价 MSRP', 'Retail price (MSRP)', '定稿零售价', 'rrrrn', 'all', 'price', { t: 'col', col: 'msrp' }),
   F('4', 'map', '最低公开售价 MAP', 'Minimum advertised price (MAP)', '默认同 MSRP', 'roorn', 'all', 'price', { t: 'chan', channel: 'map' }),
   F('4', 'promoFloor', '官网促销底价', 'Website promotion floor', '仅限固定促销节点', 'roorn', 'all', 'price', { t: 'chan', channel: 'promo_floor' }),
-  F('4', 'shipFee', 'MSRP 运费', 'Shipping charged with MSRP', '顾客另付运费，包邮填 0', 'oooon', 'all', 'price', { t: 'col', col: 'ship_fee' }),
-  F('4', 'priceMajor', '大促价', 'Major promotion price', '黑五、网一等大促', 'oooon', 'all', 'price', { t: 'chan', channel: 'promo_major' }),
-  F('4', 'priceMinor', '小促价', 'Minor promotion price', '日常小促', 'oooon', 'all', 'price', { t: 'chan', channel: 'promo_minor' }),
-  F('4', 'priceClear', '清货价', 'Clearance price', '清库存时的价格', 'oooon', 'all', 'price', { t: 'chan', channel: 'clearance' }),
+  F('5', 'whRate', '批发销售费率', 'Wholesale selling-cost rate', '留空 = 价格参数的默认费率', 'ooooo', 'sens', 'number', sattr, { unit: '%' }),
   F('5', 'whFreight', '批发运费承担方', 'Wholesale freight paid by', '', 'oooon', 'all', 'enum', attr, { opts: FREIGHT }),
   F('6', 'netWeight', '净重', 'Net weight', '38', 'rrrnr', 'all', 'number', attr, { unit: 'kg' }),
   F('6', 'grossWeight', '毛重', 'Gross weight', '52', 'rrrnr', 'all', 'number', { t: 'col', col: 'gross' }, { unit: 'kg' }),
@@ -132,14 +134,21 @@ export const famCode = (code: string, family: string | null | undefined): Req | 
 /* ---------- who sees what ---------- */
 export type Viewer = { levels: Set<Vis>; editCatalog: boolean; editCost: boolean; editPrices: boolean; admin: boolean };
 export function viewerOf(grants: string[], admin: boolean): Viewer {
-  const g = new Set(grants), cost = admin || g.has('product_cost_detail');
+  // 产品资料: 查看保密信息 (products_secret); 价格: 查看 (product_cost_detail) also shows the cost side. 管理信息 edits every product field,
+  // 价格·单项修改 (pricing_edit) edits prices and cost one SKU at a time.
+  const g = new Set(grants), secret = admin || g.has('products_secret') || g.has('product_cost_detail');
   const levels = new Set<Vis>(['all']);
   if (admin || g.has('products')) levels.add('ops');
-  if (cost) { levels.add('cost'); levels.add('sens'); }
+  if (secret) { levels.add('cost'); levels.add('sens'); }
   if (admin) levels.add('admin');
-  const editCatalog = admin || g.has('products_manage');
-  return { levels, editCatalog, editCost: cost, editPrices: editCatalog || cost || g.has('pricing_msrp'), admin };
+  const editCatalog = admin || g.has('products_manage'), pricingEdit = admin || g.has('pricing_edit');
+  return { levels, editCatalog, editCost: pricingEdit || (editCatalog && secret), editPrices: editCatalog || pricingEdit, admin };
 }
+/** Bulk updates (批量更新): 价格·管理 (products_import with pricing_edit) or 产品资料·管理信息; columns still follow field access. */
+export const canBulkImport = (grants: string[], admin: boolean) => {
+  const g = new Set(grants);
+  return admin || (g.has('products_import') && g.has('pricing_edit')) || (g.has('products_manage') && g.has('products_secret'));
+};
 export const canSee = (v: Viewer, vis: Vis) => v.levels.has(vis);
 /** Whether this viewer may change a field. Fields they cannot see are never writable. */
 export function canWrite(v: Viewer, f: Pick<Field, 'vis' | 'store' | 'key' | 'type'>) {
@@ -214,6 +223,7 @@ export function parseValue(f: Field, raw: unknown): Parsed {
         f.type === 'price' ? 'Use a number of US dollars, 0 or more' : `Use a number, 0 or more${f.unit ? ` (in ${f.unit})` : ''}`);
       const n = Number(t);
       if (n > 10_000_000) return bad('数值太大', 'The number is too large');
+      if (f.unit === '%' && n >= 100) return bad('费率应小于 100%', 'Use a rate below 100%');
       return { ok: true, value: n };
     }
     case 'list': case 'text': {

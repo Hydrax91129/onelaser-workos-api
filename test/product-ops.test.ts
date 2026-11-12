@@ -8,10 +8,12 @@ import {DEFAULT_PRICING_RULES,priceCheck} from '../src/products.js';
 const setup=async()=>{
  const db=await createDatabase();await db.exec(schema);await seedDemo(db);
  await db.query(`UPDATE users SET grants='["products"]' WHERE id='m2'`);
- await db.query(`UPDATE users SET grants='["products","products_manage"]' WHERE id='m3'`);
+ await db.query(`UPDATE users SET grants='["products","products_secret","products_manage"]' WHERE id='m3'`);
  await db.query(`UPDATE users SET grants='["products","product_cost_detail"]' WHERE id='m5'`);
- await db.query(`UPDATE users SET grants='["products","pricing_msrp"]' WHERE id='m6'`);
+ 
  const app=await buildApp({db,integrations:{executiveUserIds:['m1']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
+ // m6: 价格·查看 (sees the build-up, changes nothing); set after start-up so the one-time move to four levels does not touch it
+ await db.query(`UPDATE users SET grants='["products","product_cost_detail"]' WHERE id='m6'`);
  const tokens:Record<string,string>={};
  const call=async(who:string,method:'GET'|'POST'|'PUT'|'PATCH',url:string,payload?:any)=>{tokens[who]??=(await issueSession(db,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who]}});};
  return {db,app,call};
@@ -34,14 +36,14 @@ test('product editing: create, edit with change log, lifecycle transitions',asyn
  try{
   const body={sku:'DEMO-A',nameZh:'示例机',type:'整机',gross:50,dims:[90,60,40],moq:5,msrp:5999,shipFee:399};
   assert.equal((await call('m2','POST','/products',body)).statusCode,403,'view-only cannot add');
-  assert.equal((await call('m6','POST','/products',body)).statusCode,403,'MSRP-only cannot add');
+  assert.equal((await call('m6','POST','/products',body)).statusCode,403,'price view cannot add');
   const c=await call('m3','POST','/products',body);assert.equal(c.statusCode,201,c.body);assert.equal(c.json().status,'dev');assert.equal(c.json().msrpChange.status,'applied');
   assert.equal((await call('m3','POST','/products',{sku:'demo-a'})).statusCode,409);
   const it=(await call('m2','GET','/products')).json().items.find((x:any)=>x.sku==='DEMO-A');
   assert.equal(it.moq,5);assert.equal(it.msrp,5999);assert.equal(it.status,'dev');assert.equal(it.channels,undefined,'basic access gets no channel prices');
 
-  assert.equal((await call('m6','PATCH','/products/DEMO-A',{lead:'30天'})).statusCode,403,'MSRP-only cannot edit details');
-  assert.equal((await call('m6','PATCH','/products/DEMO-A',{low:4999})).statusCode,200,'MSRP-only may edit low price');
+  assert.equal((await call('m6','PATCH','/products/DEMO-A',{lead:'30天'})).statusCode,403,'price view cannot edit details');
+  assert.equal((await call('m6','PATCH','/products/DEMO-A',{low:4999})).statusCode,403,'price view cannot change prices');
   const e=await call('m3','PATCH','/products/demo-a',{lead:'30天',gross:50,dims:[90,60,45],reason:'新包装'});
   assert.equal(e.statusCode,200,e.body);assert.deepEqual(e.json().changed.sort(),['dims','lead'],'unchanged gross is not logged');
   assert.equal((await call('m3','PATCH','/products/NOPE',{lead:'x'})).statusCode,404);
@@ -99,15 +101,15 @@ test('price changes: below the floor waits for an admin; channel prices',async()
   assert.equal((await call('m1','PATCH','/products/DEMO-B',{msrp:3999})).json().msrpChange.status,'applied','admins set any price; recorded with its warning');
 
   // Channel prices.
-  assert.equal((await call('m6','PUT','/products/DEMO-B/channel-prices/amazon',{price:4999})).statusCode,403,'MSRP-only cannot set channel prices');
+  assert.equal((await call('m6','PUT','/products/DEMO-B/channel-prices/amazon',{price:4999})).statusCode,403,'price view cannot set channel prices');
   assert.equal((await call('m5','PUT','/products/DEMO-B/channel-prices/walmart',{price:4999})).statusCode,400);
   const a=(await call('m5','PUT','/products/DEMO-B/channel-prices/amazon',{price:4999})).json();assert.equal(a.price,4999);assert.equal(a.change.status,'applied');
   assert.equal((await call('m5','PUT','/products/DEMO-B/channel-prices/amazon',{price:4299})).json().change.needs,'floor');
   const d=(await call('m5','PUT','/products/DEMO-B/channel-prices/dealer',{price:2500,listed:false})).json();assert.equal(d.listed,false);assert.equal(d.change.status,'pending');
   const view=(await call('m6','GET','/products')).json(),b=view.items.find((x:any)=>x.sku==='DEMO-B');
-  assert.equal(b.channels.amazon.price,4999);assert.equal(b.channels.dealer.listed,false);assert.equal(b.landedUsd,undefined,'MSRP-only sees channel prices, not costs');
-  assert.equal(view.canEditChannels,false);assert.equal(view.canEditMsrp,true);
-  const h=(await call('m6','GET','/products/DEMO-B/history')).json();assert.ok(h.prices.some((x:any)=>x.target==='amazon'));assert.equal(h.prices[0].cmPct,undefined);
+  assert.equal(b.channels.amazon.price,4999);assert.equal(b.channels.dealer.listed,false);assert.ok(b.landedUsd!==undefined,'price view sees the cost build-up');
+  assert.equal(view.canEditChannels,false);assert.equal(view.canEditMsrp,false);
+  const h=(await call('m6','GET','/products/DEMO-B/history')).json();assert.ok(h.prices.some((x:any)=>x.target==='amazon'));assert.ok(h.prices.some((x:any)=>x.cmPct!==undefined),'price view sees margins');
   assert.ok(!(await call('m2','GET','/products/DEMO-B/history')).json().prices.some((x:any)=>x.target!=='msrp'),'basic access sees only MSRP history');
  }finally{await app.close();}
 });
