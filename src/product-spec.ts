@@ -192,6 +192,11 @@ export const enumLabel = (f: Field, key: any, lang: 'zh' | 'en' = 'zh') => {
 };
 /** Excel stores dates as days since 1899-12-30. */
 const excelDate = (n: number) => new Date(Date.UTC(1899, 11, 30) + Math.round(n) * 86400000).toISOString().slice(0, 10);
+/** n rounded to cents when it has at most two decimals (allowing float noise), else null. */
+export function toCents(n: number): number | null {
+  const c = Math.round(n * 100);
+  return Math.abs(n * 100 - c) < 1e-6 ? c / 100 : null;
+}
 /** Parses one value. null clears the field; undefined is never returned (callers skip blank cells). */
 export function parseValue(f: Field, raw: unknown): Parsed {
   if (raw === null) return { ok: true, value: null };
@@ -224,6 +229,8 @@ export function parseValue(f: Field, raw: unknown): Parsed {
       const n = Number(t);
       if (n > 10_000_000) return bad('数值太大', 'The number is too large');
       if (f.unit === '%' && n >= 100) return bad('费率应小于 100%', 'Use a rate below 100%');
+      // Prices are dollars and cents (owner, 2026-11-12): 27.09 yes, 27.095 no. A spreadsheet's 27.0899999 still counts as 27.09.
+      if (f.type === 'price') { const c = toCents(n); if (c == null) return bad('价格最多两位小数，例如 27.09', 'Use at most two decimals for a price, e.g. 27.09'); return { ok: true, value: c }; }
       return { ok: true, value: n };
     }
     case 'list': case 'text': {
