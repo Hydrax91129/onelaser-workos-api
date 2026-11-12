@@ -214,3 +214,19 @@ test('bulk update permission: 价格·管理 or 产品资料·管理信息 may b
   assert.equal((await preview(call,'x.csv',writeCsv([['SKU'],['sku'],['ODL-A1']]),'m2')).statusCode,403);
  }finally{await app.close();}
 });
+
+test('English template: English sheet, headers and dropdown labels; an English sheet without the key row uploads like a Chinese one',async()=>{
+  const {db,app,call}=await setup();
+  const token=(await issueSession(db,'m1')).accessToken;
+  const t=await app.inject({method:'GET',url:'/products/library/template?format=xlsx',headers:{authorization:'Bearer '+token,'accept-language':'en'}});
+  assert.equal(t.statusCode,200);assert.match(decodeURIComponent(String(t.headers['content-disposition'])),/OneLaser_products_/);
+  const sheet=readXlsx(t.rawPayload,'Products');assert.ok(sheet[0].includes('English name'),'English headers');assert.ok(sheet[0].includes('Retail price (MSRP) (USD)'));
+  const a1=sheet.find(r=>r[0]==='ODL-A1')!;assert.ok(a1.includes('Machine'),'dropdown values in English');
+  const notes=readXlsx(t.rawPayload,'Read me');assert.match(String(notes[0][0]),/bulk update guide/);
+  // Headers only (no hidden key row), English labels, the English clear marker.
+  const csv=writeCsv([['SKU','Product family','English name','Retail price (MSRP) (USD)','Status','Product line / series'],['ODL-A1','Machine','Sample A','2100.5','Selling','[clear]']]);
+  const pv=await preview(call,'en.csv',csv);assert.equal(pv.statusCode,200,pv.body);
+  const ok=await call('m1','POST',`/products/library/import/${pv.json().id}/confirm`,{});assert.equal(ok.statusCode,200,ok.body);
+  const rec=(await call('m1','GET','/products/library')).json().items.find((i:any)=>i.sku==='ODL-A1');
+  assert.equal(rec.values.msrp,2100.5);assert.equal(rec.values.status,'live');assert.equal(rec.values.series ?? null,null,'[clear] empties the value');
+});
