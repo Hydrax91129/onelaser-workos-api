@@ -219,6 +219,15 @@ createServer(async (req, res) => {
       res.writeHead(r.statusCode, out); return res.end(r.rawPayload);
     }
     if (url.pathname === '/runtime-config.js') { res.writeHead(200, { 'content-type': 'text/javascript', 'cache-control': 'no-store' }); return res.end("'use strict';window.WORKOS_CONFIG=Object.freeze({mode:'live',apiBase:'/api'});"); }
+    // No login on the test site (owner's choice, 2026-11-12): /preview-enter signs in as one of the fictional accounts and goes to the app.
+    if (url.pathname === '/preview-enter') {
+      const who = ({ owner: 'owner', hr: 'hr', staff: 'staff' } as Record<string, string>)[url.searchParams.get('as') || 'owner'] || 'owner';
+      const r = await app.inject({ method: 'POST', url: '/auth/password', payload: { email: `${who}@workos.test`, password: PASSWORD }, headers: { origin: ORIGIN } });
+      res.writeHead(302, { location: '/', 'set-cookie': r.headers['set-cookie'] as any, 'cache-control': 'no-store' }); return res.end();
+    }
+    if ((url.pathname === '/' || url.pathname === '/index.html') && !/workos[^=]*session|session[^=]*=/i.test(String(req.headers.cookie || ''))) {
+      res.writeHead(302, { location: '/preview-enter?as=owner', 'cache-control': 'no-store' }); return res.end();
+    }
     if (url.pathname === '/build-info.json') { res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); return res.end(JSON.stringify({ frontendCommit: FRONTEND_COMMIT, preview: true })); }
     let file = normalize(join(DIST, decodeURIComponent(url.pathname)));
     if (!file.startsWith(DIST)) { res.writeHead(403); return res.end(); }
