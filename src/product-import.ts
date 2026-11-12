@@ -16,8 +16,9 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
 import { deny } from './errors.js';
+import type { Language } from './i18n.js';
 import {
-  FAMILIES, FIELD, GROUPS, CLEAR, CORE_REQUIRED, fieldOf, VIS_NAMES, allFields, canSee, canWrite, completeness, enumLabel, famCode, parseValue, viewerOf, relationIssues,
+  FAMILIES, FIELD, GROUPS, CLEAR, CLEAR_EN, CORE_REQUIRED, fieldOf, VIS_NAMES, allFields, canSee, canWrite, completeness, enumLabel, famCode, parseValue, viewerOf, relationIssues,
   type Field, type Viewer,
   canBulkImport,
 } from './product-spec.js';
@@ -36,19 +37,22 @@ CREATE TABLE IF NOT EXISTS product_import_previews(id text PRIMARY KEY, org_id t
   cells jsonb NOT NULL, result jsonb NOT NULL, used_at timestamptz, created_at timestamptz NOT NULL DEFAULT now());
 `;
 
-const SHEET = '产品资料';
+const SHEET = '产品资料', SHEET_EN = 'Products';
 const MAX_ROWS = 5000;
 const REQ_ZH: Record<string, string> = { req: '必填', opt: '选填', na: '不适用' };
-const header = (f: Field) => f.zh + (f.unit ? `（${f.unit}）` : f.type === 'price' ? '（USD）' : '');
+const REQ_EN: Record<string, string> = { req: 'Required', opt: 'Optional', na: 'N/A' };
+/** Column header in the template's language (owner, 2026-11-12: English readers get an English template; uploads accept both). */
+const header = (f: Field, lang: Language = 'zh') => lang === 'en' ? f.en + (f.unit ? ` (${f.unit})` : f.type === 'price' ? ' (USD)' : '') : f.zh + (f.unit ? `（${f.unit}）` : f.type === 'price' ? '（USD）' : '');
 /** Template columns: everything the viewer may see except the main image (uploaded on the product page). */
 export const templateFields = (v: Viewer, ws: Worksheet) => allFields(ws.whTiers).filter(f => f.type !== 'image' && canSee(v, f.vis));
-const cellOf = (f: Field, val: any) => val == null ? '' : f.type === 'enum' ? enumLabel(f, val) : val;
+const cellOf = (f: Field, val: any, lang: Language = 'zh') => val == null ? '' : f.type === 'enum' ? enumLabel(f, val, lang) : val;
+const optLabels = (f: Field, lang: Language) => (f.opts as any[]).map(o => Array.isArray(o) ? o[lang === 'en' ? 2 : 1] : o);
 
-export function templateRows(v: Viewer, ws: Worksheet, recs: Rec[]) {
+export function templateRows(v: Viewer, ws: Worksheet, recs: Rec[], lang: Language = 'zh') {
   const fields = templateFields(v, ws);
-  return { fields, rows: [fields.map(header), fields.map(f => f.key), ...recs.map(r => fields.map(f => cellOf(f, r.values[f.key])))] };
+  return { fields, rows: [fields.map(f => header(f, lang)), fields.map(f => f.key), ...recs.map(r => fields.map(f => cellOf(f, r.values[f.key], lang)))] };
 }
-function notesSheet(fields: Field[]) {
+function notesSheetZh(fields: Field[]) {
   const famHead = FAMILIES.map(f => f[1]);
   return {
     name: '说明', boldRows: [1, 11], widths: [16, 30, 18, 14, 40, 9, 11, 9, 11, 11, 16],
@@ -74,15 +78,40 @@ function notesSheet(fields: Field[]) {
     ],
   };
 }
-export function buildTemplate(format: 'xlsx' | 'csv', v: Viewer, ws: Worksheet, recs: Rec[]) {
-  const { fields, rows } = templateRows(v, ws, recs);
+function notesSheetEn(fields: Field[]) {
+  return {
+    name: 'Read me', boldRows: [1, 11], widths: [18, 30, 18, 16, 40, 10, 12, 10, 12, 12, 18],
+    rows: [
+      ['OneLaser product library · bulk update guide'],
+      ['1. Row 1 holds the column names and row 2 (hidden) the field keys. Do not change or delete these two rows; from row 3, one product per row.'],
+      ['2. Rows match by SKU (any case): existing SKUs are updated, new SKUs are added. An upload never deletes a product.'],
+      [`3. A blank cell changes nothing; to clear a value, enter ${CLEAR_EN} (or ${CLEAR}). Core fields (SKU, new / returned, family, Chinese name, English name, status) cannot be cleared.`],
+      ['4. A new product needs family, Chinese name and English name. New / returned left blank means New; status left blank means In development. Other required fields can follow later; the preview lists them. A returned product needs a return SKU starting with REF-.'],
+      ['5. Dropdown columns take only the listed values (English or Chinese); dates as YYYY-MM-DD; weights, sizes and prices as numbers only (units in the column name). Prices take at most two decimals.'],
+      ['6. After the upload the system shows a before / after comparison; nothing is written until an admin clicks Confirm. A confirmed update can be undone from the import log.'],
+      ['7. Upload the main image and files (manual, certificates, …) on the product page, not in this sheet.'],
+      ['8. This file holds only the columns you may see; do not forward it to people without the same access.'],
+      [],
+      ['Group', 'Field', 'Field key', 'Type / unit', 'Allowed values', ...FAMILIES.map(f => f[2]), 'Visible to'],
+      ...fields.map(f => [
+        GROUPS.find(g => g.no === f.group)?.en || '', f.en, f.key,
+        f.type === 'number' ? `Number (${f.unit})` : f.type === 'price' ? 'Price (USD)' : f.type === 'date' ? 'Date YYYY-MM-DD' : f.type === 'enum' ? 'Dropdown' : f.type === 'list' ? 'Text (suggestions)' : 'Text',
+        f.opts ? optLabels(f, 'en').join(' / ') : f.key === 'refbSku' ? 'Starts with REF-' : (f.phEn || f.ph) ? `e.g. ${f.phEn || f.ph}` : '',
+        ...FAMILIES.map(([k]) => f.key === 'refbSku' ? 'Required for returns' : REQ_EN[famCode(f.code, k) || 'na']),
+        VIS_NAMES[f.vis][1],
+      ]),
+    ],
+  };
+}
+export function buildTemplate(format: 'xlsx' | 'csv', v: Viewer, ws: Worksheet, recs: Rec[], lang: Language = 'zh') {
+  const { fields, rows } = templateRows(v, ws, recs, lang);
   if (format === 'csv') return Buffer.from(writeCsv(rows), 'utf8');
   const last = Math.max(rows.length + 500, 1000);
   return writeXlsx([
-    { name: SHEET, rows, boldRows: [1], hiddenRows: [2], freeze: { rows: 2, cols: 1 }, widths: fields.map(f => Math.min(36, Math.max(12, header(f).length * 2 + 2))),
+    { name: lang === 'en' ? SHEET_EN : SHEET, rows, boldRows: [1], hiddenRows: [2], freeze: { rows: 2, cols: 1 }, widths: fields.map(f => Math.min(36, Math.max(12, lang === 'en' ? header(f, 'en').length + 2 : header(f).length * 2 + 2))),
       lists: fields.flatMap((f, col) => f.type === 'enum' || f.type === 'list' ? [{ col, firstRow: 3, lastRow: last, strict: f.type === 'enum',
-        values: (f.opts as any[]).map(o => Array.isArray(o) ? o[1] : o) }] : []) },
-    notesSheet(fields),
+        values: optLabels(f, lang) }] : []) },
+    lang === 'en' ? notesSheetEn(fields) : notesSheetZh(fields),
   ]);
 }
 
@@ -97,7 +126,8 @@ export function parseUpload(fileName: string, data: Buffer, ws: Worksheet) {
     else return deny(400, 'IMPORT_FILE_TYPE', 'Upload the template as .xlsx or .csv (UTF-8)');
   } catch { return deny(400, 'IMPORT_FILE_UNREADABLE', 'This file cannot be read; download the standard template and fill it in'); }
   const fields = allFields(ws.whTiers), byKey = new Map(fields.map(f => [f.key, f]));
-  const byHeader = new Map<string, string>([...fields.map(f => [header(f), f.key] as [string, string]), ...fields.map(f => [f.zh, f.key] as [string, string])]);
+  const byHeader = new Map<string, string>([...fields.map(f => [header(f), f.key] as [string, string]), ...fields.map(f => [f.zh, f.key] as [string, string]),
+    ...fields.map(f => [header(f, 'en').toLowerCase(), f.key] as [string, string]), ...fields.map(f => [f.en.toLowerCase(), f.key] as [string, string])]);
   const str = (c: any) => c == null ? '' : String(c).trim();
   // The key row is the hidden second row of the template; without it, columns are matched by their Chinese header.
   let keyRow = -1, map: (string | null)[] = [];
@@ -109,7 +139,8 @@ export function parseUpload(fileName: string, data: Buffer, ws: Worksheet) {
   if (keyRow < 0) {
     for (let i = 0; i < Math.min(5, grid.length); i++) {
       const h = (grid[i] || []).map(str);
-      if (h.some(x => byHeader.get(x) === 'sku')) { headerRow = i; map = h.map(x => byHeader.get(x) || null); break; }
+      const hk = (x: string) => byHeader.get(x) || byHeader.get(x.toLowerCase()) || null;
+      if (h.some(x => hk(x) === 'sku')) { headerRow = i; map = h.map(hk); break; }
     }
     if (headerRow < 0) deny(400, 'IMPORT_NO_HEADER', 'The SKU column was not found; keep the first two rows of the standard template');
   }
@@ -155,7 +186,7 @@ export function diffUpload(v: Viewer, ws: Worksheet, recs: Map<string, Rec>, par
   for (const { cells } of parsed.rows) {
     const k = cells.sku == null ? '' : String(cells.sku).trim(); if (!k) continue;
     index.skus.add(k.toLowerCase());
-    if (cells.refbSku !== undefined) { const v = String(cells.refbSku).trim(); if (v && v !== CLEAR) refbOf.set(k.toLowerCase(), v); else refbOf.delete(k.toLowerCase()); }
+    if (cells.refbSku !== undefined) { const v = String(cells.refbSku).trim(); if (v && v !== CLEAR && v.toLowerCase() !== CLEAR_EN) refbOf.set(k.toLowerCase(), v); else refbOf.delete(k.toLowerCase()); }
   }
   for (const [k, v] of refbOf) { const key = v.toLowerCase(), sku = findRec(recs, k)?.sku || k; index.refb.set(key, [...(index.refb.get(key) || []), sku]); }
   for (const { row, cells } of parsed.rows) {
@@ -270,7 +301,7 @@ export async function registerProductImportRoutes(app: FastifyInstance, db: Data
   app.get('/products/library/template', async (req, reply) => {
     const u = actorOf(req), v = viewer(u), format = z.enum(['xlsx', 'csv']).default('xlsx').parse((req.query as any)?.format);
     const ws = (await worksheetOf(db, u.org_id)).settings, recs = [...(await loadRecords(db, u.org_id)).values()];
-    const file = buildTemplate(format, v, ws, recs), name = `OneLaser_产品资料_${stamp()}.${format}`;
+    const lang = req.language === 'en' ? 'en' : 'zh', file = buildTemplate(format, v, ws, recs, lang), name = `${lang === 'en' ? 'OneLaser_products' : 'OneLaser_产品资料'}_${stamp()}.${format}`;
     await db.query('INSERT INTO audit_events(id,org_id,department_id,owner_id,actor_id,action,object_id,details) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',
       [randomUUID(), u.org_id, u.department_id, u.id, u.id, 'products.template_downloaded', format, JSON.stringify({ rows: recs.length, levels: [...v.levels] })]);
     return reply.header('content-type', format === 'xlsx' ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : 'text/csv; charset=utf-8')

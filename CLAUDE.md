@@ -86,6 +86,7 @@
   PR 必须基于最新 `main`、CI 通过才能合并；合并前如果 `main` 有新提交，先 `git pull --rebase origin main` 再推。
 - 前端改完运行 `node tools/stamp-assets.mjs`（更新资源版本号，CI 会检查），再 `npm ci && npm test`；后端 `npm test`（约 8 分钟）。
 - 后端所有报错文案都要在 i18n.ts 里有中文（有测试检查）。
+- 中英文都要能用（供应链 PIM / WMS / SCM 已全部核对过英文）：页面文字一律 `tr(中文, English)`，英文里用半角标点；服务器写进数据库的系统文字（WMS 流水原因如“移库 / 发柜 / 完工入库 / 到港入仓 / 期初导入”，SCM 发的站内通知）保持固定格式，由前端按语言翻译（wms.js 的 `reasonText`、inbox.js 的 `SYS`），改这些文字时两边一起改；产品资料模板按下载人的语言生成，上传时中英文表头、下拉值和清空标记（`[清空]` / `[clear]`）都认（product-import.ts）。
 - 上传文件统一用前端的 `dist/upload-zone.js`（`window.WorkOSUpload`）：一个框同时支持粘贴、拖拽、点击选择和“上传”按钮，
   只负责收文件和检查类型、大小，存储和权限仍由各模块自己的接口负责。新功能不要再自己写一套上传。
 - 打开附件统一用 `dist/file-preview.js`（`window.WorkOSPreview.open`）：PDF、图片、文本、视频直接预览，Word / Excel 等给下载按钮。

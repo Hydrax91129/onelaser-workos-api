@@ -100,7 +100,7 @@ export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: {
     const list = msrp.get(String(c.sku).toLowerCase()) ?? msrp.get(String(c.sku).toLowerCase().replace(/^ref-/, '')) ?? mainOf(c, cat)?.msrp ?? null, pct = c.discount_pct == null ? null : Number(c.discount_pct);
     const main = mainOf(c, cat), qty = Number(c.qty);
     return {
-      mainSku: main?.sku || c.main_sku || '', mainName: main ? (main.name_zh || main.name_en || '') : '', handlerId: c.handler_id || c.created_by, handlerName: nameOf(ppl.get(c.handler_id || c.created_by)),
+      mainSku: main?.sku || c.main_sku || '', mainName: main ? (main.name_zh || main.name_en || '') : '', mainNameEn: main ? (main.name_en || main.name_zh || '') : '', handlerId: c.handler_id || c.created_by, handlerName: nameOf(ppl.get(c.handler_id || c.created_by)),
       unitMsrp: list, valueMsrp: list == null ? null : Math.round(list * qty * 100) / 100,
       ...(withCost ? { unitCost: main?.landed ?? null, valueCost: main?.landed == null ? null : Math.round(main.landed * qty * 100) / 100 } : {}),
       id: c.id, number: c.number, sku: c.sku, name: items.get(c.sku)?.name || '', serial: c.serial, qty: Number(c.qty), kind: c.kind, channel: c.channel,
@@ -141,7 +141,7 @@ export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: {
     const recovered = round(list.filter(x => x.stage === 'sold').reduce((a: number, x: any) => a + (x.salePrice ?? 0) * x.qty, 0));
     const handlers = [...ppl.values()].filter((p: any) => p.active && !p.disabled_at && level(p) === 'manage').map((p: any) => ({ id: p.id, name: nameOf(p) })).sort((a, b) => a.name.localeCompare(b.name));
     return {
-      items: list, technicians, handlers, mainSkus: [...cat.values()].map(c => ({ sku: c.sku, name: c.name_zh || c.name_en || '' })),
+      items: list, technicians, handlers, mainSkus: [...cat.values()].map(c => ({ sku: c.sku, name: c.name_zh || c.name_en || '', nameEn: c.name_en || c.name_zh || '' })),
       values: { msrp: { ...sumBy('valueMsrp'), recovered }, ...(withCost ? { cost: { ...sumBy('valueCost'), recovered } } : {}) },
       skus: [...items.values()].map((i: any) => ({ sku: i.sku, name: i.name })),
       canOperate: level(u) === 'manage', canPrice: canPrice(u), me: u.id,

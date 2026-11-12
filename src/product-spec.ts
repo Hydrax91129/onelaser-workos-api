@@ -36,7 +36,7 @@ export type FieldType = 'text' | 'list' | 'enum' | 'date' | 'number' | 'price' |
  *  sattr: product_pricing.attrs (sensitive); pcol: a product_pricing column; chan: a product_channel_prices row. */
 export type Store = { t: 'col'; col: string } | { t: 'dim'; i: number } | { t: 'attr' } | { t: 'sattr' } | { t: 'pcol'; col: string } | { t: 'chan'; channel: string } | { t: 'file' };
 export type Field = {
-  key: string; zh: string; en: string; ph: string; code: string; vis: Vis; type: FieldType; group: string;
+  key: string; zh: string; en: string; ph: string; phEn?: string; code: string; vis: Vis; type: FieldType; group: string;
   opts?: readonly (readonly [string, string, string])[] | readonly string[]; unit?: string; store: Store; max?: number;
 };
 export type Group = { no: string; zh: string; en: string; disp: string };
@@ -109,15 +109,26 @@ export const FIELDS: Field[] = [
   F('8', 'warranty', '保修期', 'Warranty', '整机 2 年，激光管 1 年', 'rroon', 'all', 'text', attr),
   F('8', 'safetyStock', '安全库存 / 补货点', 'Safety stock / reorder point', '20 台', 'rrrno', 'ops', 'text', attr),
 ];
+/** English placeholders for fields whose example is in Chinese (owner, 2026-11-12: the supply chain reads fine in English). */
+const PH_EN: Record<string, string> = {
+  gtin: 'UPC 12 digits / EAN 13 digits', replacementSku: 'SKU that replaces it once discontinued', origin: 'China',
+  otherCerts: 'e.g. Prop 65, state-specific rules', dtcRate: 'Blank = default rate from the pricing parameters', whRate: 'Blank = default rate from the pricing parameters',
+  msrp: 'Final retail price', map: 'Same as MSRP by default', promoFloor: 'Fixed promotion dates only', pkgCount: '2 boxes',
+  cartonSpec: '1 unit/carton, 8 units/pallet', bestShipping: 'Truck LTL', dangerous: 'Lithium battery: no', cartonLabel: 'Barcode number',
+  supplier: 'Dongguan factory', moqUnit: '10 units', productionLead: '25 days', firstLeg: 'Sea 35 days', warranty: 'Machine 2 years, laser tube 1 year',
+  safetyStock: '20 units',
+};
+for (const f of FIELDS) if (PH_EN[f.key]) f.phEn = PH_EN[f.key];
+
 export const FIELD = new Map(FIELDS.map(f => [f.key, f]));
 
 /** File slots (group 3). mode any: PDF/PNG/JPG/WebP/CSV/TXT; pdf: PDF only. All are sensitive. */
 export const SLOTS = [
-  ['manual', '说明书', 'Manual', 'ronon', 'PDF，带版本号', 'any'], ['spec', '产品参数表', 'Specification sheet', 'rooon', 'PDF 或 CSV', 'any'],
-  ['bom', 'BOM 表格', 'BOM', 'ronnn', 'PDF 或 CSV', 'any'], ['cert', '认证（UL / FCC / CE / RoHS）', 'Certificates (UL / FCC / CE / RoHS)', 'ronnn', '证书 PDF 或图片', 'any'],
-  ['compliance', '其他合规文件', 'Other compliance documents', 'roonn', 'PDF 或图片', 'any'], ['spareParts', '常用备件清单', 'Common spare parts list', 'ronnn', '仅 PDF', 'pdf'],
-  ['warrantyCert', '保修证书', 'Warranty certificate', 'rroon', '仅 PDF', 'pdf'],
-].map(([key, zh, en, code, hint, mode]) => ({ key, zh, en, code: minReq(key, code), hint, mode: mode as 'any' | 'pdf', vis: 'sens' as Vis }));
+  ['manual', '说明书', 'Manual', 'ronon', 'PDF，带版本号', 'any', 'PDF with a version number'], ['spec', '产品参数表', 'Specification sheet', 'rooon', 'PDF 或 CSV', 'any', 'PDF or CSV'],
+  ['bom', 'BOM 表格', 'BOM', 'ronnn', 'PDF 或 CSV', 'any', 'PDF or CSV'], ['cert', '认证（UL / FCC / CE / RoHS）', 'Certificates (UL / FCC / CE / RoHS)', 'ronnn', '证书 PDF 或图片', 'any', 'Certificate PDF or image'],
+  ['compliance', '其他合规文件', 'Other compliance documents', 'roonn', 'PDF 或图片', 'any', 'PDF or image'], ['spareParts', '常用备件清单', 'Common spare parts list', 'ronnn', '仅 PDF', 'pdf', 'PDF only'],
+  ['warrantyCert', '保修证书', 'Warranty certificate', 'rroon', '仅 PDF', 'pdf', 'PDF only'],
+].map(([key, zh, en, code, hint, mode, hintEn]) => ({ key, zh, en, code: minReq(key, code), hint, hintEn, mode: mode as 'any' | 'pdf', vis: 'sens' as Vis }));
 export const SLOT = new Map(SLOTS.map(s => [s.key, s]));
 export const FILE_TYPES: Record<string, string> = { pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', csv: 'text/csv', txt: 'text/plain' };
 export const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
@@ -176,6 +187,8 @@ export const fieldOf = (key: string, whTiers: { name: string; floor?: boolean }[
 
 /* ---------- value validation (editor and import use the same rules) ---------- */
 export const CLEAR = '[清空]';
+/** The same marker for English templates; either one clears a value. */
+export const CLEAR_EN = '[clear]';
 const SKU_RE = /^[A-Za-z0-9][A-Za-z0-9._\-/ ]*$/;
 export type Parsed = { ok: true; value: any } | { ok: false; zh: string; en: string };
 const bad = (zh: string, en: string): Parsed => ({ ok: false, zh, en });
@@ -200,7 +213,7 @@ export function toCents(n: number): number | null {
 /** Parses one value. null clears the field; undefined is never returned (callers skip blank cells). */
 export function parseValue(f: Field, raw: unknown): Parsed {
   if (raw === null) return { ok: true, value: null };
-  if (typeof raw === 'string' && (raw.trim() === '' || raw.trim() === CLEAR)) return { ok: true, value: null };
+  if (typeof raw === 'string' && (raw.trim() === '' || raw.trim() === CLEAR || raw.trim().toLowerCase() === CLEAR_EN)) return { ok: true, value: null };
   if (f.type === 'image') return bad('产品主图请在编辑页上传', 'Upload the main image on the product page');
   const s = typeof raw === 'number' ? String(raw) : typeof raw === 'string' ? raw.trim() : null;
   if (s == null) return bad('格式不对', 'Invalid value');
@@ -296,7 +309,7 @@ export function specFor(v: Viewer, whTiers: { name: string; floor?: boolean }[] 
     families: FAMILIES.map(([key, zh, en]) => ({ key, zh, en })), statuses: STATUSES.map(([key, zh, en]) => ({ key, zh, en })),
     groups: GROUPS, visNames: VIS_NAMES, clearMarker: CLEAR, coreRequired: [...CORE_REQUIRED],
     fields: allFields(whTiers).filter(f => canSee(v, f.vis)).map(f => ({
-      key: f.key, zh: f.zh, en: f.en, ph: f.ph, code: f.code, vis: f.vis, type: f.type, group: f.group, unit: f.unit || null,
+      key: f.key, zh: f.zh, en: f.en, ph: f.ph, phEn: f.phEn || f.ph, code: f.code, vis: f.vis, type: f.type, group: f.group, unit: f.unit || null,
       opts: f.opts ? optsOf(f).map((o: any) => Array.isArray(o) ? { key: o[0], zh: o[1], en: o[2] } : { key: o, zh: o, en: o }) : null,
       writable: canWrite(v, f),
     })),
