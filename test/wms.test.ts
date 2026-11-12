@@ -25,6 +25,10 @@ test('WMS: import, goods in/out/transfer, count adjustments confirmed by another
   const imp=await call('m1','POST','/wms/import',{asOf:'2026-10-31',rows});assert.equal(imp.statusCode,200,imp.body);assert.equal(imp.json().created,2);
   assert.equal(await qty('DEMO-A','dg'),10);
   assert.equal((await call('m1','POST','/wms/import',{asOf:'2026-10-31',rows:[rows[0],rows[0]]})).statusCode,400,'duplicate SKU in the file');
+  // 导入 / 导出记录
+  assert.equal((await call('m1','POST','/wms/exports',{rows:2})).statusCode,201);
+  const recs=(await call('m1','GET','/wms/imports')).json().items;assert.deepEqual(recs.map((r:any)=>r.kind),['export','import']);assert.equal(recs[1].rows,2);
+  assert.equal((await call('m2','GET','/wms/imports')).statusCode,403,'no stock access, no records');
 
   // ERP access: the admin gives m5 warehouse manage; m4 (manager) can set warehouse for reports only.
   assert.equal((await call('m4','POST','/erp/access',{userId:'m2',area:'warehouse',level:'view'})).statusCode,403,'not m4’s report');
