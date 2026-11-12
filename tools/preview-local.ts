@@ -238,16 +238,23 @@ const app = await buildApp({
   // Some finished goods waiting at the Dongguan factory (fictional), so the board can suggest shipping them first.
   const atFactory = skus.slice(0, 4).map((sku: string, i: number) => ({ sku, qty: [80, 30, 45, 20][i] }));
   if (atFactory.length) await call('POST', '/wms/movements/batch', { type: 'in', location: 'dg', opDate: ago(5), reason: '示例：工厂成品入库', lines: atFactory });
-  if (skus[0]) await call('POST', '/scm/shipments', { number: 'DEMO-MSKU-0001', mode: 'sea', carrier: '示例船公司', tracking: 'https://track.example.com/DEMO-MSKU-0001', source: 'new', shippedOn: ago(18), etaDays: 35, lines: skus.slice(0, 3).map((sku: string, i: number) => ({ sku, qty: [40, 25, 60][i] })) });
-  if (skus[1]) await call('POST', '/scm/shipments', { number: 'DEMO-AIR-0002', mode: 'air', carrier: '示例快递', tracking: 'DEMO1234567890', source: 'new', shippedOn: ago(2), etaDays: 7, lines: [{ sku: skus[skus.length - 1], qty: 12 }] });
+  if (skus[0]) await call('POST', '/scm/shipments', { number: 'DEMO-MSKU-0001', mode: 'sea', firstLeg: 'oa', lastLeg: 'port', carrier: '示例船公司', tracking: 'https://track.example.com/DEMO-MSKU-0001', source: 'new', shippedOn: ago(18), etaDays: 35, lines: skus.slice(0, 3).map((sku: string, i: number) => ({ sku, qty: [40, 25, 60][i] })) });
+  if (skus[1]) await call('POST', '/scm/shipments', { number: 'DEMO-AIR-0002', mode: 'air', firstLeg: 'air', lastLeg: 'express', carrier: '示例快递', tracking: 'DEMO1234567890', source: 'new', shippedOn: ago(2), etaDays: 7, lines: [{ sku: skus[skus.length - 1], qty: 12 }] });
   // Ship position, an arrival notice waiting for the warehouse, shelf bins and a purchase order partly finished (all fictional).
   const board = (await call('GET', '/scm/board')).json();
   const sea = board.shipments?.find((x: any) => x.number === 'DEMO-MSKU-0001'), air = board.shipments?.find((x: any) => x.number === 'DEMO-AIR-0002');
   if (sea) await call('POST', `/scm/shipments/${sea.id}/position`, { position: '示例：已过夏威夷，按计划航行' });
   if (air) await call('POST', `/scm/shipments/${air.id}/notify`, {});
   await call('POST', '/wms/bin-codes', { location: 'us', codes: ['A-01-01', 'A-01-02', 'A-01-03', 'A-02-01', 'A-02-02', 'C-10-03', 'C-10-04', 'D-01-01', 'D-01-02'], note: '示例货架' });
-  const po = (await call('POST', '/scm/orders', { factory: 'dg', orderedOn: ago(10), note: '示例采购单', lines: skus.slice(0, 2).map((sku: string, i: number) => ({ sku, qty: [120, 60][i] })) })).json();
-  if (po?.id && skus[0]) await call('POST', `/scm/orders/${po.id}/finish`, { opDate: ago(1), lines: [{ sku: skus[0], qty: 40 }] });
+  // Fictional suppliers in the product library, then a purchase order in production (partly finished) and a draft.
+  const orgId = (await db.query("SELECT org_id FROM users WHERE id='m1'")).rows[0].org_id;
+  for (const [i, sku] of skus.entries())
+    await db.query(`INSERT INTO product_pricing(org_id,sku,attrs) VALUES($1,$2,$3::jsonb) ON CONFLICT(org_id,sku) DO UPDATE SET attrs=COALESCE(product_pricing.attrs,'{}'::jsonb) || $3::jsonb`,
+      [orgId, sku, JSON.stringify(i % 2 ? { supplier: '示例济南工厂', supplierAlt1: '示例东莞工厂' } : { supplier: '示例东莞工厂', supplierAlt1: '示例济南工厂' })]);
+  const ahead = (n: number) => new Date(Date.now() + n * 864e5).toISOString().slice(0, 10);
+  const po = (await call('POST', '/scm/orders', { supplier: '示例东莞工厂', orderedOn: ago(10), readyOn: ahead(15), note: '示例采购单', lines: skus.slice(0, 2).map((sku: string, i: number) => ({ sku, qty: [120, 60][i] })) })).json();
+  if (po?.id && skus[0]) { await call('POST', `/scm/orders/${po.id}/issue`, {}); await call('POST', `/scm/orders/${po.id}/finish`, { opDate: ago(1), location: 'dg', lines: [{ sku: skus[0], qty: 40 }] }); }
+  if (skus[2]) await call('POST', '/scm/orders', { supplier: '示例东莞工厂', orderedOn: ago(0), readyOn: ahead(25), note: '示例草稿：等工厂确认', lines: [{ sku: skus[2], qty: 50 }] });
 }
 
 const TYPES: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.otf': 'font/otf', '.woff2': 'font/woff2', '.png': 'image/png', '.json': 'application/json', '.webp': 'image/webp', '.ico': 'image/x-icon' };

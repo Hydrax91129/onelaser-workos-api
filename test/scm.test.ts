@@ -65,18 +65,22 @@ test('SCM: Shopify sales sync (365 days, per SKU and day), board with DS and sug
     assert.equal(s1.ds90, 0); assert.equal(s1.signal, 'spike'); assert.equal(s1.forecast, 0.6, 'mostly the yearly rate; the 30-day burst counts in partly');
     assert.equal(s1.status, 'risk'); assert.deepEqual([s1.ship, s1.make], [37, 0], 'factory stock covers the gap, no production needed');
     assert.equal(b.shopify.orders, 2);
+    assert.equal(b.sales.weekly.reduce((n: number, w: any) => n + w.units, 0), 368, 'weekly sales add up'); assert.equal(b.sales.last30, 7);
     // A shipment from the Dongguan factory: stock moves to in transit, then into the US warehouse on arrival
-    assert.equal((await call('m1', 'POST', '/scm/shipments', { number: 'MSKU-DEMO-1', mode: 'sea', source: 'dg', shippedOn: '2026-11-10', lines: [{ sku: 'S-1', qty: 30 }] })).json().error.code, 'SCM_ETA');
-    const sh = await call('m1', 'POST', '/scm/shipments', { number: 'MSKU-DEMO-1', mode: 'sea', carrier: 'Demo Line', tracking: 'https://track.example.com/MSKU-DEMO-1', source: 'dg', shippedOn: '2026-11-10', etaDays: 30, lines: [{ sku: 's-1', qty: 30 }] });
+    assert.equal((await call('m1', 'POST', '/scm/shipments', { number: 'MSKU-DEMO-1', mode: 'sea', source: 'dg', shippedOn: '2026-11-10', lines: [{ sku: 'S-1', qty: 30 }] })).statusCode, 400, 'first leg and last mile are required');
+    // Default days: OA 普船 30 + 卡派 7 = 37
+    const dflt = await call('m1', 'POST', '/scm/shipments', { number: 'DEMO-DEFAULT', firstLeg: 'oa', lastLeg: 'truck', source: 'new', shippedOn: '2026-11-10', lines: [{ sku: 'S-2', qty: 1 }] });
+    assert.equal(dflt.json().eta, '2026-12-17', '30 + 7 days');
+    const sh = await call('m1', 'POST', '/scm/shipments', { number: 'MSKU-DEMO-1', mode: 'sea', firstLeg: 'oa', lastLeg: 'port', carrier: 'Demo Line', tracking: 'https://track.example.com/MSKU-DEMO-1', source: 'dg', shippedOn: '2026-11-10', etaDays: 30, lines: [{ sku: 's-1', qty: 30 }] });
     assert.equal(sh.statusCode, 201, sh.body); assert.equal(sh.json().eta, '2026-12-10');
-    assert.equal((await call('m1', 'POST', '/scm/shipments', { number: 'msku-demo-1', mode: 'sea', source: 'new', shippedOn: '2026-11-10', etaDays: 30, lines: [{ sku: 'S-2', qty: 1 }] })).json().error.code, 'SCM_SHIPMENT_EXISTS');
-    const tooMuch = await call('m1', 'POST', '/scm/shipments', { number: 'MSKU-DEMO-2', mode: 'air', source: 'dg', shippedOn: '2026-11-10', etaDays: 7, lines: [{ sku: 'S-1', qty: 999 }] });
+    assert.equal((await call('m1', 'POST', '/scm/shipments', { number: 'msku-demo-1', mode: 'sea', firstLeg: 'oa', lastLeg: 'port', source: 'new', shippedOn: '2026-11-10', etaDays: 30, lines: [{ sku: 'S-2', qty: 1 }] })).json().error.code, 'SCM_SHIPMENT_EXISTS');
+    const tooMuch = await call('m1', 'POST', '/scm/shipments', { number: 'MSKU-DEMO-2', mode: 'air', firstLeg: 'air', lastLeg: 'express', source: 'dg', shippedOn: '2026-11-10', etaDays: 7, lines: [{ sku: 'S-1', qty: 999 }] });
     assert.equal(tooMuch.statusCode, 409); assert.match(tooMuch.json().error.message, /库存不足/);
     b = (await call('m1', 'GET', '/scm/board')).json();
     assert.deepEqual([b.items.find((x: any) => x.sku === 'S-1').factory, b.items.find((x: any) => x.sku === 'S-1').transit], [20, 30]);
     const ship = b.shipments.find((x: any) => x.number === 'MSKU-DEMO-1'); assert.equal(ship.daysLeft, 28); assert.deepEqual(ship.lines, [{ sku: 'S-1', qty: 30 }]);
     // New goods straight from production go into in transit without touching factory stock
-    assert.equal((await call('m1', 'POST', '/scm/shipments', { number: 'DHL-DEMO-3', mode: 'express', source: 'new', shippedOn: '2026-11-11', etaDays: 5, lines: [{ sku: 'S-2', qty: 4 }] })).statusCode, 201);
+    assert.equal((await call('m1', 'POST', '/scm/shipments', { number: 'DHL-DEMO-3', mode: 'express', firstLeg: 'air', lastLeg: 'express', source: 'new', shippedOn: '2026-11-11', etaDays: 5, lines: [{ sku: 'S-2', qty: 4 }] })).statusCode, 201);
     // 到港通知: supply chain tells the warehouse; nothing moves yet
     assert.equal((await call('m1', 'POST', `/wms/arrivals/${ship.id}/receive`, { opDate: '2026-12-09', lines: [{ sku: 'S-1', received: 30 }] })).json().error.code, 'SCM_NOT_AT_PORT');
     assert.equal((await call('m1', 'POST', `/scm/shipments/${ship.id}/notify`, {})).statusCode, 200);
@@ -105,43 +109,63 @@ test('SCM: Shopify sales sync (365 days, per SKU and day), board with DS and sug
   } finally { await app.close(); }
 });
 
-test('采购下单: order, ready date from production lead time, on-order counts in the suggestion, shipping against the order closes it; ship position and ETA', async () => {
+test('采购下单: supplier from the product library, draft → issued → delivered (on time or late), edits, in production only once issued; ship position and ETA', async () => {
   const db = await createDatabase(); await db.exec(schema); await seedDemo(db);
   const org = (await db.query("SELECT org_id FROM users WHERE id='m1'")).rows[0].org_id;
-  await db.query(`INSERT INTO product_catalog(org_id,sku,name_zh,lead,attrs) VALUES($1,'P-1','示例主机','20 天','{"firstLeg":"海运 30 天"}')`, [org]);
+  await db.query(`INSERT INTO product_catalog(org_id,sku,name_zh,lead,attrs) VALUES($1,'P-1','示例主机','20 天','{"firstLeg":"海运 30 天"}'),($1,'P-2','示例配件','10 天','{}')`, [org]);
+  await db.query(`INSERT INTO product_pricing(org_id,sku,attrs) VALUES($1,'P-1','{"supplier":"示例东莞工厂","supplierAlt1":"示例济南工厂"}'),($1,'P-2','{"supplier":"示例配件厂"}')`, [org]);
+  await db.query(`UPDATE users SET grants='["supply","supply_manage"]' WHERE id='m2'`);
   const app = await buildApp({ db, integrations: { executiveUserIds: ['m1'] }, completionModel: null, translationModel: null, mailer: null, nudgeIntervalMs: 0, clock: () => NOW } as any);
   const token = (await issueSession(db, 'm1')).accessToken;
   const call = (method: 'GET' | 'POST', url: string, payload?: any) => app.inject({ method, url, payload, headers: { authorization: 'Bearer ' + token, 'accept-language': 'zh-CN' } });
   try {
     for (let i = 1; i <= 60; i++) await db.query('INSERT INTO scm_sales_daily(org_id,sku,day,qty) VALUES($1,$2,$3,2)', [org, 'P-1', daysAgo(i).slice(0, 10)]);
     const before = (await call('GET', '/scm/board')).json().items.find((x: any) => x.sku === 'P-1');
-    assert.ok(before.make > 0, 'no stock: production suggested');
-    assert.equal((await call('POST', '/scm/orders', { factory: 'dg', orderedOn: '2026-11-12', lines: [{ sku: 'NOPE', qty: 1 }] })).json().error.code, 'SCM_UNKNOWN_SKUS');
-    const po = await call('POST', '/scm/orders', { factory: 'dg', orderedOn: '2026-11-12', lines: [{ sku: 'p-1', qty: 100 }], note: '示例' });
-    assert.equal(po.statusCode, 201, po.body); assert.equal(po.json().number, 'PO-20261112-01'); assert.equal(po.json().readyOn, '2026-12-02', 'order date + 20 days production');
-    let b = (await call('GET', '/scm/board')).json(); const after = b.items.find((x: any) => x.sku === 'P-1');
-    assert.equal(after.wip, 100); assert.equal(after.make, Math.max(0, before.make - 100), 'what is in production is not suggested again');
-    assert.deepEqual(b.orders.map((o: any) => [o.number, o.status, o.left, o.daysToReady]), [['PO-20261112-01', 'open', 100, 20]]);
-    // Shipping 60 against the order, then 40: the order closes itself
-    const id = b.orders[0].id;
-    assert.equal((await call('POST', '/scm/shipments', { number: 'DEMO-PO-1', mode: 'sea', source: 'new', shippedOn: '2026-12-03', etaDays: 30, orderId: id, lines: [{ sku: 'P-1', qty: 60 }] })).statusCode, 201);
+    assert.ok(before.make > 0, 'no stock: production suggested'); assert.deepEqual(before.suppliers, ['示例东莞工厂', '示例济南工厂'], 'suppliers from the product library for supply managers');
+    const base = { orderedOn: '2026-11-12', readyOn: '2026-12-02' };
+    assert.equal((await call('POST', '/scm/orders', { ...base, supplier: '示例东莞工厂', lines: [{ sku: 'NOPE', qty: 1 }] })).json().error.code, 'SCM_UNKNOWN_SKUS');
+    const wrong = (await call('POST', '/scm/orders', { ...base, supplier: '示例东莞工厂', lines: [{ sku: 'P-1', qty: 10 }, { sku: 'P-2', qty: 10 }] })).json();
+    assert.equal(wrong.error.code, 'SCM_SUPPLIER_NOT_IN_PIM'); assert.match(wrong.error.message, /P-2/);
+    assert.equal((await call('POST', '/scm/orders', { ...base, readyOn: '2026-11-01', supplier: '示例东莞工厂', lines: [{ sku: 'P-1', qty: 1 }] })).json().error.code, 'SCM_DATES');
+    // Draft: other supply managers are told; not in production yet
+    const po = await call('POST', '/scm/orders', { ...base, supplier: '示例东莞工厂', lines: [{ sku: 'p-1', qty: 100 }], note: '示例' });
+    assert.equal(po.statusCode, 201, po.body); assert.deepEqual([po.json().number, po.json().status], ['PO-20261112-01', 'draft']);
+    assert.equal((await db.query("SELECT count(*)::int n FROM inbox_items WHERE user_id='m2' AND kind='scm_order'")).rows[0].n, 1, 'm2 (supply manager) is told about the draft');
+    let b = (await call('GET', '/scm/board')).json(); const id = b.orders[0].id;
+    assert.equal(b.items.find((x: any) => x.sku === 'P-1').wip, 0, 'a draft is not in production');
+    assert.equal((await call('POST', `/scm/orders/${id}/finish`, { opDate: '2026-11-20', lines: [{ sku: 'P-1', qty: 1 }] })).json().error.code, 'SCM_ORDER_STATE');
+    // Edit the draft (supplier must still be in the product library)
+    assert.equal((await call('POST', `/scm/orders/${id}/edit`, { ...base, supplier: '示例配件厂', lines: [{ sku: 'P-1', qty: 120 }] })).json().error.code, 'SCM_SUPPLIER_NOT_IN_PIM');
+    assert.equal((await call('POST', `/scm/orders/${id}/edit`, { ...base, supplier: '示例济南工厂', lines: [{ sku: 'P-1', qty: 120 }] })).statusCode, 200);
+    // 下达生产: now it counts as in production
+    assert.equal((await call('POST', `/scm/orders/${id}/issue`, {})).statusCode, 200);
+    assert.equal((await call('POST', `/scm/orders/${id}/issue`, {})).json().error.code, 'SCM_ORDER_STATE');
+    b = (await call('GET', '/scm/board')).json(); const after = b.items.find((x: any) => x.sku === 'P-1');
+    assert.equal(after.wip, 120); assert.equal(after.make, Math.max(0, before.make - 120), 'what is in production is not suggested again');
+    assert.deepEqual([b.orders[0].status, b.orders[0].supplier, b.orders[0].edits, b.orders[0].daysToReady], ['issued', '示例济南工厂', 1, 20]);
+    // 完工入库 into the Jinan warehouse; editing below what is done is refused
+    assert.equal((await call('POST', `/scm/orders/${id}/finish`, { opDate: '2026-11-25', location: 'jn', lines: [{ sku: 'P-1', qty: 121 }] })).json().error.code, 'SCM_FINISH_TOO_MANY');
+    assert.equal((await call('POST', `/scm/orders/${id}/finish`, { opDate: '2026-11-25', location: 'jn', lines: [{ sku: 'P-1', qty: 70 }] })).statusCode, 200);
+    assert.equal((await call('POST', `/scm/orders/${id}/edit`, { ...base, supplier: '示例济南工厂', lines: [{ sku: 'P-1', qty: 60 }] })).json().error.code, 'SCM_ORDER_BELOW_DONE');
+    assert.equal((await call('POST', `/scm/orders/${id}/edit`, { ...base, supplier: '示例济南工厂', lines: [{ sku: 'P-1', qty: 100 }] })).statusCode, 200, 'the factory makes 100 after all');
+    let p1 = (await call('GET', '/scm/board')).json().items.find((x: any) => x.sku === 'P-1'); assert.deepEqual([p1.jn, p1.wip], [70, 30]);
+    // The rest ships straight from production after the expected date: delivered, 2 days late
+    assert.equal((await call('POST', '/scm/shipments', { number: 'DEMO-PO-1', mode: 'sea', firstLeg: 'oa', lastLeg: 'port', source: 'new', shippedOn: '2026-12-04', etaDays: 30, orderId: id, lines: [{ sku: 'P-1', qty: 30 }] })).statusCode, 201);
     b = (await call('GET', '/scm/board')).json();
-    assert.deepEqual([b.orders[0].left, b.items.find((x: any) => x.sku === 'P-1').wip], [40, 40]);
-    assert.equal((await call('POST', '/scm/shipments', { number: 'DEMO-PO-2', mode: 'air', source: 'new', shippedOn: '2026-12-04', etaDays: 7, orderId: id, lines: [{ sku: 'P-1', qty: 40 }] })).statusCode, 201);
-    b = (await call('GET', '/scm/board')).json(); assert.equal(b.orders[0].status, 'closed');
-    assert.equal((await call('POST', `/scm/orders/${id}/close`, {})).json().error.code, 'SCM_ORDER_CLOSED');
+    assert.deepEqual([b.orders[0].status, b.orders[0].deliveredOn, b.orders[0].onTime, b.orders[0].daysLate], ['delivered', '2026-12-04', false, 2]);
+    assert.equal((await call('POST', `/scm/orders/${id}/close`, {})).json().error.code, 'SCM_ORDER_STATE');
+    // An on-time order, and a cancelled draft
+    const po2 = (await call('POST', '/scm/orders', { orderedOn: '2026-11-12', readyOn: '2026-11-30', supplier: '示例配件厂', lines: [{ sku: 'P-2', qty: 5 }] })).json();
+    await call('POST', `/scm/orders/${po2.id}/issue`, {}); await call('POST', `/scm/orders/${po2.id}/finish`, { opDate: '2026-11-28', lines: [{ sku: 'P-2', qty: 5 }] });
+    const po3 = (await call('POST', '/scm/orders', { orderedOn: '2026-11-12', readyOn: '2026-11-30', supplier: '示例配件厂', lines: [{ sku: 'P-2', qty: 5 }] })).json();
+    assert.equal((await call('POST', `/scm/orders/${po3.id}/close`, {})).statusCode, 200);
+    b = (await call('GET', '/scm/board')).json();
+    const o2 = b.orders.find((o: any) => o.id === po2.id), o3 = b.orders.find((o: any) => o.id === po3.id);
+    assert.deepEqual([o2.status, o2.onTime, o2.daysLate], ['delivered', true, 0]); assert.equal(o3.status, 'closed');
     // Where the ship is, and a later ETA
     const sh = b.shipments.find((x: any) => x.number === 'DEMO-PO-1');
     assert.equal((await call('POST', `/scm/shipments/${sh.id}/position`, { position: '已过巴拿马运河', eta: '2027-01-10' })).statusCode, 200);
     const sh2 = (await call('GET', '/scm/board')).json().shipments.find((x: any) => x.number === 'DEMO-PO-1');
-    assert.deepEqual([sh2.position, sh2.positionOn, sh2.eta, sh2.daysTotal], ['已过巴拿马运河', '2026-11-12', '2027-01-10', 38]);
-    // 完工入库: finished units go into the factory warehouse; in production drops; two totals (finished, finished + in production)
-    const po2 = (await call('POST', '/scm/orders', { factory: 'jn', orderedOn: '2026-11-12', lines: [{ sku: 'P-1', qty: 50 }] })).json();
-    assert.equal((await call('POST', `/scm/orders/${po2.id}/finish`, { opDate: '2026-11-12', lines: [{ sku: 'P-1', qty: 51 }] })).json().error.code, 'SCM_FINISH_TOO_MANY');
-    assert.equal((await call('POST', `/scm/orders/${po2.id}/finish`, { opDate: '2026-11-12', lines: [{ sku: 'P-1', qty: 20 }] })).statusCode, 200);
-    const p1 = (await call('GET', '/scm/board')).json().items.find((x: any) => x.sku === 'P-1');
-    assert.deepEqual([p1.jn, p1.wip], [20, 30]);
-    assert.equal(p1.finished, p1.us + p1.transit + p1.dg + p1.jn); assert.equal(p1.pipeline, p1.finished + 30);
-    const st = (await call('GET', '/wms/summary')).json().items.find((x: any) => x.sku === 'P-1').qty; assert.equal(st.jn, 20);
+    assert.deepEqual([sh2.position, sh2.positionOn, sh2.eta], ['已过巴拿马运河', '2026-11-12', '2027-01-10']);
   } finally { await app.close(); }
 });
