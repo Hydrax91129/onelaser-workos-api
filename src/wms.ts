@@ -22,6 +22,7 @@ import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
 import { deny } from './errors.js';
 import { reportsOf } from './org.js';
+import { FAMILIES } from './product-spec.js';
 
 export const wmsSchema = `
 CREATE TABLE IF NOT EXISTS wms_items(org_id text NOT NULL, sku text NOT NULL, name text NOT NULL DEFAULT '', type text NOT NULL DEFAULT '',
@@ -34,6 +35,9 @@ CREATE TABLE IF NOT EXISTS wms_movements(id text PRIMARY KEY, org_id text NOT NU
 CREATE INDEX IF NOT EXISTS wms_movements_org ON wms_movements(org_id,created_at);
 CREATE INDEX IF NOT EXISTS wms_movements_sku ON wms_movements(org_id,sku,created_at);
 CREATE INDEX IF NOT EXISTS wms_movements_pending ON wms_movements(org_id,created_at) WHERE status='pending';
+ALTER TABLE wms_movements ADD COLUMN IF NOT EXISTS op_date date;
+CREATE TABLE IF NOT EXISTS wms_bins(org_id text NOT NULL, sku text NOT NULL, location text NOT NULL, bin1 text NOT NULL DEFAULT '', bin2 text NOT NULL DEFAULT '',
+  bin3 text NOT NULL DEFAULT '', updated_by text, updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(org_id,sku,location));
 CREATE TABLE IF NOT EXISTS wms_imports(id text PRIMARY KEY, org_id text NOT NULL, as_of date NOT NULL, rows integer NOT NULL, created_by text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
 `;
 
@@ -75,6 +79,14 @@ export const warehouseLevelFor = (u: any, admin: boolean) => {
 };
 export const accessOf = (grants: string[]) => Object.fromEntries(Object.keys(AREAS).map(a => [a, levelOf(grants, a)]));
 
+/** Operation date (操作日期): defaults to today in the form, the operator may change it; not before 2000 and not after tomorrow. */
+const opDay = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use a date like 2026-11-12');
+const checkOpDate = (d: string) => {
+  const max = new Date(Date.now() + 36 * 3600_000).toISOString().slice(0, 10);
+  if (d < '2000-01-01' || d > max || Number.isNaN(Date.parse(d + 'T00:00:00Z'))) deny(400, 'WMS_OP_DATE', 'Check the operation date', '操作日期不对，请检查（不能早于 2000 年，也不能是未来的日期）。');
+};
+/** How a movement was made, for the log: opening import, dealer shipment, several SKUs in one go, or one by hand. */
+const methodOf = (m: any, n: number) => m.reference === 'IMPORT' ? 'import' : /^Dealer order /.test(m.reason || '') ? 'dealer' : n > 1 ? 'batch' : 'manual';
 const sku = z.string().trim().min(1).max(80).regex(/^[A-Za-z0-9][A-Za-z0-9._\-/ ]*$/, 'Use letters, digits, dot, dash, slash or underscore in the SKU');
 const uid = z.string().min(1).max(100);
 const nameOf = (u: any) => u ? (u.display_name || u.name_zh || u.name_en || u.id) : '';
@@ -134,12 +146,22 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
   const canDecide = (u: User, m: any, submitter: any) => m.status === 'pending' && (o.isAdmin(u) || (!!submitter && (submitter.manager_id === u.id || submitter.second_manager_id === u.id) && submitter.id !== u.id));
 
   const peopleOf = async (org: string) => new Map((await db.query('SELECT id,display_name,name_zh,name_en,manager_id,second_manager_id FROM users WHERE org_id=$1', [org])).rows.map((p: any) => [p.id, p]));
-  const movementOut = (u: User, people: Map<any, any>) => (m: any) => ({
-    id: m.id, type: m.type, sku: m.sku, location: m.location, toLocation: m.to_location || undefined, qty: Number(m.qty), counted: m.counted, systemQty: m.system_qty,
+  /** Movements written together (one batch, one import, one dealer shipment) share the transaction's timestamp. */
+  const batchesOf = async (org: string, rows: any[]) => {
+    const at = [...new Set(rows.map(r => new Date(r.created_at).toISOString()))];
+    if (!at.length) return new Map<string, { n: number; units: number }>();
+    const g = (await db.query(`SELECT created_by, created_at, type, count(*)::int n, sum(abs(qty))::int units FROM wms_movements WHERE org_id=$1 AND created_at = ANY($2::timestamptz[]) GROUP BY 1,2,3`, [org, at])).rows;
+    return new Map(g.map((x: any) => [`${x.created_by}|${new Date(x.created_at).toISOString()}|${x.type}`, { n: Number(x.n), units: Number(x.units) }]));
+  };
+  const ymd = (d: unknown) => d ? (d instanceof Date ? d.toISOString() : String(d)).slice(0, 10) : null;
+  const movementOut = (u: User, people: Map<any, any>, batches = new Map<string, { n: number; units: number }>()) => (m: any) => {
+    const b = batches.get(`${m.created_by}|${new Date(m.created_at).toISOString()}|${m.type}`) || { n: 1, units: Math.abs(Number(m.qty)) };
+    return {
+    id: m.id, type: m.type, sku: m.sku, opDate: ymd(m.op_date) || ymd(m.created_at), method: methodOf(m, b.n), batchSkus: b.n, batchUnits: b.units, location: m.location, toLocation: m.to_location || undefined, qty: Number(m.qty), counted: m.counted, systemQty: m.system_qty,
     reason: m.reason, reference: m.reference || '', status: m.status, createdAt: m.created_at, byName: nameOf(people.get(m.created_by)),
     approvedByName: m.status !== 'pending' && m.decided_by ? nameOf(people.get(m.decided_by)) : '',
     canDecide: canDecide(u, m, people.get(m.created_by)),
-  });
+  }; };
 
   // Stock of one SKU in every warehouse, for the pricing page of the product library (read only).
   app.get<{ Params: { sku: string } }>('/wms/stock/:sku', async req => {
@@ -168,10 +190,23 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     const pendingOld = (await db.query(`SELECT * FROM wms_movements WHERE org_id=$1 AND status='pending' AND ${notReturns()} ORDER BY created_at`, [u.org_id])).rows.filter((m: any) => !recent.has(m.id));
     const people = await peopleOf(u.org_id);
     const lastImport = (await db.query('SELECT as_of,created_at FROM wms_imports WHERE org_id=$1 ORDER BY created_at DESC LIMIT 1', [u.org_id])).rows[0];
-    const movements = [...moves, ...pendingOld].map(movementOut(u, people));
+    const all = [...moves, ...pendingOld];
+    const movements = all.map(movementOut(u, people, await batchesOf(u.org_id, all)));
     const level = warehouseLevel(u);
+    // Product facts for the filters (family, series, MSRP: all public in the product library) and shelf bins per location.
+    const facts = new Map((await db.query(`SELECT lower(sku) k, family, COALESCE(attrs->>'series','') series, msrp, name_zh, name_en FROM product_catalog WHERE org_id=$1`, [u.org_id])).rows.map((r: any) => [r.k, r]));
+    // The product's main image (visible to everyone in the product library), shown small next to the SKU.
+    const images = new Map((await db.query(`SELECT DISTINCT ON (lower(sku)) lower(sku) k, id FROM product_files WHERE org_id=$1 AND slot='mainImage' ORDER BY lower(sku), created_at DESC`, [u.org_id])).rows.map((r: any) => [r.k, r.id]));
+    const bins = new Map<string, Record<string, string[]>>();
+    for (const r of (await db.query('SELECT sku,location,bin1,bin2,bin3 FROM wms_bins WHERE org_id=$1', [u.org_id])).rows) {
+      const k = String(r.sku).toLowerCase(); if (!bins.has(k)) bins.set(k, {}); bins.get(k)![r.location] = [r.bin1, r.bin2, r.bin3];
+    }
     return {
-      locations: LOCATIONS, items: items.map((it: any) => ({ ...it, qty: qty.get(it.sku) || {} })), movements,
+      locations: LOCATIONS, families: FAMILIES.map(([key, zh, en]) => ({ key, zh, en })),
+      items: items.map((it: any) => { const f: any = facts.get(it.sku.toLowerCase()) || {};
+        return { ...it, qty: qty.get(it.sku) || {}, family: f.family || '', series: f.series || '', msrp: f.msrp == null ? null : Number(f.msrp),
+          nameZh: f.name_zh || '', nameEn: f.name_en || '', imageId: images.get(it.sku.toLowerCase()) || null, bins: bins.get(it.sku.toLowerCase()) || {} }; }),
+      movements,
       canOperate: level === 'manage', canApprove: movements.some(m => m.canDecide), canAssign: o.isAdmin(u) || (u as any).role === 'manager',
       canImport: o.isAdmin(u), lastImport: lastImport ? { asOf: lastImport.as_of, at: lastImport.created_at } : null,
     };
@@ -184,7 +219,7 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     const v = historyQuery.parse(req.query);
     if (isReturnSku(v.sku)) returnSkuDenied([v.sku]);
     const rows = (await db.query('SELECT * FROM wms_movements WHERE org_id=$1 AND lower(sku)=lower($2) ORDER BY created_at DESC, id DESC LIMIT $3', [u.org_id, v.sku, v.limit ?? 1000])).rows;
-    return { sku: v.sku, movements: rows.map(movementOut(u, await peopleOf(u.org_id))) };
+    return { sku: v.sku, movements: rows.map(movementOut(u, await peopleOf(u.org_id), await batchesOf(u.org_id, rows))) };
   });
 
   const itemInput = z.object({ sku, name: z.string().trim().min(1).max(200), type: z.string().trim().max(60).optional() }).strict();
@@ -204,10 +239,12 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
   const moveInput = z.object({
     type: z.enum(['in', 'out', 'transfer', 'adjust']), sku, location: z.enum(LOC_IDS), toLocation: z.enum(LOC_IDS).optional(),
     qty: z.number().int().positive().max(1_000_000).optional(), counted: z.number().int().min(0).max(1_000_000).optional(),
-    reason: z.string().trim().min(2).max(200), reference: z.string().trim().max(80).optional(),
+    reason: z.string().trim().min(2).max(200), reference: z.string().trim().max(80).optional(), opDate: opDay.optional(),
   }).strict();
+  const todayIso = () => new Date().toISOString().slice(0, 10);
   app.post('/wms/movements', async (req, reply) => {
     const u = actorOf(req), v = moveInput.parse(req.body); requireManage(u);
+    if (v.opDate) checkOpDate(v.opDate);
     if (isReturnSku(v.sku)) returnSkuDenied([v.sku]);
     if (v.type === 'adjust' ? v.counted === undefined : v.qty === undefined) deny(400, 'WMS_QTY_REQUIRED', 'Enter the quantity');
     if (v.type === 'out' && !v.reference) deny(400, 'WMS_REFERENCE_REQUIRED', 'Goods out needs an order or reference number');
@@ -224,8 +261,8 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
         qty = v.counted! - system; status = 'pending';
         if (qty === 0) deny(400, 'WMS_NO_DIFFERENCE', 'The counted quantity matches the system; nothing to adjust');
       }
-      await tx.query(`INSERT INTO wms_movements(id,org_id,type,sku,location,to_location,qty,counted,system_qty,reason,reference,status,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-        [id, u.org_id, v.type, it.sku, v.location, v.type === 'transfer' ? v.toLocation : null, qty, v.counted ?? null, system, v.reason, v.reference || null, status, u.id]);
+      await tx.query(`INSERT INTO wms_movements(id,org_id,type,sku,location,to_location,qty,counted,system_qty,reason,reference,status,created_by,op_date) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+        [id, u.org_id, v.type, it.sku, v.location, v.type === 'transfer' ? v.toLocation : null, qty, v.counted ?? null, system, v.reason, v.reference || null, status, u.id, v.opDate || todayIso()]);
       await audit(tx, u, 'wms.movement', id, { ...v, qty, status });
       return { id, status, qty };
     });
@@ -233,39 +270,73 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     return m;
   });
 
-  // Batch goods in (a container or a delivery with many SKUs): one location, one reason and reference,
-  // many lines; all or nothing. "transfer" moves the lines from one location to another (e.g. arrived from transit).
+  // Several SKUs in one go (a container, one order with many products, a count of a shelf): one location, date, reason
+  // and reference, many lines; all or nothing. in/out/transfer take a quantity per line; adjust takes the counted
+  // quantity and, like a single count, waits for the submitter's manager (each line is confirmed on its own).
   const batchInput = z.object({
-    type: z.enum(['in', 'transfer']), location: z.enum(LOC_IDS), toLocation: z.enum(LOC_IDS).optional(),
+    type: z.enum(['in', 'out', 'transfer', 'adjust']), location: z.enum(LOC_IDS), toLocation: z.enum(LOC_IDS).optional(), opDate: opDay,
     reason: z.string().trim().min(2).max(200), reference: z.string().trim().max(80).optional(),
-    lines: z.array(z.object({ sku, qty: z.number().int().positive().max(1_000_000) }).strict()).min(1).max(500),
+    lines: z.array(z.object({ sku, qty: z.number().int().positive().max(1_000_000).optional(), counted: z.number().int().min(0).max(1_000_000).optional() }).strict()).min(1).max(500),
   }).strict();
   app.post('/wms/movements/batch', async (req, reply) => {
     const u = actorOf(req), v = batchInput.parse(req.body); requireManage(u);
+    checkOpDate(v.opDate);
     if (v.type === 'transfer' && (!v.toLocation || v.toLocation === v.location)) deny(400, 'WMS_TRANSFER_TARGET', 'Choose a different destination location');
-    const merged = new Map<string, number>();
+    if (v.type === 'out' && !v.reference) deny(400, 'WMS_REFERENCE_REQUIRED', 'Goods out needs an order or reference number');
     const ref = v.lines.map(l => l.sku).filter(isReturnSku); if (ref.length) returnSkuDenied(ref);
-    for (const l of v.lines) merged.set(l.sku.toLowerCase(), (merged.get(l.sku.toLowerCase()) || 0) + l.qty);
+    const adjust = v.type === 'adjust';
+    if (v.lines.some(l => adjust ? l.counted === undefined : l.qty === undefined)) deny(400, 'WMS_QTY_REQUIRED', 'Enter the quantity');
+    // Same SKU twice: quantities add up; a count lists each SKU once.
+    const merged = new Map<string, number>();
+    for (const l of v.lines) {
+      const k = l.sku.toLowerCase();
+      if (adjust && merged.has(k)) deny(400, 'WMS_DUPLICATE_LINE', `${l.sku} is listed twice`, `${l.sku} 填了两次，盘点每个 SKU 只填一行。`);
+      merged.set(k, adjust ? l.counted! : (merged.get(k) || 0) + l.qty!);
+    }
     const out = await db.transaction(async tx => {
       await adoptCatalogItems(tx, u.org_id, u.id, [...merged.keys()]);
       const items = (await tx.query('SELECT sku FROM wms_items WHERE org_id=$1', [u.org_id])).rows as { sku: string }[];
       const known = new Map(items.map(i => [i.sku.toLowerCase(), i.sku]));
       const missing = [...merged.keys()].filter(k => !known.has(k));
       if (missing.length) deny(400, 'WMS_UNKNOWN_SKUS', `These SKUs do not exist yet: ${missing.slice(0, 10).join(', ')}`, `这些 SKU 还不存在，请先新增：${missing.slice(0, 10).join('、')}${missing.length > 10 ? ` 等 ${missing.length} 个` : ''}`);
-      const batch = randomUUID(); let units = 0;
-      for (const [k, qty] of merged) {
+      const batch = randomUUID(); let units = 0, lines = 0, same = 0;
+      for (const [k, n] of merged) {
         const s2 = known.get(k)!, id = randomUUID();
-        if (v.type === 'in') await addStock(tx, u.org_id, s2, v.location, qty);
-        else { await addStock(tx, u.org_id, s2, v.location, -qty); await addStock(tx, u.org_id, s2, v.toLocation!, qty); }
-        await tx.query(`INSERT INTO wms_movements(id,org_id,type,sku,location,to_location,qty,reason,reference,status,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'done',$10)`,
-          [id, u.org_id, v.type, s2, v.location, v.type === 'transfer' ? v.toLocation : null, qty, v.reason, v.reference || null, u.id]);
-        units += qty;
+        let qty = n, system: number | null = null, status = 'done';
+        if (v.type === 'in') await addStock(tx, u.org_id, s2, v.location, n);
+        else if (v.type === 'out') {
+          const have = await stockOf(tx, u.org_id, s2, v.location, true);
+          if (have < n) deny(409, 'WMS_NEGATIVE_STOCK', `Not enough stock of ${s2}: ${have} on hand, ${n} needed`, `${s2} 库存不足：现有 ${have} 件，要出 ${n} 件。`);
+          await addStock(tx, u.org_id, s2, v.location, -n); qty = -n;
+        } else if (v.type === 'transfer') { await addStock(tx, u.org_id, s2, v.location, -n); await addStock(tx, u.org_id, s2, v.toLocation!, n); }
+        else { system = await stockOf(tx, u.org_id, s2, v.location); qty = n - system; status = 'pending'; if (qty === 0) { same++; continue; } }
+        await tx.query(`INSERT INTO wms_movements(id,org_id,type,sku,location,to_location,qty,counted,system_qty,reason,reference,status,created_by,op_date) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+          [id, u.org_id, v.type, s2, v.location, v.type === 'transfer' ? v.toLocation : null, qty, adjust ? n : null, system, v.reason, v.reference || null, status, u.id, v.opDate]);
+        units += Math.abs(qty); lines++;
       }
-      await audit(tx, u, 'wms.batch', batch, { type: v.type, location: v.location, toLocation: v.toLocation, lines: merged.size, units, reference: v.reference });
-      return { lines: merged.size, units };
+      if (!lines) deny(400, 'WMS_NO_DIFFERENCE', 'The counted quantity matches the system; nothing to adjust');
+      await audit(tx, u, 'wms.batch', batch, { type: v.type, location: v.location, toLocation: v.toLocation, opDate: v.opDate, lines, units, unchanged: same, reference: v.reference });
+      return { lines, units, unchanged: same, status: adjust ? 'pending' : 'done' };
     });
     reply.code(201);
     return out;
+  });
+
+  // Shelf bins (库位) of a SKU in one warehouse: a preferred bin and two alternates. Stock is kept per warehouse;
+  // the bins say where on the shelves to find it (goods normally go to the preferred bin).
+  const binInput = z.object({ sku, location: z.enum(LOC_IDS), bins: z.array(z.string().trim().max(40).regex(/^[^<>]*$/)).max(3) }).strict();
+  app.post('/wms/bins', async req => {
+    const u = actorOf(req), v = binInput.parse(req.body); requireManage(u);
+    if (isReturnSku(v.sku)) returnSkuDenied([v.sku]);
+    const [b1 = '', b2 = '', b3 = ''] = v.bins;
+    if (!b1 && (b2 || b3)) deny(400, 'WMS_BIN_PRIMARY', 'Fill in the preferred bin first', '请先填首选库位。');
+    return db.transaction(async tx => {
+      const it = await itemOf(tx, u.org_id, v.sku, u.id);
+      await tx.query(`INSERT INTO wms_bins(org_id,sku,location,bin1,bin2,bin3,updated_by,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,now())
+        ON CONFLICT(org_id,sku,location) DO UPDATE SET bin1=$4,bin2=$5,bin3=$6,updated_by=$7,updated_at=now()`, [u.org_id, it.sku, v.location, b1, b2, b3, u.id]);
+      await audit(tx, u, 'wms.bins', it.sku, { location: v.location, bins: [b1, b2, b3] });
+      return { sku: it.sku, location: v.location, bins: [b1, b2, b3] };
+    });
   });
 
   for (const decision of ['approve', 'reject'] as const) {
@@ -320,6 +391,7 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
           stock.set(key(s, loc), target); changed++;
           await tx.query(`INSERT INTO wms_movements(id,org_id,type,sku,location,qty,counted,system_qty,reason,reference,status,created_by,decided_by,decided_at) VALUES($1,$2,'adjust',$3,$4,$5,$6,$7,$8,'IMPORT','done',$9,$9,now())`,
             [randomUUID(), u.org_id, s, loc, delta, target, have, reason, u.id]);
+          await tx.query('UPDATE wms_movements SET op_date=$2 WHERE id=(SELECT id FROM wms_movements WHERE org_id=$1 AND sku=$3 AND location=$4 AND reference=\'IMPORT\' ORDER BY created_at DESC LIMIT 1)', [u.org_id, v.asOf, s, loc]);
         }
       }
       const importId = randomUUID();
