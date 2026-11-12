@@ -46,6 +46,8 @@ CREATE TABLE IF NOT EXISTS wms_bin_codes(org_id text NOT NULL, location text NOT
   created_by text, created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(org_id,location,code));
 CREATE TABLE IF NOT EXISTS erp_migrations(id text PRIMARY KEY, done_at timestamptz NOT NULL DEFAULT now());
 CREATE TABLE IF NOT EXISTS wms_imports(id text PRIMARY KEY, org_id text NOT NULL, as_of date NOT NULL, rows integer NOT NULL, created_by text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
+ALTER TABLE wms_imports ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'import';
+ALTER TABLE wms_imports ADD COLUMN IF NOT EXISTS changed integer;
 `;
 
 /** Regular stock locations. Returns and repairs (REF- SKUs) are not regular stock: they live only in the
@@ -284,7 +286,7 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     const recent = new Set(moves.map((m: any) => m.id));
     const pendingOld = (await db.query(`SELECT * FROM wms_movements WHERE org_id=$1 AND status='pending' AND ${notReturns()} ORDER BY created_at`, [u.org_id])).rows.filter((m: any) => !recent.has(m.id));
     const people = await peopleOf(u.org_id);
-    const lastImport = (await db.query('SELECT as_of,created_at FROM wms_imports WHERE org_id=$1 ORDER BY created_at DESC LIMIT 1', [u.org_id])).rows[0];
+    const lastImport = (await db.query(`SELECT as_of,created_at FROM wms_imports WHERE org_id=$1 AND kind='import' ORDER BY created_at DESC LIMIT 1`, [u.org_id])).rows[0];
     const all = [...moves, ...pendingOld];
     const movements = all.map(movementOut(u, people, await batchesOf(u.org_id, all)));
     const level = warehouseLevel(u);
@@ -598,10 +600,24 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
         }
       }
       const importId = randomUUID();
-      await tx.query('INSERT INTO wms_imports(id,org_id,as_of,rows,created_by) VALUES($1,$2,$3,$4,$5)', [importId, u.org_id, v.asOf, v.rows.length, u.id]);
+      await tx.query(`INSERT INTO wms_imports(id,org_id,as_of,rows,created_by,kind,changed) VALUES($1,$2,$3,$4,$5,'import',$6)`, [importId, u.org_id, v.asOf, v.rows.length, u.id, changed]);
       await audit(tx, u, 'wms.import', importId, { asOf: v.asOf, rows: v.rows.length, created, changed });
       return { rows: v.rows.length, created, changed };
     });
+  });
+
+  /* 导入 / 导出记录 (owner, 2026-11-12): bulk stock updates and full exports, who and when. */
+  app.post('/wms/exports', async (req, reply) => {
+    const u = actorOf(req); requireView(u);
+    const v = z.object({ rows: z.number().int().min(0).max(1_000_000) }).strict().parse(req.body);
+    const id = randomUUID();
+    await db.query(`INSERT INTO wms_imports(id,org_id,as_of,rows,created_by,kind) VALUES($1,$2,current_date,$3,$4,'export')`, [id, u.org_id, v.rows, u.id]);
+    reply.code(201); return { id };
+  });
+  app.get('/wms/imports', async req => {
+    const u = actorOf(req); requireView(u);
+    const rows = (await db.query(`SELECT i.*, (SELECT display_name FROM users WHERE id=i.created_by) by_name FROM wms_imports i WHERE org_id=$1 ORDER BY created_at DESC LIMIT 200`, [u.org_id])).rows;
+    return { items: rows.map((r: any) => ({ id: r.id, kind: r.kind, asOf: r.as_of instanceof Date ? r.as_of.toISOString().slice(0, 10) : String(r.as_of).slice(0, 10), rows: Number(r.rows), changed: r.changed == null ? null : Number(r.changed), by: r.by_name || '', at: r.created_at })) };
   });
 
   /* ---------- ERP permissions ---------- */
