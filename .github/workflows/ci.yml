@@ -13,6 +13,23 @@ permissions:
 # Three independent jobs run at the same time (about 5 minutes instead of 10 in a row).
 # Branch protection requires the check named "verify": that job only passes when all three pass,
 # so keep its name. Each job has its own throwaway database; nothing is shared between jobs.
+#
+# Why `npm test` runs `tsx --no-wasm-code-gc ...` (package.json):
+# PGlite is PostgreSQL compiled to WebAssembly, and most test files open one, in the PostgreSQL 16 job as well.
+# Node 24's V8 (13.6) has a race in WebAssembly code garbage collection: a wasm-to-JS wrapper that the code GC
+# is already freeing can be freed a second time, and V8 aborts the test file with
+#   # Check failed: jit_page.has_value().    or    # Check failed: jit_page_->allocations_.erase(addr) == 1.
+# Upstream: https://github.com/nodejs/node/issues/66366 (V8 fix 9b8ca54d5a, crbug 409379692, shipped in Node 26).
+# The Node 24 backport, https://github.com/nodejs/node/pull/66376, is not in any release yet (24.22.3 has no V8
+# change), so pinning another Node 24 patch does not help.
+# --no-wasm-code-gc stops V8 from freeing dead wasm code, which removes the race. It only applies to test
+# processes: each test file is its own short-lived process, so the code that is kept costs little memory.
+# Production runs `node build/src/server.js` against real PostgreSQL without it. It cannot go in NODE_OPTIONS
+# (Node only allows a short list of V8 flags there), so it is on the command line; node --test passes it on
+# to each test file's process. Node 22 and 26 accept it too. Remove it once a Node 24 release has the backport.
+# Every reported abort stack runs through WasmEngine::FreeDeadCode, the code GC this flag turns off. Measured here
+# (PR #136, full suite per run): Node 24.22.2 without the flag aborted 2 of 32 times, with it 0 of 32; Node 22 and
+# Node 26 0 of 16 each. That alone is not conclusive (the abort is rare); upstream measured 16 aborts without it, 0 with it.
 jobs:
   test-embedded:
     name: test (embedded PostgreSQL)
