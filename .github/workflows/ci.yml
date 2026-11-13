@@ -10,9 +10,16 @@ on:
 permissions:
   contents: read
 
-# Three independent jobs run at the same time (about 5 minutes instead of 10 in a row).
-# Branch protection requires the check named "verify": that job only passes when all three pass,
-# so keep its name. Each job has its own throwaway database; nothing is shared between jobs.
+# The jobs run at the same time. Branch protection requires the check named "verify": that job only passes when
+# all the others pass, so keep its name. Each job has its own throwaway database; nothing is shared between jobs.
+#
+# Faster releases (owner, 2026-11-13):
+# - Tests are split into 4 groups per database (tools/test-shard.mjs), each on its own machine. The "changes" job
+#   first checks that every test file is in exactly one group, so a new file cannot be left out.
+# - A pull request whose only change is deploy/frontend-revision.txt (the automatic frontend pin) skips the test
+#   groups: the backend code is the same as main, which was fully tested. It still builds the production image with
+#   that frontend and starts it (the "production image" job). Pushes to main always run every test group.
+#   Anything uncertain (another event, a diff error, any other file) runs everything.
 #
 # Why `npm test` runs `tsx --no-wasm-code-gc ...` (package.json):
 # PGlite is PostgreSQL compiled to WebAssembly, and most test files open one, in the PostgreSQL 16 job as well.
@@ -31,9 +38,43 @@ permissions:
 # (PR #136, full suite per run): Node 24.22.2 without the flag aborted 2 of 32 times, with it 0 of 32; Node 22 and
 # Node 26 0 of 16 each. That alone is not conclusive (the abort is rare); upstream measured 16 aborts without it, 0 with it.
 jobs:
-  test-embedded:
-    name: test (embedded PostgreSQL)
+  changes:
+    name: changes
     runs-on: ubuntu-latest
+    outputs:
+      pin_only: ${{ steps.diff.outputs.pin_only }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Every test file is in exactly one test group
+        run: node tools/test-shard.mjs --check 4
+      - name: Is this pull request only a frontend pin?
+        id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          pin_only=false
+          if [ "$EVENT" = pull_request ] && [ -n "$BASE" ] && [ -n "$HEAD" ]; then
+            if files="$(git diff --name-only "$BASE...$HEAD")" && [ "$files" = "deploy/frontend-revision.txt" ]; then
+              pin_only=true
+            fi
+          fi
+          echo "Changed files: ${files:-(not a pull request)}"
+          echo "pin_only=$pin_only"
+          echo "pin_only=$pin_only" >> "$GITHUB_OUTPUT"
+
+  test-embedded:
+    name: test (embedded PostgreSQL, ${{ matrix.shard }}/4)
+    needs: changes
+    if: needs.changes.outputs.pin_only != 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -42,18 +83,28 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+        if: matrix.shard == 1
       - name: Test DingTalk export parser with fictional records
+        if: matrix.shard == 1
         run: python3 -m unittest discover -s test -p 'prepare_okr_xlsx_test.py'
       - name: Test pinned Wiki input safety patch
+        if: matrix.shard == 1
         run: node --test test/wiki-safety.test.mjs
       - name: Test read-only sent reply sync
+        if: matrix.shard == 1
         run: python3 -m unittest discover -s tools/support -p "*_test.py"
-      - name: Test with embedded PostgreSQL
-        run: npm test
+      - name: Test with embedded PostgreSQL (group ${{ matrix.shard }} of 4)
+        run: node tools/test-shard.mjs ${{ matrix.shard }}/4
 
   test-postgres:
-    name: test (PostgreSQL 16)
+    name: test (PostgreSQL 16, ${{ matrix.shard }}/4)
+    needs: changes
+    if: needs.changes.outputs.pin_only != 'true'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     services:
       postgres:
         image: postgres:16
@@ -75,8 +126,8 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci
-      - name: Test PostgreSQL adapter
-        run: npm test
+      - name: Test PostgreSQL adapter (group ${{ matrix.shard }} of 4)
+        run: node tools/test-shard.mjs ${{ matrix.shard }}/4
         env:
           TEST_DATABASE_URL: postgres://workos_ci:ephemeral-ci-password@127.0.0.1:5432/workos_test
 
@@ -143,12 +194,22 @@ jobs:
 
   verify:
     runs-on: ubuntu-latest
-    needs: [test-embedded, test-postgres, docker]
+    needs: [changes, test-embedded, test-postgres, docker]
     if: always()
     steps:
       - name: All checks passed
         env:
-          RESULTS: ${{ join(needs.*.result, ' ') }}
+          CHANGES: ${{ needs.changes.result }}
+          PIN_ONLY: ${{ needs.changes.outputs.pin_only }}
+          TESTS: ${{ needs.test-embedded.result }} ${{ needs.test-postgres.result }}
+          IMAGE: ${{ needs.docker.result }}
         run: |
-          echo "Results: $RESULTS"
-          for r in $RESULTS; do [ "$r" = success ] || { echo "A required job did not succeed."; exit 1; }; done
+          echo "changes=$CHANGES pin_only=$PIN_ONLY tests=$TESTS image=$IMAGE"
+          [ "$CHANGES" = success ] || { echo "The changes check did not succeed."; exit 1; }
+          [ "$IMAGE" = success ] || { echo "The production image job did not succeed."; exit 1; }
+          for r in $TESTS; do
+            [ "$r" = success ] && continue
+            # Test groups may be skipped only for a pull request that changes nothing but the frontend pin.
+            [ "$r" = skipped ] && [ "$PIN_ONLY" = true ] && continue
+            echo "A test job did not succeed ($r)."; exit 1
+          done
