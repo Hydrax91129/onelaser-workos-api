@@ -27,6 +27,9 @@ permissions:
 # Production runs `node build/src/server.js` against real PostgreSQL without it. It cannot go in NODE_OPTIONS
 # (Node only allows a short list of V8 flags there), so it is on the command line; node --test passes it on
 # to each test file's process. Node 22 and 26 accept it too. Remove it once a Node 24 release has the backport.
+# Every reported abort stack runs through WasmEngine::FreeDeadCode, the code GC this flag turns off. Measured here
+# (PR #136, full suite per run): Node 24.22.2 without the flag aborted 2 of 32 times, with it 0 of 32; Node 22 and
+# Node 26 0 of 16 each. That alone is not conclusive (the abort is rare); upstream measured 16 aborts without it, 0 with it.
 jobs:
   test-embedded:
     name: test (embedded PostgreSQL)
