@@ -78,20 +78,18 @@ export const daysIn = (s: unknown) => { const m = String(s ?? '').match(/\d+(?:\
  *  Goods already finished at the factory skip production. */
 export const supplyDaysOf = (o: { order: number; production: number; firstLeg: number; receive: number; buffer: number }) => ({
   full: o.order + o.production + o.firstLeg + o.receive + o.buffer, fromStock: o.order + o.firstLeg + o.receive + o.buffer });
-/** Forecast daily sales (owner, 2026-11-12: weigh seasonality and short bursts or dips).
- *  40 % the last 30 days, 30 % the last 90, 30 % the year — the year scaled by last year's next 90 days against the yearly
- *  average (seasonality, 0.5–2×, only with ≥ 300 days of history). A burst (30-day rate ≥ 1.3 × the 90-day rate) counts
- *  in only up to 2 × the 90-day rate so one viral week does not triple the order; a dip (≤ 0.7 ×) counts in fully. */
+/** Forecast daily sales from the last 30 and 60 days only (owner, 2026-11-13: Shopify gives this app 60 days of orders,
+ *  so the 90-day, yearly and seasonal parts are gone): 60 % the last 30 days + 40 % the last 60 days. The trend compares
+ *  the last 30 days with the 30 days before them: ≥ 1.3× is a burst, ≤ 0.7× a dip. */
 /** A burst or dip only counts with at least this many units sold in the last 30 days (owner, 2026-11-13): 1 unit against
  *  0 is not a trend. */
 export const TREND_MIN_UNITS = 3;
-export function forecastOf(o: { ds30: number; ds90: number; ds365: number; nextLastYear: number | null; history: number; sold30?: number }) {
-  const season = o.history >= 300 && o.ds365 > 0 && o.nextLastYear != null ? Math.min(2, Math.max(0.5, o.nextLastYear / o.ds365)) : 1;
-  const enough = o.sold30 == null || o.sold30 >= TREND_MIN_UNITS;
-  const signal = !enough ? 'steady' : o.ds90 > 0 && o.ds30 >= 1.3 * o.ds90 ? 'spike' : o.ds90 > 0 && o.ds30 <= 0.7 * o.ds90 ? 'dip' : o.ds90 <= 0 && o.ds30 > 0 ? 'spike' : 'steady';
-  const recent = signal === 'spike' && o.ds90 > 0 ? Math.min(o.ds30, 2 * o.ds90) : o.ds30;
-  const ds = Math.max(0, 0.4 * recent + 0.3 * o.ds90 + 0.3 * o.ds365 * season);
-  return { ds, season: Math.round(season * 100) / 100, signal, trendPct: enough && o.ds90 > 0 ? Math.round((o.ds30 / o.ds90 - 1) * 100) : null };
+export const FORECAST_WEIGHTS = { last30: 0.6, last60: 0.4 } as const;
+export function forecastOf(o: { ds30: number; ds60: number; prev30: number | null; sold30?: number }) {
+  const enough = o.sold30 == null || o.sold30 >= TREND_MIN_UNITS, prev = o.prev30;
+  const signal = !enough || prev == null ? 'steady' : prev > 0 && o.ds30 >= 1.3 * prev ? 'spike' : prev > 0 && o.ds30 <= 0.7 * prev ? 'dip' : prev <= 0 && o.ds30 > 0 ? 'spike' : 'steady';
+  const ds = Math.max(0, FORECAST_WEIGHTS.last30 * o.ds30 + FORECAST_WEIGHTS.last60 * o.ds60);
+  return { ds, season: 1, signal, trendPct: enough && prev != null && prev > 0 ? Math.round((o.ds30 / prev - 1) * 100) : null };
 }
 /** 头程 / 尾程 with their default days (owner, 2026-11-12): days to arrive = first leg + last mile. */
 export const FIRST_LEGS = { air: 7, oa: 30, fast: 20, matson: 15 } as const;
@@ -151,13 +149,15 @@ export async function registerScmRoutes(app: FastifyInstance, db: Database, o: {
     const s = await settingsOf(u.org_id), t = today(), since365 = addDays(t, -365), since30 = addDays(t, -30);
     const catalog = (await db.query(`SELECT c.sku,c.name_zh,c.name_en,c.family,c.status,c.lead,COALESCE(c.attrs->>'firstLeg','') first_leg,COALESCE(c.attrs->>'moqUnit','') moq,
       COALESCE(c.attrs->>'series','') series,COALESCE(c.attrs->>'brand','') brand,p.attrs pattrs FROM product_catalog c LEFT JOIN product_pricing p ON p.org_id=c.org_id AND p.sku=c.sku WHERE c.org_id=$1 AND lower(c.sku) NOT LIKE 'ref-%'`, [u.org_id])).rows;
-    const sales = new Map<string, { d365: number; d30: number; d90: number; ly: number }>();
+    const sales = new Map<string, { d365: number; d30: number; d60: number; d90: number; ly: number }>();
     // Last year's next 90 days (seasonality): the 90 days that started a year ago.
-    const since90 = addDays(t, -90), nextLyEnd = addDays(t, -275);
+    // 60 days: the window the reorder table shows next to 30 days (owner, 2026-11-13; Shopify gives this app 60 days of orders).
+    const since90 = addDays(t, -90), since60 = addDays(t, -60), nextLyEnd = addDays(t, -275);
     for (const r of (await db.query(`SELECT lower(sku) k, sum(qty)::int q365, sum(CASE WHEN day >= $3 THEN qty ELSE 0 END)::int q30,
-        sum(CASE WHEN day >= $5 THEN qty ELSE 0 END)::int q90, sum(CASE WHEN day < $6 THEN qty ELSE 0 END)::int qly
+        sum(CASE WHEN day >= $5 THEN qty ELSE 0 END)::int q90, sum(CASE WHEN day < $6 THEN qty ELSE 0 END)::int qly,
+        sum(CASE WHEN day >= $7 THEN qty ELSE 0 END)::int q60
         FROM scm_sales_daily WHERE org_id=$1 AND day >= $2 AND day < $4 GROUP BY 1`,
-      [u.org_id, since365, since30, t, since90, nextLyEnd])).rows) sales.set(r.k, { d365: Number(r.q365), d30: Number(r.q30), d90: Number(r.q90), ly: Number(r.qly) });
+      [u.org_id, since365, since30, t, since90, nextLyEnd, since60])).rows) sales.set(r.k, { d365: Number(r.q365), d30: Number(r.q30), d60: Number(r.q60), d90: Number(r.q90), ly: Number(r.qly) });
     const stock = new Map<string, Record<string, number>>();
     for (const r of (await db.query('SELECT lower(sku) k, location, qty FROM wms_stock WHERE org_id=$1', [u.org_id])).rows) { if (!stock.has(r.k)) stock.set(r.k, {}); stock.get(r.k)![r.location] = Number(r.qty); }
     const sync = (await db.query('SELECT * FROM scm_sync WHERE org_id=$1', [u.org_id])).rows[0];
@@ -166,12 +166,14 @@ export async function registerScmRoutes(app: FastifyInstance, db: Database, o: {
       WHERE o.org_id=$1 AND o.status='issued' GROUP BY 1`, [u.org_id])).rows) wipOf.set(r.k, Number(r.q));
     // Days of sales in the table: up to 365, fewer when the history is shorter (DS is then over the days we have).
     const first = (await db.query('SELECT min(day) d FROM scm_sales_daily WHERE org_id=$1', [u.org_id])).rows[0]?.d;
-    const span365 = first ? Math.max(1, Math.min(365, Math.round((Date.parse(t) - Date.parse(ymd(first)!)) / 86400000))) : 365, span30 = Math.min(30, span365), span90 = Math.min(90, span365);
+    const span365 = first ? Math.max(1, Math.min(365, Math.round((Date.parse(t) - Date.parse(ymd(first)!)) / 86400000))) : 365, span30 = Math.min(30, span365), span60 = Math.min(60, span365), span90 = Math.min(90, span365);
     const canSupplier = levelOf(u) === 'manage';
     const items = catalog.map((c: any) => {
-      const k = String(c.sku).toLowerCase(), sl = sales.get(k) || { d365: 0, d30: 0, d90: 0, ly: 0 }, st = stock.get(k) || {};
-      const ds365 = sl.d365 / span365, ds30 = sl.d30 / span30, ds90 = sl.d90 / span90;
-      const fc = forecastOf({ ds30, ds90, ds365, nextLastYear: span365 >= 300 ? sl.ly / 90 : null, history: span365, sold30: sl.d30 });
+      const k = String(c.sku).toLowerCase(), sl = sales.get(k) || { d365: 0, d30: 0, d60: 0, d90: 0, ly: 0 }, st = stock.get(k) || {};
+      const ds365 = sl.d365 / span365, ds30 = sl.d30 / span30, ds90 = sl.d90 / span90, ds60 = sl.d60 / span60;
+      // The 30 days before the last 30, only when the history reaches back that far.
+      const prev30 = span365 >= 60 ? (sl.d60 - sl.d30) / 30 : null;
+      const fc = forecastOf({ ds30, ds60, prev30, sold30: sl.d30 });
       const us = st.us || 0, transit = st.transit || 0, factory = (st.dg || 0) + (st.jn || 0);
       // Production and first leg come from the product library; settings fill in what is missing (shown with *).
       const prodLib = daysIn(c.lead), legLib = daysIn(c.first_leg), production = prodLib ?? s.productionDays, firstLeg = legLib ?? s.firstLegDays;
@@ -179,8 +181,8 @@ export async function registerScmRoutes(app: FastifyInstance, db: Database, o: {
       // Finished goods at the factory ship first, so the clock is the shorter one while there is factory stock.
       const leadDays = factory > 0 ? days.fromStock : days.full;
       return { sku: c.sku, nameZh: c.name_zh || '', nameEn: c.name_en || '', family: c.family || '', lifecycle: c.status || '', series: c.series, brand: c.brand,
-        ...(canSupplier ? { suppliers: suppliersOf(c.pattrs) } : {}), sold365: sl.d365, sold90: sl.d90, sold30: sl.d30,
-        ds365: r2(ds365), ds90: r2(ds90), ds30: r2(ds30), forecast: r2(fc.ds), season: fc.season, signal: fc.signal, trendPct: fc.trendPct, us, transit, dg: st.dg || 0, jn: st.jn || 0, factory, moq: c.moq || '', productionDays: production, firstLegDays: firstLeg,
+        ...(canSupplier ? { suppliers: suppliersOf(c.pattrs) } : {}), sold365: sl.d365, sold90: sl.d90, sold60: sl.d60, sold30: sl.d30,
+        ds365: r2(ds365), ds90: r2(ds90), ds60: r2(ds60), ds30: r2(ds30), forecast: r2(fc.ds), season: fc.season, signal: fc.signal, trendPct: fc.trendPct, us, transit, dg: st.dg || 0, jn: st.jn || 0, factory, moq: c.moq || '', productionDays: production, firstLegDays: firstLeg,
         productionFromLibrary: prodLib != null, firstLegFromLibrary: legLib != null, supplyDays: days.full, stockDays: days.fromStock, leadDays,
         arriveOn: addDays(t, leadDays), leadFromLibrary: prodLib != null && legLib != null,
         wip: wipOf.get(k) || 0,
