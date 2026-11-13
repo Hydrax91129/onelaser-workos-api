@@ -9,7 +9,7 @@
  *   products  none / view (products) / secret (+ products_secret) / manage (+ products_manage)
  *   pricing   none / view (product_cost_detail) / edit (+ pricing_edit) / manage (+ products_import: bulk updates)
  *   supply    none / view (supply) / manage (supply_manage)
- *   warehouse none / view (warehouse) / manage (warehouse_manage)
+ *   warehouse none / view (warehouse) / manage (warehouse_manage) / approve (+warehouse_approve: confirms count adjustments, own ones too)
  *   returns   none / view (returns) / manage (returns_manage)   — returns and repairs (rma.ts), set on its own
  * Company admins can do everything. Managers can view stock and set warehouse access
  * for the people who report to them.
@@ -64,14 +64,16 @@ const returnSkuDenied = (skus: string[]) => deny(400, 'WMS_RETURN_SKU', `Returne
   `REF- 开头的退货 SKU 在“退货维修”里管理，不进常规库存：${skus.slice(0, 10).join('、')}`);
 const LOC_IDS = LOCATIONS.map(l => l.id) as [string, ...string[]];
 
-export const ERP_GRANTS = ['products_secret', 'products_manage', 'product_cost_detail', 'pricing_edit', 'products_import', 'supply', 'supply_manage', 'warehouse', 'warehouse_manage', 'returns', 'returns_manage', 'dealers', 'dealers_manage'] as const;
+export const ERP_GRANTS = ['products_secret', 'products_manage', 'product_cost_detail', 'pricing_edit', 'products_import', 'supply', 'supply_manage', 'warehouse', 'warehouse_manage', 'warehouse_approve', 'returns', 'returns_manage', 'dealers', 'dealers_manage'] as const;
 const AREAS: Record<string, Record<string, string[]>> = {
   /** 产品资料 (owner's levels, 2026-11-12): 无 / 查看普通信息 / 查看保密信息 (suppliers, landed cost, files…) / 管理信息 (edit everything). */
   products: { none: [], view: ['products'], secret: ['products', 'products_secret'], manage: ['products', 'products_secret', 'products_manage'] },
   /** 价格: 无 / 查看 (price build-up, cost and margin) / 单项修改 (one SKU at a time) / 管理 (also bulk updates). Price parameters stay main-admin only. */
   pricing: { none: [], view: ['product_cost_detail'], edit: ['product_cost_detail', 'pricing_edit'], manage: ['product_cost_detail', 'pricing_edit', 'products_import'] },
   supply: { none: [], view: ['supply'], manage: ['supply', 'supply_manage'] },
-  warehouse: { none: [], view: ['warehouse'], manage: ['warehouse', 'warehouse_manage'] },
+  /** 仓库库存 (owner, 2026-11-13): 审批 = 管理 + confirming count adjustments, including your own (they still wait for your
+      click). Only main admins can give or take away 审批. */
+  warehouse: { none: [], view: ['warehouse'], manage: ['warehouse', 'warehouse_manage'], approve: ['warehouse', 'warehouse_manage', 'warehouse_approve'] },
   /** 退货维修 has its own access (set on the returns page); until 2026-11 it followed warehouse access, see migrateReturnsAccess. */
   returns: { none: [], view: ['returns'], manage: ['returns', 'returns_manage'] },
   dealers: { none: [], view: ['dealers'], manage: ['dealers', 'dealers_manage'] },
@@ -85,7 +87,7 @@ const levelOf = (grants: string[], area: string) => {
 export const warehouseLevelFor = (u: any, admin: boolean) => {
   if (admin) return 'manage';
   const g: string[] = Array.isArray(u.grants) ? u.grants : [], lv = levelOf(g, 'warehouse');
-  if (lv !== 'none') return lv;
+  if (lv !== 'none') return lv === 'approve' ? 'manage' : lv; // 审批 can do everything 管理 can
   return u.role === 'manager' || g.includes('products') ? 'view' : 'none';
 };
 /* Shelf bins hold quantities too. The warehouse total (wms_stock) stays the one number that must be right; the three bins
@@ -224,7 +226,7 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
   const warehouseLevel = (u: User) => {
     if (o.isAdmin(u)) return 'manage';
     const g = grantsOf(u), lv = levelOf(g, 'warehouse');
-    if (lv !== 'none') return lv;
+    if (lv !== 'none') return lv === 'approve' ? 'manage' : lv; // 审批 can do everything 管理 can
     return (u as any).role === 'manager' || g.includes('products') ? 'view' : 'none';
   };
   const requireView = (u: User) => { if (warehouseLevel(u) === 'none') deny(403, 'WMS_FORBIDDEN', 'You do not have access to warehouse stock'); };
@@ -239,19 +241,19 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     if (!it) deny(404, 'WMS_UNKNOWN_SKU', 'This SKU does not exist yet; add it first');
     return it;
   };
-  /* A count adjustment takes effect once someone else with 库存·管理 confirms it (owner, 2026-11-12). When nobody else has it,
-     the main admins confirm (the submitter too, if they are the only main admin). The page names who can confirm. */
+  /* A count adjustment takes effect once someone with 库存·审批 confirms it (owner, 2026-11-13; before that, anyone else with
+     库存·管理). An approver confirms their own adjustments too, with a click. While nobody has 审批, the main admins confirm
+     (another main admin first; the submitter if they are the only one). The page names who can confirm. */
   const peopleOf = async (org: string, q: Queryable = db) => new Map((await q.query('SELECT id,display_name,name_zh,name_en,manager_id,second_manager_id,grants,active,is_admin,quality_factory FROM users WHERE org_id=$1', [org])).rows.map((p: any) => [p.id, p]));
   const confirmersOf = (people: Map<any, any>, submitterId: string) => {
     const live = [...people.values()].filter((p: any) => p.active && !p.quality_factory);
-    const wms = live.filter((p: any) => Array.isArray(p.grants) && p.grants.includes('warehouse_manage') && p.id !== submitterId);
-    if (wms.length) return wms.map((p: any) => p.id as string);
+    const approvers = live.filter((p: any) => Array.isArray(p.grants) && p.grants.includes('warehouse_approve'));
+    if (approvers.length) return approvers.map((p: any) => p.id as string);
     const admins = live.filter((p: any) => o.isAdmin(p));
     const others = admins.filter((p: any) => p.id !== submitterId);
     return (others.length ? others : admins).map((p: any) => p.id as string);
   };
-  const canDecide = (u: User, m: any, people: Map<any, any>) => m.status === 'pending'
-    && (confirmersOf(people, m.created_by).includes(u.id) || (o.isAdmin(u) && u.id !== m.created_by));
+  const canDecide = (u: User, m: any, people: Map<any, any>) => m.status === 'pending' && confirmersOf(people, m.created_by).includes(u.id);
   /** Movements written together (one batch, one import, one dealer shipment) share the transaction's timestamp. */
   const batchesOf = async (org: string, rows: any[]) => {
     const at = [...new Set(rows.map(r => new Date(r.created_at).toISOString()))];
@@ -425,7 +427,7 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
       if (!lines) deny(400, 'WMS_NO_DIFFERENCE', 'The counted quantity matches the system; nothing to adjust');
       await audit(tx, u, 'wms.batch', batch, { type: v.type, location: v.location, toLocation: v.toLocation, opDate: v.opDate, lines, units, unchanged: same, reference: v.reference });
       return { lines, units, unchanged: same, status: adjust ? 'pending' : 'done',
-        ...(adjust ? { confirmers: await (async () => { const people = await peopleOf(u.org_id, tx); return confirmersOf(people, u.id).map(id => nameOf(people.get(id))); })() } : {}) };
+        ...(adjust ? await (async () => { const people = await peopleOf(u.org_id, tx), ids = confirmersOf(people, u.id); return { confirmers: ids.map(id => nameOf(people.get(id))), selfConfirm: ids.includes(u.id) }; })() : {}) };
     });
     reply.code(201);
     return out;
@@ -547,8 +549,8 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     const m = (await tx.query('SELECT * FROM wms_movements WHERE id=$1 AND org_id=$2 FOR UPDATE', [mid, u.org_id])).rows[0];
     if (!m) deny(404, 'NOT_FOUND', 'Movement not found');
     if (m.status !== 'pending') deny(409, 'WMS_ALREADY_DECIDED', 'This adjustment has already been decided');
-    if (!canDecide(u, m, people)) deny(403, 'WMS_APPROVER_ONLY', `Only another warehouse manager can confirm this adjustment: ${confirmersOf(people, m.created_by).map(id => nameOf(people.get(id))).join(', ')}`,
-      `盘点调整要由另一位有库存管理权限的同事确认：${confirmersOf(people, m.created_by).map(id => nameOf(people.get(id))).join('、')}。`);
+    if (!canDecide(u, m, people)) deny(403, 'WMS_APPROVER_ONLY', `Only people with stock approval can confirm this adjustment: ${confirmersOf(people, m.created_by).map(id => nameOf(people.get(id))).join(', ')}`,
+      `盘点调整要由有库存审批权限的人确认：${confirmersOf(people, m.created_by).map(id => nameOf(people.get(id))).join('、')}。`);
     if (decision === 'approve') await addStock(tx, u.org_id, m.sku, m.location, Number(m.qty), { mode: 'count' });
     await tx.query('UPDATE wms_movements SET status=$2,decided_by=$3,decided_at=now() WHERE id=$1', [m.id, decision === 'approve' ? 'done' : 'rejected', u.id]);
     await audit(tx, u, 'wms.adjust_' + decision, m.id, { sku: m.sku, location: m.location, qty: m.qty });
@@ -652,11 +654,14 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     return db.transaction(async tx => {
       const p = (await tx.query('SELECT id,grants FROM users WHERE id=$1 AND org_id=$2 AND active=true FOR UPDATE', [v.userId, u.org_id])).rows[0];
       if (!p) deny(404, 'NOT_FOUND', 'Member not found');
+      const before = grantsOf(p);
       if (!admin) {
         if (!['warehouse', 'returns'].includes(v.area) || (u as any).role !== 'manager' || !(await reportsOf(tx, u.org_id, u.id)).has(p.id))
           deny(403, 'ERP_ACCESS_FORBIDDEN', 'Managers can only set warehouse and returns access for their own reports', '主管只能给自己的下属设置仓库库存和退货维修权限。');
+        // 审批 changes stock on its own say-so: only main admins give it or take it away (owner, 2026-11-13).
+        if (v.area === 'warehouse' && (v.level === 'approve' || levelOf(before, 'warehouse') === 'approve'))
+          deny(403, 'WMS_APPROVE_ADMIN_ONLY', 'Only main administrators can give or remove stock approval', '只有主管理员能设置或取消“库存审批”权限。');
       }
-      const before = grantsOf(p);
       let next = [...before.filter(g => !areaGrants(v.area).includes(g)), ...AREAS[v.area][v.level]];
       // Pricing lives inside the product library: any price access brings product access, and removing product access removes price access.
       if (v.area === 'pricing' && v.level !== 'none' && !next.includes('products')) next.push('products');

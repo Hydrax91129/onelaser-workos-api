@@ -48,22 +48,33 @@ test('WMS: import, goods in/out/transfer, count adjustments confirmed by another
   assert.equal(await qty('DEMO-A','dg'),6);assert.equal(await qty('DEMO-A','transit'),6);
   assert.equal((await call('m5','POST','/wms/movements',{type:'in',sku:'NOPE',location:'us',qty:1,reason:'采购到货'})).statusCode,404);
 
-  // Count adjustment: pending until ANOTHER person with 库存·管理 confirms; with nobody else, the main admins (owner, 2026-11-12).
+  // Count adjustment: pending until someone with 库存·审批 confirms; while nobody has 审批, the main admins (owner, 2026-11-13).
   const adj=await call('m5','POST','/wms/movements',{type:'adjust',sku:'DEMO-A',location:'us',counted:4,reason:'盘点差异'});assert.equal(adj.statusCode,201,adj.body);assert.equal(adj.json().status,'pending');
   assert.equal(await qty('DEMO-A','us'),6,'pending adjustments do not change stock');
   assert.equal((await call('m5','POST',`/wms/movements/${adj.json().id}/approve`,{})).statusCode,403,'cannot confirm your own');
   const pend=(who:string)=>summary(who).then((x:any)=>x.movements.find((m:any)=>m.id===adj.json().id));
   assert.equal((await pend('m4')).canDecide,false,'a line manager without 库存·管理 cannot confirm');
-  const deny=await call('m4','POST',`/wms/movements/${adj.json().id}/approve`,{});assert.equal(deny.statusCode,403);assert.match(deny.json().error.message,/另一位有库存管理权限/);
+  const deny=await call('m4','POST',`/wms/movements/${adj.json().id}/approve`,{});assert.equal(deny.statusCode,403);assert.match(deny.json().error.message,/库存审批权限/);
   const m1name=(await db.query("SELECT display_name FROM users WHERE id='m1'")).rows[0].display_name;
-  assert.deepEqual((await pend('m5')).confirmers,[m1name],'nobody else manages the warehouse: the main admin confirms, and the page says so');
-  // Another warehouse manager (m6) becomes the one to confirm
+  assert.deepEqual((await pend('m5')).confirmers,[m1name],'nobody has 审批: the main admin confirms, and the page says so');
+  // Another person with only 管理 cannot confirm any more; 审批 (main admins only) can.
   await call('m1','POST','/erp/access',{userId:'m6',area:'warehouse',level:'manage'});
+  assert.equal((await pend('m6')).canDecide,false,'管理 alone does not confirm counts');
+  assert.equal((await call('m4','POST','/erp/access',{userId:'m5',area:'warehouse',level:'approve'})).statusCode,403,'a line manager cannot give 审批');
+  const ga=await call('m1','POST','/erp/access',{userId:'m6',area:'warehouse',level:'approve'});assert.equal(ga.statusCode,200,ga.body);assert.equal(ga.json().access.warehouse,'approve');
   const m6name=(await db.query("SELECT display_name FROM users WHERE id='m6'")).rows[0].display_name;
-  assert.deepEqual((await pend('m5')).confirmers,[m6name]);assert.equal((await pend('m6')).canDecide,true);
+  assert.deepEqual((await pend('m5')).confirmers,[m6name]);assert.equal((await pend('m6')).canDecide,true);assert.equal((await pend('m1')).canDecide,false,'with an approver, the main admin no longer confirms');
   assert.equal((await call('m6','POST',`/wms/movements/${adj.json().id}/approve`,{})).statusCode,200);
   assert.equal(await qty('DEMO-A','us'),4);
   assert.equal((await call('m1','POST',`/wms/movements/${adj.json().id}/reject`,{})).statusCode,409,'already decided');
+  // An approver's own count still waits, and they confirm it themselves (owner, 2026-11-13).
+  const mine=await call('m6','POST','/wms/movements',{type:'adjust',sku:'DEMO-A',location:'us',counted:3,reason:'抽盘'});assert.equal(mine.json().status,'pending');assert.equal((await summary('m6')).movements.find((m:any)=>m.id===mine.json().id).canDecide,true,'an approver confirms their own count');
+  assert.equal(await qty('DEMO-A','us'),4,'still waiting for the click');
+  assert.equal((await call('m6','POST',`/wms/movements/${mine.json().id}/approve`,{})).statusCode,200);assert.equal(await qty('DEMO-A','us'),3);
+  assert.equal((await call('m6','POST','/wms/movements',{type:'adjust',sku:'DEMO-A',location:'us',counted:4,reason:'抽盘'})).statusCode,201);
+  const back=(await summary('m6')).movements.find((m:any)=>m.status==='pending');assert.equal((await call('m6','POST',`/wms/movements/${back.id}/approve`,{})).statusCode,200);assert.equal(await qty('DEMO-A','us'),4);
+  // A line manager cannot take 审批 away either; the main admin can, and 审批 still counts as 管理 for stock work.
+  assert.equal((await call('m4','POST','/erp/access',{userId:'m6',area:'warehouse',level:'manage'})).statusCode,403);
   // Several adjustments confirmed in one go (owner, 2026-11-13): all or nothing.
   const a1=(await call('m5','POST','/wms/movements',{type:'adjust',sku:'DEMO-A',location:'us',counted:5,reason:'盘点差异'})).json().id;
   const a2=(await call('m5','POST','/wms/movements',{type:'adjust',sku:'DEMO-A',location:'dg',counted:7,reason:'盘点差异'})).json().id;
