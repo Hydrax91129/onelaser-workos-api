@@ -13,7 +13,7 @@
     "start": "node build/src/server.js",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test --test-concurrency=1 test/*.test.ts",
+    "test": "tsx --no-wasm-code-gc --test --test-concurrency=1 test/*.test.ts",
     "dealer:local": "tsx tools/dealer-local.ts",
     "preview": "tsx tools/preview-local.ts"
   },
