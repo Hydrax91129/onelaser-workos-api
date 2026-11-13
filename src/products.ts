@@ -129,9 +129,16 @@ const money = z.number().min(0).max(10_000_000).refine(n => toCents(n) != null, 
 const text = (max: number) => z.string().trim().max(max).optional();
 const num_ = (v: any) => v == null ? null : Number(v);
 
+/** Once (2026-11-13): 计划停售 (eolPlanned) joined 停产清存 (clearance); nothing writes eolPlanned any more. */
+export async function migrateProductStatuses(db: Database) {
+  await db.transaction(async tx => {
+    if (!(await tx.query(`INSERT INTO erp_migrations(id) VALUES('product_status_v2') ON CONFLICT DO NOTHING RETURNING id`)).rows.length) return;
+    await tx.query("UPDATE product_catalog SET status='clearance' WHERE status='eolPlanned'");
+  });
+}
+
 export async function registerProductRoutes(app: FastifyInstance, db: Database, o: { isAdmin: (u: User) => boolean }) {
-  // 计划停售 joined 停产清存 (owner, 2026-11-13). Harmless to repeat: nothing writes eolPlanned any more.
-  await db.query("UPDATE product_catalog SET status='clearance' WHERE status='eolPlanned'");
+  await migrateProductStatuses(db);
   const actorOf = (req: FastifyRequest): User => req.actor || deny(401, 'UNAUTHENTICATED', 'Authentication is required');
   const grants = (u: User): string[] => Array.isArray((u as any).grants) ? (u as any).grants : [];
   const canView = (u: User) => o.isAdmin(u) || grants(u).includes('products');
