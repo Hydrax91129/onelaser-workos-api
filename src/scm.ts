@@ -20,6 +20,7 @@ import type { User } from './auth.js';
 import { deny } from './errors.js';
 import { pushInbox } from './inbox.js';
 import { wmsMoveLines, isReturnSku, warehouseLevelFor } from './wms.js';
+import { isDropship } from './product-spec.js';
 import type { ShopifyOptions } from './shopify.js';
 import { SHOPIFY_API_VERSION } from './shopify.js';
 
@@ -127,6 +128,13 @@ export function stoppingAdjust<T extends { make: number; status: string; shortDa
   return { ...r, make: 0, status: r.status === 'risk' ? 'ok' : r.status, shortDays: 0, stopping: true };
 }
 
+/** Dropship SKUs (PIM 供货方式 = 代发) ship from the supplier and are not stocked (owner, 2026-11-13):
+ *  sales still show, but nothing to ship or make and no stockout risk. */
+export function dropshipAdjust<T extends { ship: number; make: number; status: string; shortDays: number }>(mode: string, r: T): T & { dropship: boolean } {
+  if (!isDropship(mode)) return { ...r, dropship: false };
+  return { ...r, ship: 0, make: 0, status: r.status === 'risk' ? 'ok' : r.status, shortDays: 0, dropship: true };
+}
+
 export async function registerScmRoutes(app: FastifyInstance, db: Database, o: { isAdmin: (u: User) => boolean; shopify?: ShopifyOptions; now?: () => number }) {
   const now = o.now || Date.now, today = () => new Date(now()).toISOString().slice(0, 10);
   const actorOf = (req: FastifyRequest): User => req.actor || deny(401, 'UNAUTHENTICATED', 'Authentication is required');
@@ -148,7 +156,7 @@ export async function registerScmRoutes(app: FastifyInstance, db: Database, o: {
     const u = actorOf(req); requireView(u);
     const s = await settingsOf(u.org_id), t = today(), since365 = addDays(t, -365), since30 = addDays(t, -30);
     const catalog = (await db.query(`SELECT c.sku,c.name_zh,c.name_en,c.family,c.status,c.lead,COALESCE(c.attrs->>'firstLeg','') first_leg,COALESCE(c.attrs->>'moqUnit','') moq,
-      COALESCE(c.attrs->>'series','') series,COALESCE(c.attrs->>'brand','') brand,p.attrs pattrs FROM product_catalog c LEFT JOIN product_pricing p ON p.org_id=c.org_id AND p.sku=c.sku WHERE c.org_id=$1 AND lower(c.sku) NOT LIKE 'ref-%'`, [u.org_id])).rows;
+      COALESCE(c.attrs->>'series','') series,COALESCE(c.attrs->>'brand','') brand,COALESCE(c.attrs->>'supplyMode','') supply_mode,p.attrs pattrs FROM product_catalog c LEFT JOIN product_pricing p ON p.org_id=c.org_id AND p.sku=c.sku WHERE c.org_id=$1 AND lower(c.sku) NOT LIKE 'ref-%'`, [u.org_id])).rows;
     const sales = new Map<string, { d365: number; d30: number; d60: number; d90: number; ly: number }>();
     // Last year's next 90 days (seasonality): the 90 days that started a year ago.
     // 60 days: the window the reorder table shows next to 30 days (owner, 2026-11-13; Shopify gives this app 60 days of orders).
@@ -186,7 +194,7 @@ export async function registerScmRoutes(app: FastifyInstance, db: Database, o: {
         productionFromLibrary: prodLib != null, firstLegFromLibrary: legLib != null, supplyDays: days.full, stockDays: days.fromStock, leadDays,
         arriveOn: addDays(t, leadDays), leadFromLibrary: prodLib != null && legLib != null,
         wip: wipOf.get(k) || 0,
-        ...stoppingAdjust(c.status, reorderOf({ ds: fc.ds, us, transit, factory, leadDays, targetDays: s.targetDays, safetyDays: s.safetyDays, wip: wipOf.get(k) || 0 })) };
+        ...dropshipAdjust(c.supply_mode, stoppingAdjust(c.status, reorderOf({ ds: fc.ds, us, transit, factory, leadDays, targetDays: s.targetDays, safetyDays: s.safetyDays, wip: wipOf.get(k) || 0 }))) };
     });
     const ships = (await db.query(`SELECT * FROM scm_shipments WHERE org_id=$1 AND (status IN ('in_transit','at_port') OR arrived_on >= $2) ORDER BY eta, number`, [u.org_id, addDays(t, -60)])).rows;
     const lines = ships.length ? (await db.query('SELECT * FROM scm_shipment_lines WHERE shipment_id=ANY($1::text[]) ORDER BY sku', [ships.map((x: any) => x.id)])).rows : [];

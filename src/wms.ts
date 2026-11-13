@@ -293,8 +293,11 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     const movements = all.map(movementOut(u, people, await batchesOf(u.org_id, all)));
     const level = warehouseLevel(u);
     // Product facts for the filters (family, series, MSRP: all public in the product library) and shelf bins per location.
-    const facts = new Map((await db.query(`SELECT lower(c.sku) k, c.family, COALESCE(c.attrs->>'series','') series, COALESCE(c.attrs->>'brand','') brand, c.status, c.msrp, c.name_zh, c.name_en, p.landed_usd
+    const facts = new Map((await db.query(`SELECT lower(c.sku) k, c.family, COALESCE(c.attrs->>'supplyMode','') supply_mode, COALESCE(c.attrs->>'series','') series, COALESCE(c.attrs->>'brand','') brand, c.status, c.msrp, c.name_zh, c.name_en, p.landed_usd
       FROM product_catalog c LEFT JOIN product_pricing p ON p.org_id=c.org_id AND p.sku=c.sku WHERE c.org_id=$1`, [u.org_id])).rows.map((r: any) => [r.k, r]));
+    // Dropship SKUs are not stocked (owner, 2026-11-13): left out unless some stock is still recorded for them.
+    for (let i = items.length - 1; i >= 0; i--) { const it: any = items[i];
+      if ((facts.get(it.sku.toLowerCase()) as any)?.supply_mode === 'dropship' && !Object.values(qty.get(it.sku) || {}).some(n => Number(n) !== 0)) items.splice(i, 1); }
     // Stock value per warehouse: MSRP value for everyone who sees stock; landed-cost value only for cost access and main admins.
     const costOk = o.isAdmin(u) || grantsOf(u).includes('product_cost_detail'), r2 = (n: number) => Math.round(n * 100) / 100;
     const value = (k: 'msrp' | 'landed_usd') => Object.fromEntries(LOCATIONS.map(l => [l.id, r2(items.reduce((a: number, it: any) => { const f: any = facts.get(it.sku.toLowerCase()); const unit = f?.[k] == null ? 0 : Number(f[k]); return a + unit * Number(qty.get(it.sku)?.[l.id] || 0); }, 0))]));
@@ -311,7 +314,7 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
       locations: LOCATIONS, families: FAMILIES.map(([key, zh, en]) => ({ key, zh, en })), statuses: STATUSES.map(([key, zh, en]) => ({ key, zh, en })),
       items: items.map((it: any) => { const f: any = facts.get(it.sku.toLowerCase()) || {};
         return { ...it, qty: qty.get(it.sku) || {}, family: f.family || '', series: f.series || '', msrp: f.msrp == null ? null : Number(f.msrp),
-          nameZh: f.name_zh || '', nameEn: f.name_en || '', brand: f.brand || '', status: f.status || '', imageId: images.get(it.sku.toLowerCase()) || null,
+          nameZh: f.name_zh || '', nameEn: f.name_en || '', brand: f.brand || '', status: f.status || '', dropship: f.supply_mode === 'dropship', imageId: images.get(it.sku.toLowerCase()) || null,
           bins: bins.get(it.sku.toLowerCase()) || {}, binQty: binQty.get(it.sku.toLowerCase()) || {} }; }),
       movements,
       canOperate: level === 'manage', canApprove: movements.some(m => m.canDecide), canAssign: o.isAdmin(u) || (u as any).role === 'manager',

@@ -77,6 +77,12 @@ test('price worksheet follows the spec formulas (fictional numbers)',()=>{
  const ov=worksheet({landed:1000,lastMile:100,msrp:2000,whOv0:1500,whFreight:'us'},SETTINGS as any).wholesale[0];
  assert.equal(ov.price,1500);assert.equal(ov.override,true);assert.ok(Math.abs(ov.discount-25)<1e-9);assert.ok(Math.abs(ov.cm!-(1500*0.95-1100))<1e-6,'we pay freight: delivered cost');
  const low=worksheet({landed:1000,lastMile:100,msrp:1200},SETTINGS as any);assert.equal(low.fixed[0].belowFloor,true);
+ // Retail shipping charge (owner, 2026-11-13): what the customer pays for shipping offsets last-mile freight in retail margins only.
+ const ship=worksheet({landed:1000,lastMile:100,msrp:2000,retailShip:60},SETTINGS as any);
+ assert.equal(ship.retailCost,1040);assert.equal(Number(ship.fixed[0].cm)-Number(ws.fixed[0].cm),60,'MSRP contribution rises by the charge');
+ assert.ok(Number(ship.npcr[0].list)<=Number(ws.npcr[0].list),'NPCR prices need less with the charge');assert.deepEqual(ship.wholesale,ws.wholesale,'wholesale ignores it');
+ assert.equal(worksheet({landed:10,lastMile:5,msrp:100,retailShip:50},SETTINGS as any).retailCost,0,'never below zero');
+ assert.equal(FIELD.get('retailShip')!.vis,'all');assert.equal(FIELD.get('retailShip')!.type,'price');
  const empty=worksheet({landed:1000,msrp:2000},EMPTY_WORKSHEET);assert.equal(empty.dtcRate,null);assert.equal(empty.fixed[0].cm,null);assert.deepEqual(empty.retail,[]);
 });
 
@@ -189,7 +195,7 @@ test('return SKUs saved with the old REFB- prefix become REF- when the service s
  await db.close?.();
 });
 
-test('delete a product: managers only; refused while stock, movements, orders or returns use the SKU; its own rows go with it',async()=>{
+test('delete a product: managers only; refused while stock or open orders use it; with history only a main admin, after confirming',async()=>{
  const {db,app,call}=await setup();
  try{
   const mk=async(sku:string)=>assert.equal((await call('m1','POST','/products/library',{sku,values:{family:'acc',nameZh:'示例配件',nameEn:'Sample part',series:'XRF',brand:'OneLaser'}})).statusCode,201);
@@ -198,10 +204,22 @@ test('delete a product: managers only; refused while stock, movements, orders or
   const ok=await call('m3','DELETE','/products/library/demo-del-1');assert.equal(ok.statusCode,200,ok.body);assert.equal(ok.json().sku,'DEMO-DEL-1');
   assert.equal((await call('m1','GET','/products/library')).json().items.some((i:any)=>i.sku==='DEMO-DEL-1'),false);
   assert.equal((await call('m1','DELETE','/products/library/DEMO-DEL-1')).statusCode,404,'gone');
-  // In use: a stock movement keeps its history, so the SKU stays (set it to 停售 instead).
+  // Stock on hand blocks it and says where (owner, 2026-11-14: history alone no longer does).
   const mv=await call('m1','POST','/wms/movements/batch',{type:'in',location:'us',opDate:'2026-11-01',reason:'示例入库',lines:[{sku:'DEMO-DEL-2',qty:2}]});assert.equal(mv.statusCode<300,true,mv.body);
-  const used=await app.inject({method:'DELETE',url:'/products/library/DEMO-DEL-2',headers:{authorization:'Bearer '+(await issueSession(db,'m1')).accessToken,'accept-language':'zh-CN'}});
-  assert.equal(used.statusCode,409);assert.equal(used.json().error.code,'PRODUCT_IN_USE');assert.match(used.json().error.message,/下架封存/);
+  const zh=async(who:string,method:'GET'|'DELETE',url:string)=>app.inject({method,url,headers:{authorization:'Bearer '+(await issueSession(db,who)).accessToken,'accept-language':'zh-CN'}});
+  const used=await zh('m1','DELETE','/products/library/DEMO-DEL-2');
+  assert.equal(used.statusCode,409);assert.equal(used.json().error.code,'PRODUCT_IN_USE');assert.match(used.json().error.message,/美国LA仓还有库存 2 件/);
+  assert.equal((await zh('m1','GET','/products/library/DEMO-DEL-2/usage')).json().canDelete,false);
+  const out=await call('m1','POST','/wms/movements/batch',{type:'out',location:'us',opDate:'2026-11-02',reason:'示例出库',reference:'DEMO-OUT-1',lines:[{sku:'DEMO-DEL-2',qty:2}]});assert.equal(out.statusCode<300,true,out.body);
+  // Only history left: a main admin may delete it after confirming; product managers may not.
+  const use=(await zh('m1','GET','/products/library/DEMO-DEL-2/usage')).json();
+  assert.deepEqual([use.canDelete,use.blockers.length,use.history.map((h:any)=>[h.zh,h.n])],[true,0,[['出入库记录',2]]]);
+  assert.equal((await zh('m3','GET','/products/library/DEMO-DEL-2/usage')).json().needsAdmin,true);
+  assert.equal((await zh('m3','DELETE','/products/library/DEMO-DEL-2')).json().error.code,'PRODUCT_HISTORY_ADMIN_ONLY');
+  assert.equal((await zh('m1','DELETE','/products/library/DEMO-DEL-2')).json().error.code,'PRODUCT_HAS_HISTORY','asks for confirmation');
+  const gone=await zh('m1','DELETE','/products/library/DEMO-DEL-2?withHistory=1');assert.equal(gone.statusCode,200,gone.body);
+  assert.equal((await db.query(`SELECT count(*)::int n FROM wms_movements WHERE sku='DEMO-DEL-2'`)).rows[0].n,2,'movement history stays');
+  assert.equal((await db.query(`SELECT count(*)::int n FROM product_catalog WHERE sku='DEMO-DEL-2'`)).rows[0].n,0);
   const audit=(await db.query(`SELECT count(*)::int n FROM audit_events WHERE action='products.deleted' AND object_id='DEMO-DEL-1'`)).rows[0].n;assert.equal(audit,1);
  }finally{await app.close();}
 });
