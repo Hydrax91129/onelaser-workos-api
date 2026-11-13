@@ -201,8 +201,22 @@ test('delete a product: managers only; refused while stock, movements, orders or
   // In use: a stock movement keeps its history, so the SKU stays (set it to 停售 instead).
   const mv=await call('m1','POST','/wms/movements/batch',{type:'in',location:'us',opDate:'2026-11-01',reason:'示例入库',lines:[{sku:'DEMO-DEL-2',qty:2}]});assert.equal(mv.statusCode<300,true,mv.body);
   const used=await app.inject({method:'DELETE',url:'/products/library/DEMO-DEL-2',headers:{authorization:'Bearer '+(await issueSession(db,'m1')).accessToken,'accept-language':'zh-CN'}});
-  assert.equal(used.statusCode,409);assert.equal(used.json().error.code,'PRODUCT_IN_USE');assert.match(used.json().error.message,/停售/);
+  assert.equal(used.statusCode,409);assert.equal(used.json().error.code,'PRODUCT_IN_USE');assert.match(used.json().error.message,/下架封存/);
   const audit=(await db.query(`SELECT count(*)::int n FROM audit_events WHERE action='products.deleted' AND object_id='DEMO-DEL-1'`)).rows[0].n;assert.equal(audit,1);
  }finally{await app.close();}
 });
 
+
+test('five lifecycle statuses: 开发中 / 上新中 / 在售 / 停产清存 / 下架封存; old names still import and old rows move over',async()=>{
+ const p=(v:unknown)=>parseValue(FIELD.get('status')!,v);
+ assert.deepEqual((FIELD.get('status')!.opts as any[]).map(o=>o[1]),['开发中','上新中','在售','停产清存','下架封存']);
+ assert.deepEqual(p('停产清存'),{ok:true,value:'clearance'});assert.deepEqual(p('下架封存'),{ok:true,value:'eol'});
+ assert.deepEqual(p('清库存'),{ok:true,value:'clearance'});assert.deepEqual(p('计划停售'),{ok:true,value:'clearance'});assert.deepEqual(p('停售'),{ok:true,value:'eol'});
+ assert.equal(p('卖光了').ok,false);
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ const org=(await db.query("SELECT org_id FROM users WHERE id='m1'")).rows[0].org_id;
+ await db.query(`INSERT INTO product_catalog(org_id,sku,name_zh,status) VALUES($1,'DEMO-OLD-EOL','示例旧状态','eolPlanned')`,[org]);
+ const app=await buildApp({db,integrations:{executiveUserIds:['m1']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
+ try{assert.equal((await db.query(`SELECT status FROM product_catalog WHERE sku='DEMO-OLD-EOL'`)).rows[0].status,'clearance','计划停售 became 停产清存 at start');}
+ finally{await app.close();}
+});

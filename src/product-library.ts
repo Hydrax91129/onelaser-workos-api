@@ -236,7 +236,7 @@ export async function registerProductLibraryRoutes(app: FastifyInstance, db: Dat
   const statusRule = (v: Viewer, from: string, to: string, note?: string) => {
     if (from === to) return;
     if (!v.admin && !(STATUS_NEXT[from || ''] || []).includes(to)) deny(409, 'STATUS_TRANSITION', `A product cannot move from ${from || 'unlabeled'} to ${to}`, `产品状态不能从 ${from || '未标注'} 直接改为 ${to}`);
-    if (['clearance', 'eolPlanned', 'eol'].includes(to) && !note) deny(400, 'STATUS_NOTE_REQUIRED', 'Give a reason for moving the product into clearance or out of sale');
+    if (['clearance', 'eol'].includes(to) && !note) deny(400, 'STATUS_NOTE_REQUIRED', 'Give a reason for moving the product into clearance or out of sale');
   };
 
   app.post('/products/library', async (req, reply) => {
@@ -307,7 +307,7 @@ export async function registerProductLibraryRoutes(app: FastifyInstance, db: Dat
   const fileBody = z.object({ name: z.string().trim().min(1).max(200), mime: z.string().trim().max(120).optional(), dataBase64: z.string().min(4).max(Math.ceil(MAX_FILE * 4 / 3) + 8) }).strict();
   /* Delete a product (owner, 2026-11-13): product managers and main admins. Only a SKU nothing else points at can go:
      stock, stock movements, dealer orders, purchase orders, shipments, returns and quality issues keep their history,
-     so a SKU they use is refused with where it is used (set it to 停售 instead). The product's own rows go with it:
+     so a SKU they use is refused with where it is used (set it to 下架封存 instead). The product's own rows go with it:
      pricing, channel prices, files and empty stock / bin rows; its change history stays for the audit trail. */
   app.delete<{ Params: { sku: string } }>('/products/library/:sku', async req => {
     const u = actorOf(req), v = viewer(u);
@@ -328,8 +328,8 @@ export async function registerProductLibraryRoutes(app: FastifyInstance, db: Dat
         ['质量问题', 'quality issues', await count(`SELECT count(*)::int n FROM quality_issues WHERE org_id=$1 AND lower(sku)=$2`)],
       ];
       const hits = used.filter(x => x[2] > 0);
-      if (hits.length) deny(409, 'PRODUCT_IN_USE', `This SKU is used in ${hits.map(x => `${x[1]} (${x[2]})`).join(', ')}; set its status to Discontinued instead`,
-        `这个 SKU 已经用在${hits.map(x => `${x[0]}（${x[2]}）`).join('、')}里，删除会弄乱这些记录。请把状态改为“停售”。`);
+      if (hits.length) deny(409, 'PRODUCT_IN_USE', `This SKU is used in ${hits.map(x => `${x[1]} (${x[2]})`).join(', ')}; set its status to Delisted instead`,
+        `这个 SKU 已经用在${hits.map(x => `${x[0]}（${x[2]}）`).join('、')}里，删除会弄乱这些记录。请把状态改为“下架封存”。`);
       for (const t of ['product_pricing', 'product_channel_prices', 'product_files', 'wms_stock', 'wms_bins', 'wms_items'])
         await tx.query(`DELETE FROM ${t} WHERE org_id=$1 AND lower(sku)=$2`, [org, k]);
       await tx.query('DELETE FROM product_catalog WHERE org_id=$1 AND lower(sku)=$2', [org, k]);

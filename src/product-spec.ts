@@ -21,7 +21,9 @@ export const FAMILIES = [['main', '主机', 'Machine'], ['acc', '配件/备件',
 export type Family = typeof FAMILIES[number][0];
 export const FAMILY_KEYS = FAMILIES.map(f => f[0]) as Family[];
 export const STATUSES = [['dev', '开发中', 'In development'], ['launch', '上新中', 'Launching'], ['live', '在售', 'Selling'],
-  ['clearance', '清库存', 'Clearance'], ['eolPlanned', '计划停售', 'Phasing out'], ['eol', '停售', 'Discontinued']] as const;
+  ['clearance', '停产清存', 'Discontinued, selling off'], ['eol', '下架封存', 'Delisted, archived']] as const;
+/** Five statuses since 2026-11-13 (owner). Older names still import: 清库存 / 计划停售 → 停产清存, 停售 → 下架封存. */
+const STATUS_ALIASES: Record<string, string> = { '清库存': 'clearance', '计划停售': 'clearance', 'eolplanned': 'clearance', 'phasing out': 'clearance', 'clearance': 'clearance', '停售': 'eol', 'discontinued': 'eol' };
 export const GOODS = [['bulk', '大货', 'New'], ['refb', '退货', 'Returned / refurbished']] as const;
 export const FREIGHT = [['dealer', '经销商付运费', 'Dealer pays freight'], ['us', '我们付运费', 'We pay freight']] as const;
 export type Vis = 'all' | 'ops' | 'cost' | 'admin' | 'sens';
@@ -225,7 +227,7 @@ export function parseValue(f: Field, raw: unknown): Parsed {
       if (f.key === 'refbSku' && !/^REF-./.test(s)) return bad('退货 SKU 必须以 REF- 开头', 'A returned-goods SKU must start with REF-');
       return { ok: true, value: s };
     case 'enum': {
-      const k = enumKey(f, s);
+      const k = enumKey(f, s) || (f.key === 'status' ? STATUS_ALIASES[s.trim().toLowerCase()] || null : null);
       return k ? { ok: true, value: k } : bad(`只能填：${optsOf(f).map((o: any) => o[1]).join(' / ')}`, `Use one of: ${optsOf(f).map((o: any) => o[2]).join(' / ')}`);
     }
     case 'date': {

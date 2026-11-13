@@ -22,7 +22,7 @@ test('reorder: DS × (lead + target + safety) against US + in transit; factory s
 
 test('reorder: clearance and discontinued SKUs are sold down, never made again', () => {
   const r = reorderOf({ ds: 2, us: 50, transit: 30, factory: 40, leadDays: 60, targetDays: 30, safetyDays: 14 });
-  for (const life of ['clearance', 'eolPlanned', 'eol']) {
+  for (const life of ['clearance', 'eol']) {
     const x = stoppingAdjust(life, r);
     assert.deepEqual([x.make, x.ship, x.status, x.shortDays, x.stopping], [0, 40, 'ok', 0, true], life);
   }

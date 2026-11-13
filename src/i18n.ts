@@ -232,7 +232,7 @@ const zh:Record<string,string>={
   'This product was not found':'找不到这个产品，可能已经被删除。',
   'A product with this SKU already exists':'已经有这个 SKU 的产品了。',
   'Only product managers or administrators can change the product status':'只有产品经理或管理员可以修改产品状态。',
-  'Give a reason for moving the product into clearance or out of sale':'转为清库存、计划停售或停售时，请填写原因。',
+  'Give a reason for moving the product into clearance or out of sale':'转为停产清存或下架封存时，请填写原因。',
   'This price change does not exist':'这条调价记录不存在。',
   'This price change has already been decided':'这条调价已经处理过了。',
   'Only company administrators can approve price changes':'只有公司管理员可以审批调价。',

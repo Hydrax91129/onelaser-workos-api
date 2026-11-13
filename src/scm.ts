@@ -119,9 +119,9 @@ export function reorderOf(o: { ds: number; us: number; transit: number; factory:
   return { need, gap, ship, make, cover, coverFinished, coverAll, finished, pipeline, monthly: Math.ceil(o.ds * 30), status, shortDays, horizon };
 }
 
-/** SKUs on their way out (PIM 生命周期: 清库存 / 计划停售 / 停售) are sold down, not made again (owner, 2026-11-12):
+/** SKUs on their way out (PIM 生命周期: 停产清存 / 下架封存) are sold down, not made again (owner, 2026-11-12):
  *  no production suggestion, and running out is the goal, so no stockout risk. Shipping factory stock still shows. */
-export const STOPPING = ['clearance', 'eolPlanned', 'eol'];
+export const STOPPING = ['clearance', 'eol'];
 export function stoppingAdjust<T extends { make: number; status: string; shortDays: number }>(lifecycle: string, r: T): T & { stopping: boolean } {
   if (!STOPPING.includes(lifecycle)) return { ...r, stopping: false };
   return { ...r, make: 0, status: r.status === 'risk' ? 'ok' : r.status, shortDays: 0, stopping: true };

@@ -70,14 +70,15 @@ export const pricingRulesSchema = z.object({
   wholesale: z.object({ base: pctN, large: pctN, over50k: pctN, over100k: pctN }).strict(),
 }).strict();
 
-export const PRODUCT_STATUSES = ['dev', 'launch', 'live', 'clearance', 'eolPlanned', 'eol'] as const;
+/** 开发中 / 上新中 / 在售 / 停产清存 / 下架封存 (owner, 2026-11-13; 计划停售 joined 停产清存). */
+export const PRODUCT_STATUSES = ['dev', 'launch', 'live', 'clearance', 'eol'] as const;
 /* Lifecycle: which status may follow which. An unlabeled product (imported without a status) may take any.
  * Company admins may move a product anywhere; moving into clearance or out of sale always needs a reason. */
 export const STATUS_NEXT: Record<string, readonly string[]> = {
-  '': PRODUCT_STATUSES, dev: ['launch', 'eol'], launch: ['live', 'dev', 'eol'], live: ['clearance', 'eolPlanned'],
-  clearance: ['live', 'eolPlanned', 'eol'], eolPlanned: ['live', 'clearance', 'eol'], eol: [],
+  '': PRODUCT_STATUSES, dev: ['launch', 'eol'], launch: ['live', 'dev', 'eol'], live: ['clearance', 'eol'],
+  clearance: ['live', 'eol'], eol: [],
 };
-const STATUS_NEEDS_NOTE = new Set(['clearance', 'eolPlanned', 'eol']);
+const STATUS_NEEDS_NOTE = new Set(['clearance', 'eol']);
 
 /* Price changes. Every change to MSRP, the actual selling price or a channel price is kept with who, when, why and
  * the contribution margin it leaves. A price whose margin falls below the rules' floor (or below cost, or a dealer
@@ -129,6 +130,8 @@ const text = (max: number) => z.string().trim().max(max).optional();
 const num_ = (v: any) => v == null ? null : Number(v);
 
 export async function registerProductRoutes(app: FastifyInstance, db: Database, o: { isAdmin: (u: User) => boolean }) {
+  // 计划停售 joined 停产清存 (owner, 2026-11-13). Harmless to repeat: nothing writes eolPlanned any more.
+  await db.query("UPDATE product_catalog SET status='clearance' WHERE status='eolPlanned'");
   const actorOf = (req: FastifyRequest): User => req.actor || deny(401, 'UNAUTHENTICATED', 'Authentication is required');
   const grants = (u: User): string[] => Array.isArray((u as any).grants) ? (u as any).grants : [];
   const canView = (u: User) => o.isAdmin(u) || grants(u).includes('products');
