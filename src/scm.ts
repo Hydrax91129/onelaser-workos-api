@@ -65,6 +65,8 @@ const sku = z.string().trim().min(1).max(80);
 const ymd = (d: unknown) => d ? (d instanceof Date ? d.toISOString() : String(d)).slice(0, 10) : null;
 const addDays = (date: string, n: number) => { const d = new Date(date + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
 const r1 = (n: number) => Math.round(n * 10) / 10;
+/** Daily sales (DS) and the forecast keep two decimals (owner, 2026-11-13): 0.04 a day must not show as 0. */
+const r2 = (n: number) => Math.round(n * 100) / 100;
 /** "25 天" + "海运 35 天" → 60. The numbers in the two product-library texts, added up; null when there are none. */
 export const leadDaysOf = (production: unknown, firstLeg: unknown) => {
   const num = (s: unknown) => { const m = String(s ?? '').match(/\d+(?:\.\d+)?/); return m ? Number(m[0]) : null; };
@@ -178,7 +180,7 @@ export async function registerScmRoutes(app: FastifyInstance, db: Database, o: {
       const leadDays = factory > 0 ? days.fromStock : days.full;
       return { sku: c.sku, nameZh: c.name_zh || '', nameEn: c.name_en || '', family: c.family || '', lifecycle: c.status || '', series: c.series, brand: c.brand,
         ...(canSupplier ? { suppliers: suppliersOf(c.pattrs) } : {}), sold365: sl.d365, sold90: sl.d90, sold30: sl.d30,
-        ds365: r1(ds365), ds90: r1(ds90), ds30: r1(ds30), forecast: r1(fc.ds), season: fc.season, signal: fc.signal, trendPct: fc.trendPct, us, transit, dg: st.dg || 0, jn: st.jn || 0, factory, moq: c.moq || '', productionDays: production, firstLegDays: firstLeg,
+        ds365: r2(ds365), ds90: r2(ds90), ds30: r2(ds30), forecast: r2(fc.ds), season: fc.season, signal: fc.signal, trendPct: fc.trendPct, us, transit, dg: st.dg || 0, jn: st.jn || 0, factory, moq: c.moq || '', productionDays: production, firstLegDays: firstLeg,
         productionFromLibrary: prodLib != null, firstLegFromLibrary: legLib != null, supplyDays: days.full, stockDays: days.fromStock, leadDays,
         arriveOn: addDays(t, leadDays), leadFromLibrary: prodLib != null && legLib != null,
         wip: wipOf.get(k) || 0,

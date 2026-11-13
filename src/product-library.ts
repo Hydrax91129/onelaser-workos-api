@@ -11,7 +11,8 @@ import { z } from 'zod';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
-import { deny } from './errors.js';
+import { deny, ApiError } from './errors.js';
+import { message } from './i18n.js';
 import { STATUS_NEXT, type PriceTarget } from './products.js';
 import {
   FIELD, SLOT, FILE_TYPES, IMAGE_TYPES, MAX_FILE, CORE_REQUIRED, allFields, fieldOf, canSee, canWrite, completeness, parseValue, specFor, viewerOf, relationIssues,
@@ -281,6 +282,44 @@ export async function registerProductLibraryRoutes(app: FastifyInstance, db: Dat
       if (w.changes.length) await o.audit(tx, u, 'products.edited', rec.sku, { fields: w.changes.map(c => c.key) });
       const fresh = (await loadRecords(tx, u.org_id, [rec.sku])).get(rec.sku)!;
       return { sku: rec.sku, changed: w.changes.map(c => c.key), prices: w.prices, item: recordFor(v, fresh, ws, new Set()) };
+    });
+  });
+
+  /* Bulk edit (owner, 2026-11-13): tick several SKUs in the list, pick one field, give it one value. Same rules as editing
+     each SKU by hand (field permissions, status steps and reason, return-SKU rules), in one transaction: if any SKU is
+     refused nothing changes and the message names that SKU. Fields that must differ per SKU cannot be bulk-set. */
+  const NOT_BULK = new Set(['sku', 'refbSku', 'upc', 'nameZh', 'nameEn', 'mainImage']);
+  const bulkBody = z.object({ skus: z.array(z.string().trim().min(1).max(80)).min(1).max(500), values: z.record(z.string(), z.any()), note: z.string().trim().max(300).optional() }).strict();
+  app.post('/products/library/bulk-edit', async req => {
+    const u = actorOf(req), v = viewer(u);
+    const b = bulkBody.parse(req.body), keys = Object.keys(b.values);
+    if (!keys.length) deny(400, 'BULK_EDIT_EMPTY', 'Choose a field to change');
+    if (keys.some(k => NOT_BULK.has(k))) deny(400, 'BULK_EDIT_FIELD', 'This field is different for every product and cannot be bulk-edited');
+    const ws = (await worksheetOf(db, u.org_id)).settings;
+    const { values, errors } = validateValues(v, b.values, ws);
+    if (errors.length) fail(errors, req.language);
+    const skus = [...new Map(b.skus.map(s => [s.toLowerCase(), s])).values()];
+    return db.transaction(async tx => {
+      const recs = await loadRecords(tx, u.org_id, skus, true), rel = await relationIndex(tx, u.org_id);
+      let changed = 0;
+      for (const s of skus) {
+        try {
+          const rec = findRec(recs, s) || deny(404, 'PRODUCT_NOT_FOUND', 'This SKU is not in the product catalog');
+          const vals = { ...values };
+          if (vals.goodsType && vals.goodsType !== 'refb' && rec.values.refbSku) vals.refbSku = null;
+          const issues = recordIssues({ ...rec.values, ...vals }).filter(i => i.zh.startsWith('只有'));
+          if (issues.length) fail(issues, req.language);
+          const ri = relationIssues(rec.sku, { ...rec.values, ...vals }, Object.keys(vals), rel);
+          if (ri.length) fail(ri);
+          if (vals.status !== undefined) statusRule(v, rec.values.status || '', vals.status, b.note);
+          const w = await writeRecord(tx, u, rec.sku, rec, vals, { source: 'edit', note: b.note, ws, prices: 'request', requestPrice: o.requestPrice });
+          if (w.changes.length) { changed++; await o.audit(tx, u, 'products.bulk_edited', rec.sku, { fields: w.changes.map(c => c.key) }); }
+        } catch (e) {
+          if (e instanceof ApiError) throw new ApiError(e.status, e.code, `${s}: ${e.message}`, `${s}：${e.zh || message(e.message, 'zh')}`);
+          throw e;
+        }
+      }
+      return { ok: true, skus: skus.length, changed };
     });
   });
 

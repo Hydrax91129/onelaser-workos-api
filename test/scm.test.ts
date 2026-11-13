@@ -71,11 +71,11 @@ test('SCM: Shopify sales sync (365 days, per SKU and day), board with DS and sug
     await call('m1', 'POST', '/wms/import', { asOf: '2026-11-01', rows: [{ sku: 'S-1', qty: { us: 10, dg: 50 } }, { sku: 'S-2', qty: { us: 40 } }] });
     let b = (await call('m1', 'GET', '/scm/board')).json();
     const s1 = b.items.find((x: any) => x.sku === 'S-1');
-    assert.equal(s1.moq, '10 台'); assert.equal(s1.sold365, 363); assert.equal(s1.ds365, 1.8, '363 units over the 200 days of history'); assert.equal(s1.sold30, 2); assert.equal(s1.supplyDays, 57, 'order 2 + production 20 + first leg 30 + receiving 5 + buffer 0');
+    assert.equal(s1.moq, '10 台'); assert.equal(s1.sold365, 363); assert.equal(s1.ds365, 1.82, '363 units over the 200 days of history, two decimals'); assert.equal(s1.sold30, 2); assert.equal(s1.supplyDays, 57, 'order 2 + production 20 + first leg 30 + receiving 5 + buffer 0');
     assert.equal(s1.leadDays, 37, 'finished goods at the factory skip production: 2 + 30 + 5');assert.equal(s1.arriveOn, '2026-12-19');
     assert.deepEqual([s1.productionDays, s1.firstLegDays, s1.productionFromLibrary], [20, 30, true]);
     const s2 = b.items.find((x: any) => x.sku === 'S-2'); assert.equal(s2.supplyDays, 2 + 30 + 35 + 5, 'missing production / first leg come from the settings');assert.equal(s2.productionFromLibrary, false);
-    assert.equal(s1.ds90, 0, '2 units over 90 days rounds to 0.0 a day'); assert.equal(s1.sold90, 2, 'the whole units behind it'); assert.equal(s1.signal, 'steady', '2 units in 30 days is too few to call a burst'); assert.equal(s1.trendPct, null); assert.equal(s1.forecast, 0.6, 'mostly the yearly rate');
+    assert.equal(s1.ds90, 0.02, '2 units over 90 days is 0.02 a day (two decimals)'); assert.equal(s1.sold90, 2, 'the whole units behind it'); assert.equal(s1.signal, 'steady', '2 units in 30 days is too few to call a burst'); assert.equal(s1.trendPct, null); assert.equal(s1.forecast, 0.58, 'mostly the yearly rate');
     assert.equal(s1.status, 'risk'); assert.deepEqual([s1.ship, s1.make], [37, 0], 'factory stock covers the gap, no production needed');
     assert.equal(b.shopify.orders, 2);
     assert.equal(b.sales.weekly.reduce((n: number, w: any) => n + w.units, 0), 368, 'weekly sales add up'); assert.equal(b.sales.last30, 7);

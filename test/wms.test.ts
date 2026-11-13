@@ -64,6 +64,16 @@ test('WMS: import, goods in/out/transfer, count adjustments confirmed by another
   assert.equal((await call('m6','POST',`/wms/movements/${adj.json().id}/approve`,{})).statusCode,200);
   assert.equal(await qty('DEMO-A','us'),4);
   assert.equal((await call('m1','POST',`/wms/movements/${adj.json().id}/reject`,{})).statusCode,409,'already decided');
+  // Several adjustments confirmed in one go (owner, 2026-11-13): all or nothing.
+  const a1=(await call('m5','POST','/wms/movements',{type:'adjust',sku:'DEMO-A',location:'us',counted:5,reason:'盘点差异'})).json().id;
+  const a2=(await call('m5','POST','/wms/movements',{type:'adjust',sku:'DEMO-A',location:'dg',counted:7,reason:'盘点差异'})).json().id;
+  const own=await call('m5','POST','/wms/movements/batch-decide',{ids:[a1,a2],decision:'approve'});assert.equal(own.statusCode,403,'cannot confirm your own, even in a batch');
+  assert.equal(await qty('DEMO-A','us'),4,'a refused batch changes nothing');
+  assert.equal((await call('m6','POST','/wms/movements/batch-decide',{ids:[a1,adj.json().id],decision:'approve'})).statusCode,409,'one already decided: the whole batch is refused');
+  assert.equal(await qty('DEMO-A','us'),4,'and nothing in it was applied');
+  const both=await call('m6','POST','/wms/movements/batch-decide',{ids:[a1,a2],decision:'approve'});assert.equal(both.statusCode,200,both.body);assert.equal(both.json().decided,2);
+  assert.equal(await qty('DEMO-A','us'),5);assert.equal(await qty('DEMO-A','dg'),7);
+  assert.equal((await call('m6','POST','/wms/movements/batch-decide',{ids:[],decision:'approve'})).statusCode,400);
 
   // New SKU by a warehouse manager.
   assert.equal((await call('m5','POST','/wms/items',{sku:'DEMO-C',name:'Demo C',type:'配件'})).statusCode,201);
