@@ -25,6 +25,9 @@ export const STATUSES = [['dev', '开发中', 'In development'], ['launch', '上
 /** Five statuses since 2026-11-13 (owner). Older names still import: 清库存 / 计划停售 → 停产清存, 停售 → 下架封存. */
 const STATUS_ALIASES: Record<string, string> = { '清库存': 'clearance', '计划停售': 'clearance', 'eolplanned': 'clearance', 'phasing out': 'clearance', 'clearance': 'clearance', '停售': 'eol', 'discontinued': 'eol' };
 export const GOODS = [['bulk', '大货', 'New'], ['refb', '退货', 'Returned / refurbished']] as const;
+/** 供货方式 (owner, 2026-11-13): dropship SKUs ship from the supplier and are not stocked; blank = inventory purchase. */
+export const SUPPLY = [['inventory', '备货采购', 'Inventory purchase'], ['dropship', '代发', 'Dropship']] as const;
+export const isDropship = (v: unknown) => String(v ?? '').trim().toLowerCase() === 'dropship';
 export const FREIGHT = [['dealer', '经销商付运费', 'Dealer pays freight'], ['us', '我们付运费', 'We pay freight']] as const;
 export type Vis = 'all' | 'ops' | 'cost' | 'admin' | 'sens';
 export const VIS_NAMES: Record<Vis, [string, string]> = {
@@ -55,6 +58,7 @@ export const GROUPS: Group[] = [
  *  freight. The return SKU is required for returned goods only (completeness). Everything else is optional.
  *  A field stays 不适用 (n) for families it does not apply to. */
 // 产品线 / 系列 is optional (owner, 2026-11-13): accessories that fit several machine lines leave it blank.
+// 供货方式 is optional too: blank means inventory purchase.
 export const REQUIRED = new Set(['sku', 'goodsType', 'family', 'nameZh', 'nameEn', 'brand', 'landed', 'lastMile']);
 /** Core fields cannot be cleared once set. */
 export const CORE_REQUIRED = new Set(['sku', 'goodsType', 'family', 'nameZh', 'nameEn']);
@@ -67,6 +71,7 @@ const attr: Store = { t: 'attr' }, sattr: Store = { t: 'sattr' };
 export const FIELDS: Field[] = [
   F('1', 'sku', 'SKU', 'SKU', 'ODL-XRF-38-US01', 'rrrrr', 'all', 'sku', { t: 'col', col: 'sku' }),
   F('1', 'goodsType', '大货 / 退货', 'New / returned', '', 'rrrrr', 'all', 'enum', { t: 'col', col: 'goods_type' }, { opts: GOODS }),
+  F('1', 'supplyMode', '供货方式', 'Supply mode', '留空 = 备货采购', 'ooooo', 'all', 'enum', attr, { opts: SUPPLY }),
   F('1', 'refbSku', '退货 SKU', 'Returned-goods SKU', 'REF-…', 'ooooo', 'all', 'sku', { t: 'col', col: 'refb_sku' }),
   F('1', 'family', '产品族', 'Product family', '', 'rrrrr', 'all', 'enum', { t: 'col', col: 'family' }, { opts: FAMILIES }),
   F('1', 'series', '产品线 / 系列', 'Product line / series', 'XRF', 'rrron', 'all', 'list', attr, { opts: ['XRF', 'Hydra', 'Cobra', 'VertiGo', 'Galvo Flex'] }),
@@ -90,6 +95,9 @@ export const FIELDS: Field[] = [
   /** Per-SKU selling-cost rates (owner, 2026-11-12): blank = the company rate from 价格参数. Only the pricing page shows them. */
   F('4', 'dtcRate', '零售销售费率', 'Retail selling-cost rate', '留空 = 价格参数的默认费率', 'ooooo', 'sens', 'number', sattr, { unit: '%' }),
   F('4', 'msrp', '零售价 MSRP', 'Retail price (MSRP)', '定稿零售价', 'rrrrn', 'all', 'price', { t: 'col', col: 'msrp' }),
+  /** 零售运费收费 (owner, 2026-11-13): what a retail customer pays for shipping on this product; it offsets last-mile freight in
+   *  every retail margin (MSRP, MAP, promotion floor, NPCR ladder). Blank = free shipping. Wholesale and marketplaces ignore it. */
+  F('4', 'retailShip', '零售运费收费', 'Retail shipping charge', '向零售客户收的运费，包邮留空', 'ooooo', 'all', 'price', attr),
   F('4', 'map', '最低公开售价 MAP', 'Minimum advertised price (MAP)', '默认同 MSRP', 'roorn', 'all', 'price', { t: 'chan', channel: 'map' }),
   F('4', 'promoFloor', '官网促销底价', 'Website promotion floor', '仅限固定促销节点', 'roorn', 'all', 'price', { t: 'chan', channel: 'promo_floor' }),
   F('5', 'whRate', '批发销售费率', 'Wholesale selling-cost rate', '留空 = 价格参数的默认费率', 'ooooo', 'sens', 'number', sattr, { unit: '%' }),

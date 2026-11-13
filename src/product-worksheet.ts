@@ -2,6 +2,7 @@
  *
  * Formulas, exactly as the owner's spec writes them:
  *   delivered cost        = landed cost + last-mile freight
+ *   retail cost           = delivered cost − retail shipping charge (what the customer pays for shipping; blank = free)
  *   selling-cost rate     = sum of the line items (DTC or wholesale), unless a manual rate overrides it
  *   suggested price       = cost ÷ (1 − selling-cost rate − target contribution margin)
  *   list price            = the nearest x99 (round to the nearest hundred, minus 1; never below 99)
@@ -48,25 +49,27 @@ const cmAt = (p: number | null, cost: number | null, rate: number | null) => p =
 const priceFor = (cost: number | null, rate: number | null, cm: number) => { if (cost == null || rate == null) return null; const d = 1 - rate - cm; return d <= 0 ? null : cost / d; };
 const ratio = (a: number | null, b: number | null) => a == null || b == null || !b ? null : a / b;
 const n = (v: any) => v == null || v === '' || !isFinite(Number(v)) ? null : Number(v);
-export type PriceInputs = { landed?: any; lastMile?: any; msrp?: any; map?: any; promoFloor?: any; whFreight?: any; [whOv: string]: any };
+export type PriceInputs = { landed?: any; lastMile?: any; retailShip?: any; msrp?: any; map?: any; promoFloor?: any; whFreight?: any; [whOv: string]: any };
 /** 'bad' below zero, 'low' below the floor, 'good' otherwise; null when unknown. */
 export const tone = (cmp: number | null, floorPct: number | null) => cmp == null ? null : cmp < 0 ? 'bad' : floorPct != null && cmp < floorPct / 100 ? 'low' : 'good';
 
 export function worksheet(p: PriceInputs, w: Worksheet) {
   const landed = n(p.landed), lastMile = n(p.lastMile) ?? 0, delivered = landed == null ? null : landed + lastMile;
+  // Retail margins use the cost after what the customer pays for shipping (never below zero).
+  const retailShip = n(p.retailShip) ?? 0, retailCost = delivered == null ? null : Math.max(0, delivered - retailShip);
   const dr = skuRate(p.dtcRate, dtcRate(w)), wr = skuRate(p.whRate, whRate(w)), msrp = n(p.msrp);
   const retail = w.retailTiers.map(t => {
-    const theory = priceFor(delivered, dr, t.cm / 100), list = r99(theory), cm = cmAt(list, delivered, dr);
+    const theory = priceFor(retailCost, dr, t.cm / 100), list = r99(theory), cm = cmAt(list, retailCost, dr);
     return { name: t.name, cmTarget: t.cm, use: t.use, theory, list, offMsrp: msrp && list ? 1 - list / msrp : null, cm, cmPct: ratio(cm, list) };
   });
   const fixed = (['msrp', 'map', 'promoFloor'] as const).map(k => {
-    const price = k === 'map' ? n(p.map) ?? msrp : n(p[k]), cm = cmAt(price, delivered, dr), cmPct = ratio(cm, price);
+    const price = k === 'map' ? n(p.map) ?? msrp : n(p[k]), cm = cmAt(price, retailCost, dr), cmPct = ratio(cm, price);
     return { key: k, price, cm, cmPct, belowFloor: cmPct != null && w.dtcFloor != null && cmPct < w.dtcFloor / 100 };
   });
   const npcr = w.npcr.map(c => {
-    const theory = priceFor(delivered, dr, c / 100), list = r99(theory);
-    return { cm: c, theory, list, sellingCost: list != null && dr != null ? list * dr : null, gross: list != null && delivered != null ? list - delivered : null,
-      contribution: cmAt(list, delivered, dr), whDealerFreight: priceFor(landed, wr, c / 100), whOurFreight: priceFor(delivered, wr, c / 100),
+    const theory = priceFor(retailCost, dr, c / 100), list = r99(theory);
+    return { cm: c, theory, list, sellingCost: list != null && dr != null ? list * dr : null, gross: list != null && retailCost != null ? list - retailCost : null,
+      contribution: cmAt(list, retailCost, dr), whDealerFreight: priceFor(landed, wr, c / 100), whOurFreight: priceFor(delivered, wr, c / 100),
       marketplace: dr == null || w.mktExtra == null ? null : priceFor(delivered, dr + w.mktExtra / 100, c / 100) };
   });
   const freight = p.whFreight === 'us' ? 'us' : 'dealer';
@@ -79,7 +82,7 @@ export function worksheet(p: PriceInputs, w: Worksheet) {
       cmDealerFreight: cmDealer, cmDealerFreightPct: ratio(cmDealer, price), cmOurFreight: cmUs, cmOurFreightPct: ratio(cmUs, price),
       cm: main, cmPct: ratio(main, price), belowFloor: !t.floor && ratio(main, price) != null && w.whFloor != null && ratio(main, price)! < w.whFloor / 100 };
   });
-  return { landed, lastMile, delivered, dtcRate: dr, whRate: wr, freight, retail, fixed, npcr, wholesale };
+  return { landed, lastMile, delivered, retailShip, retailCost, dtcRate: dr, whRate: wr, freight, retail, fixed, npcr, wholesale };
 }
 
 /** What a viewer without cost access may see: the selling prices everyone sees. */

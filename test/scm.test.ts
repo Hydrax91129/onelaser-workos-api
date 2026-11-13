@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createDatabase, schema, seedDemo } from '../src/db.js';
 import { buildApp } from '../src/app.js';
 import { issueSession } from '../src/auth.js';
-import { reorderOf, leadDaysOf, forecastOf, stoppingAdjust } from '../src/scm.js';
+import { reorderOf, leadDaysOf, forecastOf, stoppingAdjust, dropshipAdjust } from '../src/scm.js';
 
 // Fictional SKUs, orders and shipments only.
 const NOW = Date.parse('2026-11-12T18:00:00Z');
@@ -18,6 +18,14 @@ test('reorder: DS × (lead + target + safety) against US + in transit; factory s
   assert.equal(reorderOf({ ds: 1, us: 50, transit: 0, factory: 0, leadDays: 30, targetDays: 30, safetyDays: 14 }).status, 'ok');
   assert.equal(reorderOf({ ds: 2, us: 50, transit: 0, factory: 0, leadDays: 37, targetDays: 30, safetyDays: 14 }).shortDays, 12, 'runs out 12 days before a reorder arrives');
 
+});
+
+test('reorder: dropship SKUs are not stocked, so nothing to ship or make and no stockout risk', () => {
+  const r = reorderOf({ ds: 2, us: 0, transit: 0, factory: 0, leadDays: 60, targetDays: 30, safetyDays: 14 });
+  assert.equal(r.status, 'risk');
+  const x = dropshipAdjust('dropship', r);
+  assert.deepEqual([x.ship, x.make, x.status, x.shortDays, x.dropship], [0, 0, 'ok', 0, true]);
+  for (const m of ['', 'inventory']) assert.deepEqual([dropshipAdjust(m, r).make, dropshipAdjust(m, r).status, dropshipAdjust(m, r).dropship], [r.make, 'risk', false], m || 'blank');
 });
 
 test('reorder: clearance and discontinued SKUs are sold down, never made again', () => {
@@ -117,6 +125,14 @@ test('SCM: Shopify sales sync (365 days, per SKU and day), board with DS and sug
     const after = (await call('m2', 'GET', '/scm/board')).json(); assert.equal(after.settings.targetDays, 45);
     assert.equal(after.items.find((x: any) => x.sku === 'S-1').supplyDays, 3 + 20 + 30 + 6 + 7, 'the buffer (logistics changes) counts in');
     assert.equal((await call('m2', 'PUT', '/scm/settings', { targetDays: 1, safetyDays: 1, orderDays: 1, receiveDays: 1, bufferDays: 1, productionDays: 1, firstLegDays: 1 })).statusCode, 403);
+    // Dropship (PIM 供货方式 = 代发): no stock kept, so WMS leaves it out while it has none and SCM suggests nothing.
+    await db.query(`INSERT INTO product_catalog(org_id,sku,name_zh,attrs) VALUES($1,'S-DS','示例代发件','{"supplyMode":"dropship"}')`, [org]);
+    const ds = (await call('m1', 'GET', '/scm/board')).json().items.find((x: any) => x.sku === 'S-DS');
+    assert.deepEqual([ds.dropship, ds.ship, ds.make, ds.status], [true, 0, 0, 'ok']);
+    assert.equal((await call('m1', 'GET', '/scm/board')).json().items.find((x: any) => x.sku === 'S-2').dropship, false);
+    assert.ok(!(await call('m1', 'GET', '/wms/summary')).json().items.some((x: any) => x.sku === 'S-DS'), 'dropship without stock is not listed in WMS');
+    await call('m1', 'POST', '/wms/movements/batch', { type: 'in', location: 'us', opDate: '2026-11-10', reason: '采购到货', lines: [{ sku: 'S-DS', qty: 1 }] });
+    assert.equal((await call('m1', 'GET', '/wms/summary')).json().items.find((x: any) => x.sku === 'S-DS')?.dropship, true, 'shown, tagged, once it holds stock');
   } finally { await app.close(); }
 });
 
