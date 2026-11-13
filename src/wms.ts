@@ -542,23 +542,35 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     return out;
   });
 
+  // One decision on one pending count adjustment, inside the caller's transaction.
+  async function decideOne(tx: Queryable, u: User, mid: string, decision: 'approve' | 'reject', people: Awaited<ReturnType<typeof peopleOf>>) {
+    const m = (await tx.query('SELECT * FROM wms_movements WHERE id=$1 AND org_id=$2 FOR UPDATE', [mid, u.org_id])).rows[0];
+    if (!m) deny(404, 'NOT_FOUND', 'Movement not found');
+    if (m.status !== 'pending') deny(409, 'WMS_ALREADY_DECIDED', 'This adjustment has already been decided');
+    if (!canDecide(u, m, people)) deny(403, 'WMS_APPROVER_ONLY', `Only another warehouse manager can confirm this adjustment: ${confirmersOf(people, m.created_by).map(id => nameOf(people.get(id))).join(', ')}`,
+      `盘点调整要由另一位有库存管理权限的同事确认：${confirmersOf(people, m.created_by).map(id => nameOf(people.get(id))).join('、')}。`);
+    if (decision === 'approve') await addStock(tx, u.org_id, m.sku, m.location, Number(m.qty), { mode: 'count' });
+    await tx.query('UPDATE wms_movements SET status=$2,decided_by=$3,decided_at=now() WHERE id=$1', [m.id, decision === 'approve' ? 'done' : 'rejected', u.id]);
+    await audit(tx, u, 'wms.adjust_' + decision, m.id, { sku: m.sku, location: m.location, qty: m.qty });
+  }
   for (const decision of ['approve', 'reject'] as const) {
     app.post<{ Params: { id: string } }>(`/wms/movements/:id/${decision}`, async req => {
       const u = actorOf(req), mid = uid.parse(req.params.id); requireView(u);
-      return db.transaction(async tx => {
-        const m = (await tx.query('SELECT * FROM wms_movements WHERE id=$1 AND org_id=$2 FOR UPDATE', [mid, u.org_id])).rows[0];
-        if (!m) deny(404, 'NOT_FOUND', 'Movement not found');
-        if (m.status !== 'pending') deny(409, 'WMS_ALREADY_DECIDED', 'This adjustment has already been decided');
-        const people = await peopleOf(u.org_id, tx);
-        if (!canDecide(u, m, people)) deny(403, 'WMS_APPROVER_ONLY', `Only another warehouse manager can confirm this adjustment: ${confirmersOf(people, m.created_by).map(id => nameOf(people.get(id))).join(', ')}`,
-          `盘点调整要由另一位有库存管理权限的同事确认：${confirmersOf(people, m.created_by).map(id => nameOf(people.get(id))).join('、')}。`);
-        if (decision === 'approve') await addStock(tx, u.org_id, m.sku, m.location, Number(m.qty), { mode: 'count' });
-        await tx.query('UPDATE wms_movements SET status=$2,decided_by=$3,decided_at=now() WHERE id=$1', [m.id, decision === 'approve' ? 'done' : 'rejected', u.id]);
-        await audit(tx, u, 'wms.adjust_' + decision, m.id, { sku: m.sku, location: m.location, qty: m.qty });
-        return { ok: true };
-      });
+      return db.transaction(async tx => { await decideOne(tx, u, mid, decision, await peopleOf(u.org_id, tx)); return { ok: true }; });
     });
   }
+  // Confirm or reject several count adjustments at once (owner, 2026-11-13). All or nothing: if any one of them
+  // cannot be decided by this person, nothing changes and the message names that SKU.
+  const batchDecideInput = z.object({ ids: z.array(uid).min(1).max(500), decision: z.enum(['approve', 'reject']) }).strict();
+  app.post('/wms/movements/batch-decide', async req => {
+    const u = actorOf(req); requireView(u);
+    const v = batchDecideInput.parse(req.body), ids = [...new Set(v.ids)];
+    return db.transaction(async tx => {
+      const people = await peopleOf(u.org_id, tx);
+      for (const id of ids) await decideOne(tx, u, id, v.decision, people);
+      return { ok: true, decided: ids.length };
+    });
+  });
 
   // Opening balances. Admin only: creates missing SKUs and sets each listed location to the
   // imported quantity, logging the difference as an applied adjustment so the ledger explains it.

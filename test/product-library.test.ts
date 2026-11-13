@@ -220,3 +220,25 @@ test('five lifecycle statuses: 开发中 / 上新中 / 在售 / 停产清存 / �
  try{assert.equal((await db.query(`SELECT status FROM product_catalog WHERE sku='DEMO-OLD-EOL'`)).rows[0].status,'clearance','计划停售 became 停产清存 at start');}
  finally{await app.close();}
 });
+
+test('bulk edit: tick several SKUs, set one field; same permissions as editing by hand, all or nothing',async()=>{
+ const {db,app,call}=await setup();
+ try{
+  const mk=async(sku:string)=>assert.equal((await call('m1','POST','/products/library',{sku,values:{family:'acc',nameZh:'示例配件',nameEn:'Sample part',series:'XRF',brand:'OneLaser'}})).statusCode,201);
+  await mk('DEMO-BULK-1');await mk('DEMO-BULK-2');await mk('DEMO-BULK-3');
+  const val=async(sku:string,k:string)=>(await call('m1','GET','/products/library')).json().items.find((i:any)=>i.sku===sku).values[k];
+  assert.equal((await call('m2','POST','/products/library/bulk-edit',{skus:['DEMO-BULK-1'],values:{series:'Hydra'}})).statusCode,400,'view-only cannot bulk-edit (same as editing one by hand)');
+  const ok=await call('m3','POST','/products/library/bulk-edit',{skus:['DEMO-BULK-1','demo-bulk-2'],values:{series:'Hydra'}});assert.equal(ok.statusCode,200,ok.body);assert.equal(ok.json().changed,2);
+  assert.equal(await val('DEMO-BULK-1','series'),'Hydra');assert.equal(await val('DEMO-BULK-2','series'),'Hydra');assert.equal(await val('DEMO-BULK-3','series'),'XRF');
+  assert.equal((await call('m1','POST','/products/library/bulk-edit',{skus:['DEMO-BULK-1'],values:{nameZh:'同名'}})).statusCode,400,'per-product fields cannot be bulk-set');
+  assert.equal((await call('m1','POST','/products/library/bulk-edit',{skus:['DEMO-BULK-1'],values:{}})).statusCode,400);
+  // One unknown SKU: nothing changes, and the message names it.
+  const bad=await call('m3','POST','/products/library/bulk-edit',{skus:['DEMO-BULK-3','DEMO-NOPE'],values:{series:'Galvo'}});assert.equal(bad.statusCode,404);assert.match(bad.json().error.message,/DEMO-NOPE/);
+  assert.equal(await val('DEMO-BULK-3','series'),'XRF','refused batch changes nothing');
+  // Status steps and the reason still apply.
+  assert.equal((await call('m3','POST','/products/library/bulk-edit',{skus:['DEMO-BULK-1','DEMO-BULK-2'],values:{status:'eol'}})).statusCode,400,'下架封存 needs a reason');
+  assert.equal((await call('m3','POST','/products/library/bulk-edit',{skus:['DEMO-BULK-1','DEMO-BULK-2'],values:{status:'eol'},note:'示例原因'})).statusCode,200);
+  assert.equal(await val('DEMO-BULK-2','status'),'eol');
+  const n=(await db.query(`SELECT count(*)::int n FROM audit_events WHERE action='products.bulk_edited'`)).rows[0].n;assert.equal(n,4);
+ }finally{await app.close();}
+});

@@ -296,6 +296,8 @@ const zh:Record<string,string>={
   'The products changed after this preview; upload the file again to see the current differences':'预览之后产品资料又有改动，请重新上传文件，查看最新的更新前后对比。',
   'Some rows have errors; fix them or choose to skip the rows with errors':'有些行有错误：请改正后重新上传，或选择“跳过错误行，更新其余”。',
   'This import does not exist':'找不到这次导入记录。',
-  'This import has already been undone':'这次导入已经撤销过了。'
+  'This import has already been undone':'这次导入已经撤销过了。',
+  'Choose a field to change':'请选择要修改的字段。',
+  'This field is different for every product and cannot be bulk-edited':'这个字段每个产品都不一样，不能批量修改。'
 };
 export function message(text:string,lang:Language) {return lang==='en'?text:(zh[text]||'请求未能处理，请核对输入或联系管理员。');}
