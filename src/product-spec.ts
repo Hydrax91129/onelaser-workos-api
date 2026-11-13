@@ -48,10 +48,12 @@ export const GROUPS: Group[] = [
   { no: '5', zh: '定价（批发）', en: 'Pricing (wholesale)', disp: '3' }, { no: '6', zh: '包装与物流', en: 'Packaging & logistics', disp: '4' },
   { no: '7', zh: '采购与供应商', en: 'Purchasing & suppliers', disp: '5' }, { no: '8', zh: '售后与库存控制', en: 'After-sales & stock control', disp: '7' },
 ];
-/** Required (owner, 2026-11-11): every basic field except UPC / EAN / GTIN and the main image, plus landed cost and last-mile
+/** Required (owner, 2026-11-11; 产品线 / 系列 optional since 2026-11-13): every basic field except UPC / EAN / GTIN, the main image
+ *  and the product line, plus landed cost and last-mile
  *  freight. The return SKU is required for returned goods only (completeness). Everything else is optional.
  *  A field stays 不适用 (n) for families it does not apply to. */
-export const REQUIRED = new Set(['sku', 'goodsType', 'family', 'series', 'nameZh', 'nameEn', 'brand', 'landed', 'lastMile']);
+// 产品线 / 系列 is optional (owner, 2026-11-13): accessories that fit several machine lines leave it blank.
+export const REQUIRED = new Set(['sku', 'goodsType', 'family', 'nameZh', 'nameEn', 'brand', 'landed', 'lastMile']);
 /** Core fields cannot be cleared once set. */
 export const CORE_REQUIRED = new Set(['sku', 'goodsType', 'family', 'nameZh', 'nameEn']);
 export const minReq = (key: string, code: string) => REQUIRED.has(key) ? code.replace(/o/g, 'r') : code.replace(/r/g, 'o');

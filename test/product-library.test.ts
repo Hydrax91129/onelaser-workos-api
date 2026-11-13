@@ -26,17 +26,17 @@ async function setup(){
 
 test('requirement matrix: basic fields (not UPC or image) plus landed cost and last mile are required; the rest is optional; 型号 is gone',()=>{
  const code=(k:string)=>FIELD.get(k)!.code;
- assert.equal(minReq('nameZh','ooooo'),'rrrrr');assert.equal(minReq('hsCode','rrrno'),'ooono');assert.equal(minReq('series','rrron'),'rrrrn','不适用 stays');
- const want=['sku','goodsType','family','series','nameZh','nameEn','brand','landed','lastMile'];
+ assert.equal(minReq('nameZh','ooooo'),'rrrrr');assert.equal(minReq('hsCode','rrrno'),'ooono');assert.equal(minReq('series','rrron'),'oooon','product line is optional; 不适用 stays');
+ const want=['sku','goodsType','family','nameZh','nameEn','brand','landed','lastMile'];
  for(const f of FIELDS)for(const fam of ['main','acc','cons','soft','mat']){const c=famCode(f.code,fam);if(want.includes(f.key))assert.notEqual(c,'opt',`${f.key} is required for ${fam} where it applies`);else assert.notEqual(c,'req',`${f.key} is optional for ${fam}`);}
- assert.equal(famCode(code('series'),'acc'),'req');assert.equal(famCode(code('series'),'mat'),'na');assert.equal(famCode(code('landed'),'soft'),'na');assert.equal(famCode(code('lastMile'),'mat'),'na');
+ assert.equal(famCode(code('series'),'acc'),'opt');assert.equal(famCode(code('series'),'mat'),'na');assert.equal(famCode(code('landed'),'soft'),'na');assert.equal(famCode(code('lastMile'),'mat'),'na');
  assert.equal(famCode(code('gtin'),'main'),'opt');assert.equal(famCode(code('mainImage'),'main'),'opt');assert.equal(famCode(code('msrp'),'main'),'opt');assert.equal(famCode(code('status'),'main'),'opt');
  assert.equal(FIELD.get('model'),undefined,'型号 is removed');
  assert.deepEqual([...CORE_REQUIRED],['sku','goodsType','family','nameZh','nameEn']);
  const vAll=viewerOf([],false),vCost=viewerOf(['products','product_cost_detail'],false);
  const rec={values:{family:'main',goodsType:'bulk',nameZh:'示例',nameEn:'Sample',status:'dev',sku:'X'},files:{}};
  const a=completeness(rec,vAll),b=completeness(rec,vCost);
- assert.deepEqual(a.missing.sort(),['brand','series']);assert.deepEqual(b.missing.sort(),['brand','landed','lastMile','series'],'cost access adds landed cost and last mile');
+ assert.deepEqual(a.missing.sort(),['brand']);assert.deepEqual(b.missing.sort(),['brand','landed','lastMile'],'cost access adds landed cost and last mile');
  assert.ok(!b.missing.some((m:string)=>m.startsWith('file:')),'file slots are optional');
  assert.equal(completeness({values:{sku:'X'}},vAll).done,false,'no family yet: not complete');
  const refb=completeness({values:{...rec.values,goodsType:'refb'}},vAll);assert.ok(refb.missing.includes('refbSku'),'return SKU is required for 退货');
@@ -188,3 +188,21 @@ test('return SKUs saved with the old REFB- prefix become REF- when the service s
  assert.deepEqual(rows.map((r:any)=>r.refb_sku),['REF-ODL-OLD-1','REF-ODL-OLD-2']);
  await db.close?.();
 });
+
+test('delete a product: managers only; refused while stock, movements, orders or returns use the SKU; its own rows go with it',async()=>{
+ const {db,app,call}=await setup();
+ try{
+  const mk=async(sku:string)=>assert.equal((await call('m1','POST','/products/library',{sku,values:{family:'acc',nameZh:'示例配件',nameEn:'Sample part',series:'XRF',brand:'OneLaser'}})).statusCode,201);
+  await mk('DEMO-DEL-1');await mk('DEMO-DEL-2');
+  assert.equal((await call('m2','DELETE','/products/library/DEMO-DEL-1')).statusCode,403,'view-only cannot delete');
+  const ok=await call('m3','DELETE','/products/library/demo-del-1');assert.equal(ok.statusCode,200,ok.body);assert.equal(ok.json().sku,'DEMO-DEL-1');
+  assert.equal((await call('m1','GET','/products/library')).json().items.some((i:any)=>i.sku==='DEMO-DEL-1'),false);
+  assert.equal((await call('m1','DELETE','/products/library/DEMO-DEL-1')).statusCode,404,'gone');
+  // In use: a stock movement keeps its history, so the SKU stays (set it to 停售 instead).
+  const mv=await call('m1','POST','/wms/movements/batch',{type:'in',location:'us',opDate:'2026-11-01',reason:'示例入库',lines:[{sku:'DEMO-DEL-2',qty:2}]});assert.equal(mv.statusCode<300,true,mv.body);
+  const used=await app.inject({method:'DELETE',url:'/products/library/DEMO-DEL-2',headers:{authorization:'Bearer '+(await issueSession(db,'m1')).accessToken,'accept-language':'zh-CN'}});
+  assert.equal(used.statusCode,409);assert.equal(used.json().error.code,'PRODUCT_IN_USE');assert.match(used.json().error.message,/停售/);
+  const audit=(await db.query(`SELECT count(*)::int n FROM audit_events WHERE action='products.deleted' AND object_id='DEMO-DEL-1'`)).rows[0].n;assert.equal(audit,1);
+ }finally{await app.close();}
+});
+

@@ -305,6 +305,39 @@ export async function registerProductLibraryRoutes(app: FastifyInstance, db: Dat
 
   /* ---------- files: the main image (everyone) and the sensitive slots ---------- */
   const fileBody = z.object({ name: z.string().trim().min(1).max(200), mime: z.string().trim().max(120).optional(), dataBase64: z.string().min(4).max(Math.ceil(MAX_FILE * 4 / 3) + 8) }).strict();
+  /* Delete a product (owner, 2026-11-13): product managers and main admins. Only a SKU nothing else points at can go:
+     stock, stock movements, dealer orders, purchase orders, shipments, returns and quality issues keep their history,
+     so a SKU they use is refused with where it is used (set it to 停售 instead). The product's own rows go with it:
+     pricing, channel prices, files and empty stock / bin rows; its change history stays for the audit trail. */
+  app.delete<{ Params: { sku: string } }>('/products/library/:sku', async req => {
+    const u = actorOf(req), v = viewer(u);
+    if (!v.editCatalog) deny(403, 'CATALOG_DELETE_FORBIDDEN', 'Only product managers or administrators can delete products', '只有产品资料“管理信息”权限的人或主管理员可以删除产品。');
+    const sku = z.string().trim().min(1).max(80).parse(req.params.sku);
+    return db.transaction(async tx => {
+      const row = (await tx.query('SELECT sku,name_zh,name_en FROM product_catalog WHERE org_id=$1 AND lower(sku)=lower($2) FOR UPDATE', [u.org_id, sku])).rows[0];
+      if (!row) deny(404, 'PRODUCT_NOT_FOUND', 'This product was not found', '找不到这个产品，可能已经被删除。');
+      const k = String(row.sku).toLowerCase(), org = u.org_id;
+      const count = async (sql: string) => Number((await tx.query(sql, [org, k])).rows[0]?.n || 0);
+      const used: [string, string, number][] = [
+        ['库存', 'stock', await count(`SELECT COALESCE(sum(qty),0)::int n FROM wms_stock WHERE org_id=$1 AND lower(sku)=$2`)],
+        ['出入库记录', 'stock movements', await count(`SELECT count(*)::int n FROM wms_movements WHERE org_id=$1 AND lower(sku)=$2`)],
+        ['经销商订单', 'dealer orders', await count(`SELECT count(*)::int n FROM dealer_order_lines l JOIN dealer_orders o ON o.id=l.order_id WHERE o.org_id=$1 AND lower(l.sku)=$2`)],
+        ['采购单', 'purchase orders', await count(`SELECT count(*)::int n FROM scm_order_lines l JOIN scm_orders o ON o.id=l.order_id WHERE o.org_id=$1 AND lower(l.sku)=$2`)],
+        ['货柜', 'shipments', await count(`SELECT count(*)::int n FROM scm_shipment_lines l JOIN scm_shipments s ON s.id=l.shipment_id WHERE s.org_id=$1 AND lower(l.sku)=$2`)],
+        ['退货维修', 'returns', await count(`SELECT count(*)::int n FROM rma_cases WHERE org_id=$1 AND (lower(sku)=$2 OR lower(main_sku)=$2)`)],
+        ['质量问题', 'quality issues', await count(`SELECT count(*)::int n FROM quality_issues WHERE org_id=$1 AND lower(sku)=$2`)],
+      ];
+      const hits = used.filter(x => x[2] > 0);
+      if (hits.length) deny(409, 'PRODUCT_IN_USE', `This SKU is used in ${hits.map(x => `${x[1]} (${x[2]})`).join(', ')}; set its status to Discontinued instead`,
+        `这个 SKU 已经用在${hits.map(x => `${x[0]}（${x[2]}）`).join('、')}里，删除会弄乱这些记录。请把状态改为“停售”。`);
+      for (const t of ['product_pricing', 'product_channel_prices', 'product_files', 'wms_stock', 'wms_bins', 'wms_items'])
+        await tx.query(`DELETE FROM ${t} WHERE org_id=$1 AND lower(sku)=$2`, [org, k]);
+      await tx.query('DELETE FROM product_catalog WHERE org_id=$1 AND lower(sku)=$2', [org, k]);
+      await o.audit(tx, u, 'products.deleted', row.sku, { nameZh: row.name_zh, nameEn: row.name_en });
+      return { ok: true, sku: row.sku };
+    });
+  });
+
   app.post('/products/library/:sku/files/:slot', { bodyLimit: Math.ceil(MAX_FILE * 4 / 3) + 4096 }, async (req, reply) => {
     const u = actorOf(req), v = viewer(u), slot = String((req.params as any).slot || '');
     const isImage = slot === 'mainImage', s = SLOT.get(slot);

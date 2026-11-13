@@ -80,12 +80,16 @@ export const supplyDaysOf = (o: { order: number; production: number; firstLeg: n
  *  40 % the last 30 days, 30 % the last 90, 30 % the year — the year scaled by last year's next 90 days against the yearly
  *  average (seasonality, 0.5–2×, only with ≥ 300 days of history). A burst (30-day rate ≥ 1.3 × the 90-day rate) counts
  *  in only up to 2 × the 90-day rate so one viral week does not triple the order; a dip (≤ 0.7 ×) counts in fully. */
-export function forecastOf(o: { ds30: number; ds90: number; ds365: number; nextLastYear: number | null; history: number }) {
+/** A burst or dip only counts with at least this many units sold in the last 30 days (owner, 2026-11-13): 1 unit against
+ *  0 is not a trend. */
+export const TREND_MIN_UNITS = 3;
+export function forecastOf(o: { ds30: number; ds90: number; ds365: number; nextLastYear: number | null; history: number; sold30?: number }) {
   const season = o.history >= 300 && o.ds365 > 0 && o.nextLastYear != null ? Math.min(2, Math.max(0.5, o.nextLastYear / o.ds365)) : 1;
-  const signal = o.ds90 > 0 && o.ds30 >= 1.3 * o.ds90 ? 'spike' : o.ds90 > 0 && o.ds30 <= 0.7 * o.ds90 ? 'dip' : o.ds90 <= 0 && o.ds30 > 0 ? 'spike' : 'steady';
+  const enough = o.sold30 == null || o.sold30 >= TREND_MIN_UNITS;
+  const signal = !enough ? 'steady' : o.ds90 > 0 && o.ds30 >= 1.3 * o.ds90 ? 'spike' : o.ds90 > 0 && o.ds30 <= 0.7 * o.ds90 ? 'dip' : o.ds90 <= 0 && o.ds30 > 0 ? 'spike' : 'steady';
   const recent = signal === 'spike' && o.ds90 > 0 ? Math.min(o.ds30, 2 * o.ds90) : o.ds30;
   const ds = Math.max(0, 0.4 * recent + 0.3 * o.ds90 + 0.3 * o.ds365 * season);
-  return { ds, season: Math.round(season * 100) / 100, signal, trendPct: o.ds90 > 0 ? Math.round((o.ds30 / o.ds90 - 1) * 100) : null };
+  return { ds, season: Math.round(season * 100) / 100, signal, trendPct: enough && o.ds90 > 0 ? Math.round((o.ds30 / o.ds90 - 1) * 100) : null };
 }
 /** 头程 / 尾程 with their default days (owner, 2026-11-12): days to arrive = first leg + last mile. */
 export const FIRST_LEGS = { air: 7, oa: 30, fast: 20, matson: 15 } as const;
@@ -165,7 +169,7 @@ export async function registerScmRoutes(app: FastifyInstance, db: Database, o: {
     const items = catalog.map((c: any) => {
       const k = String(c.sku).toLowerCase(), sl = sales.get(k) || { d365: 0, d30: 0, d90: 0, ly: 0 }, st = stock.get(k) || {};
       const ds365 = sl.d365 / span365, ds30 = sl.d30 / span30, ds90 = sl.d90 / span90;
-      const fc = forecastOf({ ds30, ds90, ds365, nextLastYear: span365 >= 300 ? sl.ly / 90 : null, history: span365 });
+      const fc = forecastOf({ ds30, ds90, ds365, nextLastYear: span365 >= 300 ? sl.ly / 90 : null, history: span365, sold30: sl.d30 });
       const us = st.us || 0, transit = st.transit || 0, factory = (st.dg || 0) + (st.jn || 0);
       // Production and first leg come from the product library; settings fill in what is missing (shown with *).
       const prodLib = daysIn(c.lead), legLib = daysIn(c.first_leg), production = prodLib ?? s.productionDays, firstLeg = legLib ?? s.firstLegDays;
@@ -173,7 +177,7 @@ export async function registerScmRoutes(app: FastifyInstance, db: Database, o: {
       // Finished goods at the factory ship first, so the clock is the shorter one while there is factory stock.
       const leadDays = factory > 0 ? days.fromStock : days.full;
       return { sku: c.sku, nameZh: c.name_zh || '', nameEn: c.name_en || '', family: c.family || '', lifecycle: c.status || '', series: c.series, brand: c.brand,
-        ...(canSupplier ? { suppliers: suppliersOf(c.pattrs) } : {}), sold365: sl.d365, sold30: sl.d30,
+        ...(canSupplier ? { suppliers: suppliersOf(c.pattrs) } : {}), sold365: sl.d365, sold90: sl.d90, sold30: sl.d30,
         ds365: r1(ds365), ds90: r1(ds90), ds30: r1(ds30), forecast: r1(fc.ds), season: fc.season, signal: fc.signal, trendPct: fc.trendPct, us, transit, dg: st.dg || 0, jn: st.jn || 0, factory, moq: c.moq || '', productionDays: production, firstLegDays: firstLeg,
         productionFromLibrary: prodLib != null, firstLegFromLibrary: legLib != null, supplyDays: days.full, stockDays: days.fromStock, leadDays,
         arriveOn: addDays(t, leadDays), leadFromLibrary: prodLib != null && legLib != null,
