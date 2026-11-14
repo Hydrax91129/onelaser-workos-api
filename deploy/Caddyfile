@@ -124,7 +124,7 @@ http://wodemac.com:{$PORT:10000} {
         ?Referrer-Policy no-referrer
         Permissions-Policy "camera=(), microphone=(), geolocation=()"
         X-Frame-Options DENY
-        Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-src https://www.youtube-nocookie.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+        Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-src https://www.youtube-nocookie.com; media-src 'self' https://media.wodemac.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
         Cache-Control no-store
     }
     @public_assets path /assets/*
