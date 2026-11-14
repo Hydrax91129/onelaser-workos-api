@@ -44,6 +44,17 @@
 
 Bot 触发和回写的具体步骤见 [Bot 接入说明](../docs/integrations/GROK_BOT_SETUP.md)。先部署基础服务与钉钉登录，配置管理员核对的精确回调/可选 client ID，再连接 OAuth MCP，由主管明确批准并点击“返回 Bot”。OAuth 连接可先于 webhook 配置完成；实际评审仍须独立 Routine 的 webhook 地址、密钥及主机名。回调白名单为空时 OAuth 关闭，不能用静态 worker secret 替代或降级匿名。模板不要求购买模型 API 额度。Webhook 接受请求只表示开始执行，结果另行回传。Bot 套餐仍有用量限制。同账号 Bots 共享云端电脑和登录，独立工作流不能代替服务端权限控制。
 
+### 切换到 erp.1laser.com（2026-11-12 老板定）
+
+1. Render → onelaser-workos-migration → Settings → Custom Domains：添加 `erp.1laser.com`，记下 Render 给出的 CNAME 目标。
+2. 在 1laser.com 的 DNS 里加 CNAME：主机 `erp`，值为上一步的目标。等 Render 显示域名已验证、证书已签发（通常几分钟到几小时）。这时新旧域名都能打开，但登录和保存要等第 4 步。
+3. 钉钉开放平台：首页地址和登录回调加上 / 改成 `https://erp.1laser.com/...`；如果配置了 `DINGTALK_REDIRECT_URI`，同时改。
+4. Render 环境变量 `APP_PUBLIC_URL` 改为 `https://erp.1laser.com`（保存后自动重新部署）。之后 craftos.app 和 onrender.com 的页面自动 307 跳到新域名（`@old_origin_pages`）；`/api/*`、`/.well-known/*`、健康检查和 `/caldock` 不跳，已登记在旧域名上的回调（支付、Bot、Webhook）照常可用，再逐个改到新域名。
+5. 员工在新域名重新登录一次（会话按域名保存，数据不受影响）。老板的 Claude / Composio 连接改成 `https://erp.1laser.com/api/mcp` 并重新授权；Grok Bot 的 MCP 地址同样更新。经销商在线付款如已启用，Stripe 后台的 Webhook 地址改到新域名。
+6. 核对：打开 `https://erp.1laser.com/build-info.json` 和 `https://craftos.app/`（应跳到新域名）。craftos.app 至少再续费几个月，用来跳转。
+
+回滚：把 `APP_PUBLIC_URL` 改回 `https://craftos.app` 即可（跳转是临时的 307，浏览器不会永久记住）。
+
 ### 切换到 craftos.app
 
 先核验 `craftos.app` 的 DNS、Render 域名验证和 HTTPS，再将 `APP_PUBLIC_URL` 设为 `https://craftos.app`。同时更新钉钉首页与登录回调；如配置了 `DINGTALK_REDIRECT_URI`，必须一起更新。只有这个明确的正式来源（允许末尾 `/`）会启用旧 `onelaser-workos.onrender.com` 的 307 跳转，保留路径、查询参数和请求方法，并设置 `no-store`；`/healthz`、`/api/health` 始终直接服务健康检查。切换前所有 URL 保持原行为，恢复旧 `APP_PUBLIC_URL` 即关闭跳转。

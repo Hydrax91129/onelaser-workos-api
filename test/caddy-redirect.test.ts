@@ -45,8 +45,11 @@ test('canonical origin switches only the approved Render host and retains health
   try {
     for (const appUrl of ['', `https://${oldHost}`, 'https://elsewhere.example',
       "https://evil.example' || true || '", 'https://craftos.app.evil.example',
-      'https://craftos.app', 'https://craftos.app/']) {
+      'https://craftos.app', 'https://craftos.app/', 'https://erp.1laser.com', 'https://erp.1laser.com/',
+      'https://erp.1laser.com.evil.example', "https://erp.1laser.com' || true || '"]) {
       await t.test(`APP_PUBLIC_URL=${JSON.stringify(appUrl)}`, async () => {
+        // The app's own host: craftos.app until the move, erp.1laser.com after it (craftos.app pages then redirect).
+        const OLD_DOMAIN = 'craftos.app', appHost = appUrl === 'https://erp.1laser.com' || appUrl === 'https://erp.1laser.com/' ? 'erp.1laser.com' : OLD_DOMAIN;
         const listener = createServer();
         listener.listen(0, '127.0.0.1');
         await once(listener, 'listening');
@@ -80,7 +83,7 @@ test('canonical origin switches only the approved Render host and retains health
             await new Promise(resolve => setTimeout(resolve, 20));
           }
           assert.ok(ready, diagnostics);
-          const publicPage = await get('craftos.app', '/');
+          const publicPage = await get(appHost, '/');
           const csp = new Map(publicPage.csp.split(';').map(part => {
             const [name, ...sources] = part.trim().split(/\s+/);
             return [name, sources.join(' ')] as const;
@@ -96,9 +99,9 @@ test('canonical origin switches only the approved Render host and retains health
           assert.equal(csp.get('object-src'), "'none'");
           assert.equal(csp.get('form-action'), "'self' https://login.dingtalk.com");
           assert.equal(csp.get('img-src'), "'self' data: https://wiki.1laser.com https://zohodesk.1laser.com https://www.1laser.com https://encrypted-tbn0.gstatic.com https://weacrylic.com https://images.openai.com https://api2.mubu.com https://document-image.mubu.com");
-          assert.equal((await get('craftos.app', '/index.html')).csp, publicPage.csp);
+          assert.equal((await get(appHost, '/index.html')).csp, publicPage.csp);
           for (const path of ['/api/tasks', '/api/integrations/grok-bot/oauth/requests/example', '/.well-known/oauth-authorization-server', '/healthz']) {
-            const upstreamPolicy = (await get('craftos.app', path)).csp;
+            const upstreamPolicy = (await get(appHost, path)).csp;
             assert.match(upstreamPolicy, /(?:^|;)\s*img-src 'self' data:;/, path);
             assert.match(upstreamPolicy, /(?:^|;)\s*frame-src 'self';/, path);
             assert.doesNotMatch(upstreamPolicy, /https:\/\/wiki\.1laser\.com/, path);
@@ -123,22 +126,22 @@ test('canonical origin switches only the approved Render host and retains health
             assert.equal(page.status, 200, path);
             assert.equal(page.robots, '', path + ' must remain indexable');
           }
-          assert.equal((await get('craftos.app', '/?view=checkout')).robots, '', 'Other hosts are unchanged');
-          const moved = await get('craftos.app', '/caldock/?lang=zh');
+          assert.equal((await get(appHost, '/?view=checkout')).robots, '', 'Other hosts are unchanged');
+          const moved = await get(appHost, '/caldock/?lang=zh');
           assert.equal(moved.status, 308); assert.equal(moved.location, 'https://wodemac.com/?lang=zh');
-          assert.equal((await get('craftos.app', '/caldock')).location?.startsWith('https://wodemac.com/'), true);
-          assert.equal((await get('craftos.app', '/caldock/legal/terms.html')).location, 'https://wodemac.com/legal/terms.html');
-          const wiki = await get('craftos.app', '/wiki/?lang=zh');
+          assert.equal((await get(appHost, '/caldock')).location?.startsWith('https://wodemac.com/'), true);
+          assert.equal((await get(appHost, '/caldock/legal/terms.html')).location, 'https://wodemac.com/legal/terms.html');
+          const wiki = await get(appHost, '/wiki/?lang=zh');
           assert.equal(wiki.status, 200); assert.equal(wiki.body, 'complete public wiki');
           assert.equal(wiki.frameOptions, 'SAMEORIGIN');
           assert.equal(wiki.cacheControl, 'no-store');
-          assert.equal((await get('craftos.app','/wiki/data/library.json')).cacheControl, 'public, max-age=300');
-          assert.equal((await get('craftos.app','/wiki/assets/example.png')).cacheControl, 'public, max-age=86400');
-          assert.equal((await get('craftos.app','/api/tasks')).cacheControl, 'no-store');
-          assert.equal((await get('craftos.app','/task-board.js?v=20261101-a')).cacheControl, 'public, max-age=31536000, immutable', 'versioned app scripts are cached');
-          assert.equal((await get('craftos.app','/task-board.js')).cacheControl, 'no-store', 'unversioned scripts are not');
-          assert.equal((await get('craftos.app','/api/tasks?v=1')).cacheControl, 'no-store', 'API never cached');
-          assert.equal((await get('craftos.app','/')).cacheControl, 'no-store', 'the page itself always loads fresh');
+          assert.equal((await get(appHost, '/wiki/data/library.json')).cacheControl, 'public, max-age=300');
+          assert.equal((await get(appHost, '/wiki/assets/example.png')).cacheControl, 'public, max-age=86400');
+          assert.equal((await get(appHost, '/api/tasks')).cacheControl, 'no-store');
+          assert.equal((await get(appHost, '/task-board.js?v=20261101-a')).cacheControl, 'public, max-age=31536000, immutable', 'versioned app scripts are cached');
+          assert.equal((await get(appHost, '/task-board.js')).cacheControl, 'no-store', 'unversioned scripts are not');
+          assert.equal((await get(appHost, '/api/tasks?v=1')).cacheControl, 'no-store', 'API never cached');
+          assert.equal((await get(appHost, '/')).cacheControl, 'no-store', 'the page itself always loads fresh');
           const wikiCsp = new Map(wiki.csp.split(';').map(part => {
             const [name, ...sources] = part.trim().split(/\s+/);
             return [name, sources.join(' ')] as const;
@@ -151,31 +154,31 @@ test('canonical origin switches only the approved Render host and retains health
             assert.equal(wikiCsp.get(directive), "'none'");
           }
           assert.equal(wikiCsp.get('img-src'), "'self' https://wiki.1laser.com https://zohodesk.1laser.com https://www.1laser.com https://encrypted-tbn0.gstatic.com https://weacrylic.com https://images.openai.com https://api2.mubu.com https://document-image.mubu.com");
-          assert.equal((await get('craftos.app', '/wiki/assets/app.js')).body, 'public wiki script');
-          const wikiData = await get('craftos.app', '/wiki/data/library.json');
+          assert.equal((await get(appHost, '/wiki/assets/app.js')).body, 'public wiki script');
+          const wikiData = await get(appHost, '/wiki/data/library.json');
           assert.equal(wikiData.status, 200);assert.deepEqual(JSON.parse(wikiData.body), {articles:[{id:'public-article'}]});
-          const wikiRedirect = await get('craftos.app', '/wiki?lang=en');
+          const wikiRedirect = await get(appHost, '/wiki?lang=en');
           assert.equal(wikiRedirect.status, 308); assert.equal(wikiRedirect.location, '/wiki/?lang=en');
-          const apiRedirect = await get('craftos.app', '/api');
+          const apiRedirect = await get(appHost, '/api');
           assert.equal(apiRedirect.status, 308); assert.equal(apiRedirect.location, '/api/');
           for (const path of ['/wiki/.env', '/wiki/src/server.ts', '/wiki/api/tasks', '/wikievil/']) {
-            assert.equal((await get('craftos.app', path)).status, 404, path);
+            assert.equal((await get(appHost, path)).status, 404, path);
           }
           for (const path of ['/api/tasks', '/wiki', '/wikievil/']) {
-            const protectedRoute = await get('craftos.app', path);
+            const protectedRoute = await get(appHost, path);
             assert.equal(protectedRoute.frameOptions, 'DENY', path);
             assert.match(protectedRoute.csp, /frame-ancestors 'none'/, path);
           }
-          const projectFile = await get('craftos.app', '/api/projects/files/0f8fad5b-d9cb-469f-a165-70867728950e');
+          const projectFile = await get(appHost, '/api/projects/files/0f8fad5b-d9cb-469f-a165-70867728950e');
           assert.equal(projectFile.frameOptions, 'SAMEORIGIN', 'project files open in the in-app preview window');
           assert.match(projectFile.csp, /frame-ancestors 'self'/);assert.match(projectFile.csp, /default-src 'none'/);assert.doesNotMatch(projectFile.csp, /script-src/);
-          assert.equal((await get('craftos.app', '/api/projects/0f8f/files')).frameOptions, 'DENY', 'only the file download itself may be framed');
+          assert.equal((await get(appHost, '/api/projects/0f8f/files')).frameOptions, 'DENY', 'only the file download itself may be framed');
           for (const path of ['/api/tasks/t1/attachments/a1', '/api/products/library/files/f1', '/api/rma/c1/photos/p1', '/api/hr/people/u1/documents/d1', '/api/feedback/x/images/0']) {
-            const stored = await get('craftos.app', path);
+            const stored = await get(appHost, path);
             assert.equal(stored.frameOptions, 'SAMEORIGIN', path);assert.match(stored.csp, /frame-ancestors 'self'/, path);assert.doesNotMatch(stored.csp, /script-src/, path);
           }
           for (const path of ['/api/tasks/t1/attachments', '/api/tasks/t1/attachments/a1/x', '/api/hr/people/u1/documents']) {
-            assert.equal((await get('craftos.app', path)).frameOptions, 'DENY', path);
+            assert.equal((await get(appHost, path)).frameOptions, 'DENY', path);
           }
           for (const path of ['/healthz', '/api/health']) {
             const response = await get(oldHost, path);
@@ -183,17 +186,37 @@ test('canonical origin switches only the approved Render host and retains health
             assert.equal(JSON.parse(response.body).path, '/health');
           }
           const cutover = appUrl === 'https://craftos.app' || appUrl === 'https://craftos.app/';
+          // Move to erp.1laser.com: pages on the old addresses open there; API, OAuth discovery, health and CalDock stay.
+          const erp = appUrl === 'https://erp.1laser.com' || appUrl === 'https://erp.1laser.com/';
+          for (const host of [OLD_DOMAIN, 'www.' + OLD_DOMAIN, oldHost]) for (const path of ['/', '/index.html', '/?lang=en', '/wiki/?lang=zh']) {
+            const page = await get(host, path);
+            assert.equal(page.status, erp ? 307 : (host === oldHost && cutover ? 307 : page.status), `${host}${path}`);
+            if (erp) assert.equal(page.location, `https://erp.1laser.com${path}`, `${host}${path}`);
+          }
+          if (erp) {
+            for (const path of ['/api/tasks', '/api/tasks?limit=1', '/.well-known/oauth-authorization-server', '/.well-known/oauth-protected-resource/api/mcp', '/healthz']) {
+              const kept = await get(OLD_DOMAIN, path);
+              assert.notEqual(kept.status, 307, path + ' is not redirected: webhooks and API clients keep working');
+            }
+            assert.equal((await get(OLD_DOMAIN, '/api/tasks', 'POST')).status, 200, 'webhook POSTs still arrive');
+            assert.equal((await get(OLD_DOMAIN, '/caldock/?lang=zh')).location?.startsWith('https://wodemac.com/'), true, 'CalDock still moves to wodemac.com');
+            for (const host of ['erp.1laser.com', 'localhost', 'evil.example']) {
+              const here = await get(host, '/', 'GET', { 'x-forwarded-host': OLD_DOMAIN });
+              assert.equal(here.status, 200, host + ' is never redirected'); assert.equal(here.location, undefined);
+            }
+          }
           for (const path of ['/', '/api/auth/dingtalk/start?next=%2Ftasks',
             '/api/tasks?limit=10', '/.well-known/oauth-authorization-server']) {
             const response = await get(oldHost, path);
-            assert.equal(response.status, cutover ? 307 : 200, path);
-            assert.equal(response.location, cutover ? `https://craftos.app${path}` : undefined);
+            const toErp = erp && path === '/'; // after the move only pages leave the Render host; API and OAuth stay
+            assert.equal(response.status, cutover || toErp ? 307 : 200, path);
+            assert.equal(response.location, cutover ? `https://craftos.app${path}` : toErp ? `https://erp.1laser.com${path}` : undefined);
             assert.equal(response.cacheControl, 'no-store');
           }
           const write = await get(oldHost, '/api/tasks', 'POST');
           assert.equal(write.status, cutover ? 307 : 200);
           if (!cutover) assert.equal(JSON.parse(write.body).method, 'POST');
-          for (const host of ['craftos.app', 'localhost', 'evil.example', `${oldHost}.evil.example`]) {
+          for (const host of [appHost, 'localhost', 'evil.example', `${oldHost}.evil.example`]) {
             const response = await get(host, '/', 'GET', { 'x-forwarded-host': oldHost });
             assert.equal(response.status, 200); assert.equal(response.location, undefined);
           }

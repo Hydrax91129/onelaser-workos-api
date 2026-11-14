@@ -52,6 +52,16 @@ http://:{$PORT:10000} {
         not path /healthz /api/health
     }
     redir @old_render_origin https://craftos.app{uri} 307
+    # The app moves to https://erp.1laser.com (owner, 2026-11-12). Once APP_PUBLIC_URL names it, pages on the
+    # old addresses (craftos.app, the Render host) open there. API calls and OAuth discovery are not redirected:
+    # webhooks and payment callbacks registered on an old address keep working until they are moved, and
+    # health checks stay put. The destination is literal, never built from the request.
+    @old_origin_pages {
+        host craftos.app www.craftos.app onelaser-workos.onrender.com
+        expression `{env.APP_PUBLIC_URL} == 'https://erp.1laser.com' || {env.APP_PUBLIC_URL} == 'https://erp.1laser.com/'`
+        not path /healthz /api /api/* /.well-known/* /caldock /caldock/*
+    }
+    redir @old_origin_pages https://erp.1laser.com{uri} 307
     handle /healthz {
         rewrite * /health
         reverse_proxy 127.0.0.1:3001
@@ -60,7 +70,7 @@ http://:{$PORT:10000} {
     handle @bot_oauth_metadata {
         reverse_proxy 127.0.0.1:3001
     }
-    # WorkOS MCP server (src/mcp.ts): OAuth discovery for https://craftos.app/api/mcp.
+    # WorkOS MCP server (src/mcp.ts): OAuth discovery for <APP_PUBLIC_URL>/api/mcp (https://erp.1laser.com/api/mcp).
     @mcp_oauth_metadata path /.well-known/oauth-protected-resource/api/mcp /.well-known/oauth-authorization-server/api/mcp/oauth /.well-known/openid-configuration/api/mcp/oauth
     handle @mcp_oauth_metadata {
         reverse_proxy 127.0.0.1:3001
