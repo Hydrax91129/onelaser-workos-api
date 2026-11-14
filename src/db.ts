@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS sessions (
  token_hash text PRIMARY KEY, user_id text NOT NULL REFERENCES users(id), expires_at timestamptz NOT NULL
 );
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS csrf_token text;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();
 CREATE TABLE IF NOT EXISTS departments (
  org_id text NOT NULL, id text NOT NULL, external_id text NOT NULL, name text NOT NULL,
  PRIMARY KEY(org_id,id)
