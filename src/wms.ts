@@ -64,7 +64,7 @@ const returnSkuDenied = (skus: string[]) => deny(400, 'WMS_RETURN_SKU', `Returne
   `REF- 开头的退货 SKU 在“退货维修”里管理，不进常规库存：${skus.slice(0, 10).join('、')}`);
 const LOC_IDS = LOCATIONS.map(l => l.id) as [string, ...string[]];
 
-export const ERP_GRANTS = ['products_secret', 'products_manage', 'product_cost_detail', 'pricing_edit', 'products_import', 'supply', 'supply_manage', 'warehouse', 'warehouse_manage', 'warehouse_approve', 'returns', 'returns_manage', 'dealers', 'dealers_manage'] as const;
+export const ERP_GRANTS = ['products_secret', 'products_manage', 'product_cost_detail', 'pricing_edit', 'products_import', 'supply', 'supply_manage', 'warehouse', 'warehouse_manage', 'warehouse_approve', 'returns', 'returns_manage', 'dealers', 'dealers_manage', 'orders', 'orders_manage'] as const;
 const AREAS: Record<string, Record<string, string[]>> = {
   /** 产品资料 (owner's levels, 2026-11-12): 无 / 查看普通信息 / 查看保密信息 (suppliers, landed cost, files…) / 管理信息 (edit everything). */
   products: { none: [], view: ['products'], secret: ['products', 'products_secret'], manage: ['products', 'products_secret', 'products_manage'] },
@@ -77,6 +77,8 @@ const AREAS: Record<string, Record<string, string[]>> = {
   /** 退货维修 has its own access (set on the returns page); until 2026-11 it followed warehouse access, see migrateReturnsAccess. */
   returns: { none: [], view: ['returns'], manage: ['returns', 'returns_manage'] },
   dealers: { none: [], view: ['dealers'], manage: ['dealers', 'dealers_manage'] },
+  /** 订单履约 (owner, 2026-11-16): 查看 = see orders and customer contact details; 管理 = record payments and fulfillment steps. Releasing an unpaid order stays main-admin only. */
+  orders: { none: [], view: ['orders'], manage: ['orders', 'orders_manage'] },
 };
 const areaGrants = (area: string) => [...new Set(Object.values(AREAS[area]).flat())];
 const levelOf = (grants: string[], area: string) => {
@@ -650,7 +652,7 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     };
   });
 
-  const accessInput = z.object({ userId: uid, area: z.enum(['products', 'pricing', 'supply', 'warehouse', 'returns', 'dealers']), level: z.string().min(1).max(20) }).strict();
+  const accessInput = z.object({ userId: uid, area: z.enum(['products', 'pricing', 'supply', 'warehouse', 'returns', 'dealers', 'orders']), level: z.string().min(1).max(20) }).strict();
   app.post('/erp/access', async req => {
     const u = actorOf(req), v = accessInput.parse(req.body), admin = o.isAdmin(u);
     if (!(v.level in AREAS[v.area])) deny(400, 'INVALID_ACCESS_LEVEL', 'Choose a valid access level');

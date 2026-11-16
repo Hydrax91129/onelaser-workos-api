@@ -186,6 +186,53 @@ const app = await buildApp({
   }
 }
 
+// Sample orders for 订单履约 (fictional customers, addresses and tracking numbers), one or more in every stage.
+{
+  await db.query(`UPDATE users SET grants=grants || '["orders","orders_manage"]'::jsonb WHERE id IN ('m4','m6')`);
+  await db.query(`UPDATE users SET grants=grants || '["orders"]'::jsonb WHERE id IN ('m5')`);
+  await db.query(`INSERT INTO ful_settings(org_id,pay_owner,ship_owner,call_owner,train_owner) VALUES($1,'m4','m6','m4','m5') ON CONFLICT DO NOTHING`, [ORG]);
+  const t = (h: number) => h == null ? null : new Date(Date.now() - h * 3600_000).toISOString(), d = (days: number) => new Date(Date.now() + days * 864e5).toISOString().slice(0, 10);
+  type Row = { n: string; kind?: string; ch?: string; who: string; city: string; st: string; sku: string; name: string; qty?: number; total: number; paid?: number; ship?: string;
+    placed: number; paidAt?: number | null; shipped?: number; carrier?: string; pro?: string; eta?: string; terminal?: number; appt?: string; delivered?: number; damage?: string;
+    first?: number; invited?: number; platform?: string; reviewed?: number; rating?: number; note?: string; release?: string; content?: string; tags?: string[] };
+  const H9 = ['DEMO-H7-PRO', 'Demo H7 Pro'], F2 = ['DEMO-F2-100W', 'Demo F2 100W CO2 Laser'], F60 = ['DEMO-F2-60W', 'Demo F2 60W CO2 Laser'], LENS = ['DEMO-LENS-2', 'Demo Focus Lens 2"'];
+  const rows: Row[] = [
+    { n: '#5101', who: 'Sample Buyer A', city: 'Austin', st: 'TX', sku: H9[0], name: H9[1], total: 11999, paid: 4000, placed: 30 },
+    { n: '#5102', ch: 'offline', who: 'Demo Sign Shop', city: 'Reno', st: 'NV', sku: F2[0], name: F2[1], total: 6999, paid: 0, placed: 100 },
+    { n: '#5103', who: 'Sample Buyer B', city: 'Denver', st: 'CO', sku: F60[0], name: F60[1], total: 4999, placed: 70, paidAt: 66 },
+    { n: '#5104', who: 'Sample Buyer C', city: 'Tampa', st: 'FL', sku: F2[0], name: F2[1], total: 6999, placed: 30, paidAt: 20 },
+    { n: '#5105', who: 'Sample Buyer D', city: 'Portland', st: 'OR', sku: LENS[0], name: LENS[1], qty: 2, total: 98, ship: 'parcel', placed: 30, paidAt: 29 },
+    { n: '#5106', who: 'Sample Buyer E', city: 'Columbus', st: 'OH', sku: H9[0], name: H9[1], total: 11999, placed: 150, paidAt: 148, shipped: 120, carrier: 'Demo Freight', pro: 'PRO-DEMO-1106', eta: d(3) },
+    { n: '#5107', who: 'Sample Buyer F', city: 'Raleigh', st: 'NC', sku: F2[0], name: F2[1], total: 6999, placed: 300, paidAt: 298, shipped: 260, carrier: 'Demo LTL Lines', pro: 'PRO-DEMO-1107', eta: d(-3) },
+    { n: '#5108', who: 'Sample Buyer G', city: 'Phoenix', st: 'AZ', sku: F60[0], name: F60[1], total: 4999, placed: 280, paidAt: 278, shipped: 240, carrier: 'Demo Freight', pro: 'PRO-DEMO-1108', terminal: 100 },
+    { n: '#5109', who: 'Sample Buyer H', city: 'Boise', st: 'ID', sku: F2[0], name: F2[1], total: 6999, placed: 320, paidAt: 318, shipped: 280, carrier: 'Demo Freight', pro: 'PRO-DEMO-1109', terminal: 30, appt: d(1) },
+    { n: '#5110', who: 'Sample Buyer I', city: 'Omaha', st: 'NE', sku: H9[0], name: H9[1], total: 11999, placed: 500, paidAt: 498, shipped: 450, carrier: 'Demo LTL Lines', pro: 'PRO-DEMO-1110', terminal: 220, appt: d(-6), delivered: 170 },
+    { n: '#5111', who: 'Sample Buyer J', city: 'Fresno', st: 'CA', sku: F60[0], name: F60[1], total: 4999, placed: 400, paidAt: 398, shipped: 350, carrier: 'Demo Freight', pro: 'PRO-DEMO-1111', terminal: 150, appt: d(-4), delivered: 80, damage: 'damaged' },
+    { n: '#5112', who: 'Sample Buyer K', city: 'Madison', st: 'WI', sku: F2[0], name: F2[1], total: 6999, placed: 420, paidAt: 418, shipped: 380, carrier: 'Demo Freight', pro: 'PRO-DEMO-1112', terminal: 200, appt: d(-6), delivered: 140, first: 30 },
+    { n: '#5113', who: 'Sample Buyer L', city: 'Tulsa', st: 'OK', sku: H9[0], name: H9[1], total: 11999, placed: 900, paidAt: 898, shipped: 850, carrier: 'Demo LTL Lines', pro: 'PRO-DEMO-1113', terminal: 700, appt: d(-27), delivered: 640, first: 500, invited: 470, platform: 'trustpilot', reviewed: 440, rating: 5 },
+    { n: '#D-2201', kind: 'dealer', ch: 'offline', who: 'Demo Laser Supply LLC', city: 'Dallas', st: 'TX', sku: F2[0], name: F2[1], qty: 4, total: 23996, paid: 12000, placed: 50, tags: ['dealer'] },
+    { n: '#D-2202', kind: 'dealer', ch: 'offline', who: 'Example Engraving Distributors', city: 'Atlanta', st: 'GA', sku: F60[0], name: F60[1], qty: 3, total: 13497, placed: 200, paidAt: 190, shipped: 150, carrier: 'Demo Freight', pro: 'PRO-DEMO-2202', eta: d(2), tags: ['dealer'] },
+    { n: '#K-301', kind: 'kol', ch: 'offline', who: 'Demo Maker Channel', city: 'Nashville', st: 'TN', sku: H9[0], name: H9[1], total: 0, placed: 20, tags: ['kol'] },
+    { n: '#K-302', kind: 'kol', ch: 'offline', who: 'Sample Woodcraft Creator', city: 'Seattle', st: 'WA', sku: F2[0], name: F2[1], total: 0, placed: 400, release: 'KOL agreement signed (sample)', shipped: 350, carrier: 'Demo Freight', pro: 'PRO-DEMO-K302', terminal: 200, appt: d(-6), delivered: 150, first: 60, tags: ['kol'] },
+    { n: '#5114', who: 'Sample Buyer M', city: 'Albany', st: 'NY', sku: LENS[0], name: LENS[1], total: 0, ship: 'parcel', placed: 10 },
+  ];
+  for (const r of rows) {
+    const total = Math.round(r.total * 100), paid = r.paid != null ? Math.round(r.paid * 100) : total, id = randomUUID();
+    const note = r.kind ? '' : (total === 0 ? 'zero_untagged' : '');
+    await db.query(`INSERT INTO ful_orders(id,org_id,source,shopify_id,number,kind,kind_note,channel,placed_at,customer_name,customer_email,customer_phone,ship_city,ship_state,ship_zip,
+      total_cents,paid_cents,lines,tags,shipment,liftgate,residential,paid_at,release,shipped_at,carrier,tracking,eta,track_at,terminal_at,appointment_on,delivered_at,damage,
+      first_piece_at,review_invited_at,review_platform,reviewed_at,review_rating,content_url)
+      VALUES($1,$2,'shopify',$3,$4,$5,$6,$7,$8,$9,$10,'+1 555 010 0000',$11,$12,'00000',$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$22,$26,$27,$28,$29,$30,$31,$32,$33,$34,'')`,
+      [id, ORG, 'gid://demo/Order/' + r.n, r.n, r.kind || (total === 0 ? 'kol' : 'retail'), note, r.ch || 'online', t(r.placed), r.who, 'buyer@example.test', r.city, r.st, total, paid,
+        JSON.stringify([{ sku: r.sku, name: r.name, qty: r.qty || 1 }]), JSON.stringify(r.tags || []), r.ship || 'ltl', !r.ship, r.kind !== 'dealer' && !r.ship,
+        r.paidAt != null ? t(r.paidAt) : (total > 0 && paid >= total ? t(r.placed) : null), r.release ? JSON.stringify({ by: 'm1', at: t(r.placed - 2), reason: r.release, payBy: null }) : null,
+        r.shipped != null ? t(r.shipped) : null, r.carrier || '', r.pro || '', r.eta || null, r.terminal != null ? t(r.terminal) : null, r.appt || null,
+        r.delivered != null ? t(r.delivered) : null, r.damage || (r.delivered != null ? 'none' : ''), r.first != null ? t(r.first) : null, r.invited != null ? t(r.invited) : null,
+        r.platform || '', r.reviewed != null ? t(r.reviewed) : null, r.rating ?? null]);
+    await db.query("INSERT INTO ful_events(id,org_id,order_id,actor_id,kind,details,created_at) VALUES($1,$2,$3,NULL,'imported',$4,$5)", [randomUUID(), ORG, id, JSON.stringify({ number: r.n }), t(r.placed)]);
+  }
+}
+
 // Example shelf bins in the US LA warehouse (fictional).
 {
   const token = (await issueSession(db, 'm1')).accessToken;
