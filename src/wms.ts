@@ -16,6 +16,7 @@
  *
  * No product or stock data lives in this repository: SKUs and opening balances are
  * imported at runtime by an admin. */
+import { reservedStock } from './fulfillment.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
@@ -130,7 +131,7 @@ const changeStock = async (tx: Queryable, org: string, s: string, loc: string, d
 /** Stock movements for other modules (SCM shipments): goods in, or a transfer between warehouses, many SKUs, in the
  *  caller's transaction, logged like the warehouse's own batch. WMS stays the only writer of stock. Returns the lines
  *  with the stored SKU spelling. */
-export async function wmsMoveLines(tx: Queryable, u: User, v: { type: 'in' | 'transfer'; from: string; to: string; lines: { sku: string; qty: number; slot?: number }[]; reason: string; reference?: string; opDate: string }) {
+export async function wmsMoveLines(tx: Queryable, u: User, v: { type: 'in' | 'transfer' | 'out'; from: string; to: string; lines: { sku: string; qty: number; slot?: number }[]; reason: string; reference?: string; opDate: string }) {
   const ref = v.lines.map(l => l.sku).filter(isReturnSku); if (ref.length) returnSkuDenied(ref);
   const merged = new Map<string, number>(), slots = new Map<string, number>();
   for (const l of v.lines) { merged.set(l.sku.toLowerCase(), (merged.get(l.sku.toLowerCase()) || 0) + l.qty); if (l.slot) slots.set(l.sku.toLowerCase(), l.slot); }
@@ -143,9 +144,10 @@ export async function wmsMoveLines(tx: Queryable, u: User, v: { type: 'in' | 'tr
     const s = known.get(k)!;
     const into = slots.has(k) ? { slot: slots.get(k) } : {};
     if (v.type === 'in') await changeStock(tx, u.org_id, s, v.to, qty, into);
+    else if (v.type === 'out') await changeStock(tx, u.org_id, s, v.from, -qty);
     else { await changeStock(tx, u.org_id, s, v.from, -qty); await changeStock(tx, u.org_id, s, v.to, qty, into); }
     await tx.query(`INSERT INTO wms_movements(id,org_id,type,sku,location,to_location,qty,reason,reference,status,created_by,op_date) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'done',$10,$11)`,
-      [randomUUID(), u.org_id, v.type, s, v.type === 'in' ? v.to : v.from, v.type === 'transfer' ? v.to : null, qty, v.reason.slice(0, 200), v.reference || null, u.id, v.opDate]);
+      [randomUUID(), u.org_id, v.type, s, v.type === 'in' ? v.to : v.from, v.type === 'transfer' ? v.to : null, v.type === 'out' ? -qty : qty, v.reason.slice(0, 200), v.reference || null, u.id, v.opDate]);
     out.push({ sku: s, qty });
   }
   return out;
@@ -191,7 +193,7 @@ const checkOpDate = (d: string) => {
   if (d < '2000-01-01' || d > max || Number.isNaN(Date.parse(d + 'T00:00:00Z'))) deny(400, 'WMS_OP_DATE', 'Check the operation date', '操作日期不对，请检查（不能早于 2000 年，也不能是未来的日期）。');
 };
 /** How a movement was made, for the log: opening import, dealer shipment, several SKUs in one go, or one by hand. */
-const methodOf = (m: any, n: number) => m.reference === 'IMPORT' ? 'import' : /^Dealer order /.test(m.reason || '') ? 'dealer' : n > 1 ? 'batch' : 'manual';
+const methodOf = (m: any, n: number) => m.reference === 'IMPORT' ? 'import' : /^Dealer order /.test(m.reason || '') ? 'dealer' : /^订单出货 /.test(m.reason || '') ? 'order' : n > 1 ? 'batch' : 'manual';
 const sku = z.string().trim().min(1).max(80).regex(/^[A-Za-z0-9][A-Za-z0-9._\-/ ]*$/, 'Use letters, digits, dot, dash, slash or underscore in the SKU');
 const uid = z.string().min(1).max(100);
 const nameOf = (u: any) => u ? (u.display_name || u.name_zh || u.name_en || u.id) : '';
@@ -283,6 +285,8 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
       ORDER BY sku`, [u.org_id])).rows;
     const locIds = LOCATIONS.map(l => l.id);
     const stock = (await db.query('SELECT sku,location,qty FROM wms_stock WHERE org_id=$1', [u.org_id])).rows.filter((r: any) => locIds.includes(r.location));
+    // Held by open orders (fulfillment.ts reservedStock): available = on hand − held.
+    const held = await reservedStock(db, u.org_id);
     const qty = new Map<string, Record<string, number>>();
     for (const r of stock) { if (!qty.has(r.sku)) qty.set(r.sku, {}); qty.get(r.sku)![r.location] = Number(r.qty); }
     const moves = (await db.query(`SELECT * FROM wms_movements WHERE org_id=$1 AND ${notReturns()} AND location<>'refurb' ORDER BY created_at DESC, id DESC LIMIT 500`, [u.org_id])).rows;
@@ -317,7 +321,7 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
       items: items.map((it: any) => { const f: any = facts.get(it.sku.toLowerCase()) || {};
         return { ...it, qty: qty.get(it.sku) || {}, family: f.family || '', series: f.series || '', msrp: f.msrp == null ? null : Number(f.msrp),
           nameZh: f.name_zh || '', nameEn: f.name_en || '', brand: f.brand || '', status: f.status || '', dropship: f.supply_mode === 'dropship', imageId: images.get(it.sku.toLowerCase()) || null,
-          bins: bins.get(it.sku.toLowerCase()) || {}, binQty: binQty.get(it.sku.toLowerCase()) || {} }; }),
+          reserved: held.get(it.sku.toLowerCase()) || {}, bins: bins.get(it.sku.toLowerCase()) || {}, binQty: binQty.get(it.sku.toLowerCase()) || {} }; }),
       movements,
       canOperate: level === 'manage', canApprove: movements.some(m => m.canDecide), canAssign: o.isAdmin(u) || (u as any).role === 'manager',
       canImport: o.isAdmin(u), lastImport: lastImport ? { asOf: lastImport.as_of, at: lastImport.created_at } : null,

@@ -237,6 +237,8 @@ const app = await buildApp({
   }
   // Shipped orders went out of the US LA warehouse; one dealer order straight from the Dongguan factory.
   await db.query("UPDATE ful_orders SET ship_from='us' WHERE org_id=$1 AND shipped_at IS NOT NULL", [ORG]);
+  // Shipped sample orders already left WMS stock; the open ones hold stock (on hand vs available).
+  await db.query(`UPDATE ful_orders SET wms_out_at=shipped_at, wms_out='{"mode":"before"}'::jsonb WHERE org_id=$1 AND shipped_at IS NOT NULL`, [ORG]);
   await db.query("UPDATE ful_orders SET ship_from='dg' WHERE org_id=$1 AND number='#D-2202'", [ORG]);
   // Cancelled + refunded, partly refunded, an exchange, a Canadian address and a few notes (all fictional).
   await db.query("UPDATE ful_orders SET ship_country='CA' WHERE org_id=$1 AND number='#5115'", [ORG]);
