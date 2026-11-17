@@ -161,3 +161,31 @@ test('orders: cancel with a reason, refunds (manual orders here, Shopify orders 
     assert.equal((await step({ step: 'ship', shipFrom: 'us', carrier: 'X', tracking: 'Y' })).json().error.code, 'ORDER_CANCELLED');
   } finally { /* in-memory database */ }
 });
+
+test('on hand vs available: open orders hold stock; pickup takes it out of WMS (or not, when the warehouse already did)', async () => {
+  const { db, call } = await setup();
+  try {
+    const org = (await db.query("SELECT org_id FROM users WHERE id='m1'")).rows[0].org_id as string;
+    await db.query("INSERT INTO product_catalog(org_id,sku,name_zh,name_en) VALUES($1,'DEMO-HOLD-1','示例','Demo') ON CONFLICT DO NOTHING", [org]);
+    const sku = (await db.query("SELECT sku FROM product_catalog WHERE org_id=$1 AND sku='DEMO-HOLD-1'", [org])).rows[0].sku as string;
+    await db.query("UPDATE product_catalog SET attrs = attrs - 'supplyMode' WHERE org_id=$2 AND sku=$1", [sku, org]);
+    await db.query("INSERT INTO wms_stock(org_id,sku,location,qty) VALUES($2,$1,'us',10) ON CONFLICT(org_id,sku,location) DO UPDATE SET qty=10", [sku, org]);
+    const make = async (n: string) => (await call('m4', 'POST', '/orders', order({ number: n, paid: 5999, lines: [{ sku, name: 'Demo', qty: 2 }, { sku: 'NOT-IN-LIBRARY', name: 'Gift card', qty: 1 }] }))).json().id;
+    const a = await make('DEMO-3001'), b = await make('DEMO-3002');
+    const held = async () => (await call('m1', 'GET', '/wms/summary')).json().items.find((i: any) => i.sku === sku);
+    let it = await held(); assert.deepEqual([it.qty.us, it.reserved.us], [10, 4], 'two open orders hold 4; on hand unchanged');
+    assert.equal((await call('m3', 'GET', `/orders/${a}`)).json().stock.find((x: any) => x.sku === sku).reserved.us, 4);
+    assert.equal((await call('m4', 'POST', `/orders/${a}/step`, { step: 'ship', shipFrom: 'us', carrier: 'Demo Freight', tracking: 'PRO-1' })).statusCode, 200);
+    it = await held(); assert.deepEqual([it.qty.us, it.reserved.us], [8, 2], 'picked up: out of WMS, no longer held');
+    const mv = (await db.query("SELECT type, qty, reason FROM wms_movements WHERE org_id=$2 AND sku=$1", [sku, org])).rows;
+    assert.deepEqual(mv.map((m: any) => [m.type, Number(m.qty), m.reason]), [['out', -2, '订单出货 DEMO-3001']], 'the gift card line without a library SKU is skipped');
+    assert.equal((await call('m4', 'POST', `/orders/${b}/step`, { step: 'ship', shipFrom: 'us', wmsOut: false, carrier: 'Demo Freight', tracking: 'PRO-2' })).statusCode, 200);
+    it = await held(); assert.deepEqual([it.qty.us, it.reserved.us ?? 0], [8, 0], 'already taken out by hand: only the hold ends');
+    assert.equal((await call('m4', 'POST', `/orders/${b}/step`, { step: 'wms_out', shipFrom: 'us' })).json().error.code, 'ORDER_WMS_ALREADY_OUT');
+    const c = await make('DEMO-3003'); await call('m4', 'POST', `/orders/${c}/step`, { step: 'cancel', reason: 'Customer changed their mind' });
+    it = await held(); assert.equal(it.reserved.us ?? 0, 0, 'a cancelled order holds nothing');
+    await db.query("UPDATE wms_stock SET qty=1 WHERE org_id=$2 AND sku=$1 AND location='us'", [sku, org]);
+    const d = await make('DEMO-3004');
+    assert.equal((await call('m4', 'POST', `/orders/${d}/step`, { step: 'ship', shipFrom: 'us', carrier: 'X', tracking: 'Y' })).json().error.code, 'WMS_NEGATIVE_STOCK', 'cannot ship more than is on hand');
+  } finally { /* in-memory database */ }
+});

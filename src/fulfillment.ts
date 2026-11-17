@@ -18,6 +18,7 @@ import type { User } from './auth.js';
 import { deny } from './errors.js';
 import type { ShopifyOptions } from './shopify.js';
 import { SHOPIFY_API_VERSION } from './shopify.js';
+import { wmsMoveLines, isReturnSku } from './wms.js';
 
 /** Where an order ships from: a WMS warehouse (wms.ts LOCATIONS, without "in transit"). */
 export const SHIP_FROM = ['us', 'dg', 'jn'] as const;
@@ -42,6 +43,8 @@ ALTER TABLE ful_orders ADD COLUMN IF NOT EXISTS refunded_cents bigint NOT NULL D
 ALTER TABLE ful_orders ADD COLUMN IF NOT EXISTS refund_note text NOT NULL DEFAULT '';
 ALTER TABLE ful_orders ADD COLUMN IF NOT EXISTS exchange jsonb;
 ALTER TABLE ful_orders ADD COLUMN IF NOT EXISTS note jsonb;
+ALTER TABLE ful_orders ADD COLUMN IF NOT EXISTS wms_out_at timestamptz;
+ALTER TABLE ful_orders ADD COLUMN IF NOT EXISTS wms_out jsonb;
 CREATE TABLE IF NOT EXISTS ful_events(id text PRIMARY KEY, org_id text NOT NULL, order_id text NOT NULL REFERENCES ful_orders(id) ON DELETE CASCADE,
   actor_id text, kind text NOT NULL, details jsonb NOT NULL DEFAULT '{}', created_at timestamptz NOT NULL DEFAULT now());
 CREATE INDEX IF NOT EXISTS ful_events_order ON ful_events(order_id, created_at);
@@ -94,11 +97,30 @@ export function stageOf(o: any, s: Settings, now: number) {
   return due('done', null, null);
 }
 
+/** SKU quantities an open order still holds in each warehouse: not cancelled and not yet out of WMS stock. The warehouse
+ *  defaults to the US LA warehouse until someone picks another. Read by WMS for available stock. */
+export async function reservedStock(db: Queryable, org: string) {
+  const out = new Map<string, Record<string, number>>();
+  const rows = (await db.query("SELECT ship_from, lines FROM ful_orders WHERE org_id=$1 AND cancelled_at IS NULL AND wms_out_at IS NULL", [org])).rows;
+  for (const r of rows as any[]) for (const l of (r.lines || [])) {
+    const k = String(l.sku || '').trim().toLowerCase(), q = Math.max(0, Math.trunc(Number(l.qty) || 0)); if (!k || !q || isReturnSku(k)) continue;
+    const loc = r.ship_from || 'us'; if (!out.has(k)) out.set(k, {}); out.get(k)![loc] = (out.get(k)![loc] || 0) + q;
+  }
+  return out;
+}
+/** The order lines WMS can move: SKUs in the product library that are stocked (not dropship, not returns). */
+async function stockedLines(tx: Queryable, org: string, lines: any[]) {
+  const want = new Map<string, number>();
+  for (const l of lines) { const k = String(l.sku || '').trim(), q = Math.max(0, Math.trunc(Number(l.qty) || 0)); if (k && q && !isReturnSku(k)) want.set(k, (want.get(k) || 0) + q); }
+  if (!want.size) return [];
+  const ok = new Set(((await tx.query("SELECT lower(sku) k FROM product_catalog WHERE org_id=$1 AND lower(sku) = ANY($2::text[]) AND COALESCE(attrs->>'supplyMode','')<>'dropship'", [org, [...want.keys()].map(k => k.toLowerCase())])).rows as any[]).map(r => r.k));
+  return [...want].filter(([k]) => ok.has(k.toLowerCase())).map(([sku, qty]) => ({ sku, qty }));
+}
 const centsOf = (v: any) => { const n = Number(v); return Number.isFinite(n) ? Math.round(n * 100) : 0; };
 const iso = (v: any) => v ? new Date(v).toISOString() : null;
 const ymd = (v: any) => v ? (v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10)) : null;
 
-export async function registerFulfillmentRoutes(app: FastifyInstance, db: Database, o: { isAdmin: (u: User) => boolean; shopify?: ShopifyOptions; now?: () => number }) {
+export async function registerFulfillmentRoutes(app: FastifyInstance, db: Database, o: { isAdmin: (u: User) => boolean; shopify?: ShopifyOptions; now?: () => number; syncIntervalMs?: number }) {
   const now = o.now || Date.now;
   const actorOf = (req: FastifyRequest): User => req.actor || deny(401, 'UNAUTHENTICATED', 'Authentication is required');
   const grantsOf = (u: any): string[] => Array.isArray(u.grants) ? u.grants : [];
@@ -126,7 +148,7 @@ export async function registerFulfillmentRoutes(app: FastifyInstance, db: Databa
       shippedAt: iso(r.shipped_at), carrier: r.carrier, tracking: r.tracking, eta: ymd(r.eta), trackAt: iso(r.track_at), terminalAt: iso(r.terminal_at),
       appointmentOn: ymd(r.appointment_on), deliveredAt: iso(r.delivered_at), damage: r.damage, firstPieceAt: iso(r.first_piece_at),
       reviewInvitedAt: iso(r.review_invited_at), reviewPlatform: r.review_platform, reviewedAt: iso(r.reviewed_at), reviewRating: r.review_rating,
-      shipFrom: r.ship_from || '', cancelReason: r.cancel_reason || '',
+      shipFrom: r.ship_from || '', wmsOutAt: iso(r.wms_out_at), wmsOut: r.wms_out || null, cancelReason: r.cancel_reason || '',
       // Refunds (Shopify's refunded total, or recorded here for manual orders) and exchanges (the "exchange" tag in Shopify, or marked here).
       refundedCents: Number(r.refunded_cents || 0), refund: Number(r.refunded_cents || 0) <= 0 ? '' : Number(r.refunded_cents) >= Number(r.total_cents) ? 'full' : 'partial', refundNote: r.refund_note || '',
       exchange: r.exchange ? { ...r.exchange, byName: r.exchange.by ? people.get(r.exchange.by) || '' : '' } : (Array.isArray(r.tags) && r.tags.some((t: string) => /^exchange$/i.test(String(t).trim())) ? { reason: '', fromTag: true } : null),
@@ -153,6 +175,7 @@ export async function registerFulfillmentRoutes(app: FastifyInstance, db: Databa
       terminalNoAppt: open.filter(i => i.stage === 'delivery').length,
       damaged: items.filter(i => i.damage === 'damaged' && i.deliveredAt && Date.parse(i.deliveredAt) > now() - 30 * D).length,
       noFirstPiece: open.filter(i => i.stage === 'running' && i.late).length,
+      notOut: items.filter(i => i.shippedAt && !i.wmsOutAt && i.stage !== 'cancelled').length,
       lateTotal: open.filter(i => i.late).length, zeroUntagged: open.filter(i => i.kindNote === 'zero_untagged').length,
       // Weekly review, last 90 days: hours from paid to pickup, days from pickup to delivery and from delivery to first piece; review rate.
       payToShipHours: avg(recent.filter(i => i.shippedAt && (i.paidAt || i.release)).map(i => hours(i.paidAt || i.release.at, i.shippedAt))),
@@ -174,7 +197,9 @@ export async function registerFulfillmentRoutes(app: FastifyInstance, db: Databa
     // WMS stock of this order's SKUs in each warehouse, so whoever ships picks a warehouse that has it (read only: WMS owns stock).
     const skus: string[] = [...new Set<string>((r.lines || []).map((l: any) => String(l.sku || '')).filter(Boolean))];
     const stockRows = skus.length ? (await db.query('SELECT sku, location, qty FROM wms_stock WHERE org_id=$1 AND lower(sku) = ANY($2::text[])', [u.org_id, skus.map(x => x.toLowerCase())])).rows : [];
-    const stock = skus.map(sku => ({ sku, ...Object.fromEntries(SHIP_FROM.map(l => [l, Number((stockRows as any[]).find((x: any) => x.sku.toLowerCase() === sku.toLowerCase() && x.location === l)?.qty || 0)])) }));
+    const held = await reservedStock(db, u.org_id);
+    const stock = skus.map(sku => ({ sku, ...Object.fromEntries(SHIP_FROM.map(l => [l, Number((stockRows as any[]).find((x: any) => x.sku.toLowerCase() === sku.toLowerCase() && x.location === l)?.qty || 0)])),
+      reserved: Object.fromEntries(SHIP_FROM.map(l => [l, held.get(sku.toLowerCase())?.[l] || 0])) }));
     return { ...view(r, await settingsOf(u.org_id), people), events, stock };
   });
 
@@ -202,12 +227,21 @@ export async function registerFulfillmentRoutes(app: FastifyInstance, db: Databa
 
   /* ---------- one step at a time ---------- */
   const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use a date like 2026-11-16');
+  /* On-hand vs available (owner, 2026-11-17): an open order holds its stock (available = on hand − held) until the carrier picks
+   * it up; only then does it leave WMS stock, as an outbound movement "订单出货 <number>". Lines whose SKU is not stocked in WMS
+   * (not in the product library, dropship, returns) are skipped. wmsOut=false: the warehouse already recorded it by hand. */
+  async function takeOut(tx: Queryable, u: User, r: any, loc: string, wmsOut: boolean, at: string) {
+    if (!wmsOut) return { wms_out_at: at, wms_out: JSON.stringify({ mode: 'manual', by: u.id, at, loc }) };
+    const lines = await stockedLines(tx, u.org_id, r.lines || []);
+    if (lines.length) await wmsMoveLines(tx, u, { type: 'out', from: loc, to: loc, lines, reason: `订单出货 ${r.number}`, reference: String(r.number).slice(0, 80), opDate: at.slice(0, 10) });
+    return { wms_out_at: at, wms_out: JSON.stringify({ mode: 'auto', by: u.id, at, loc, lines }) };
+  }
   const stepInput = z.discriminatedUnion('step', [
     z.object({ step: z.literal('payment'), paid: z.number().min(0).max(10_000_000) }).strict(),
     z.object({ step: z.literal('release'), reason: z.string().trim().min(3).max(500), payBy: day.optional() }).strict(),
     z.object({ step: z.literal('kind'), kind: z.enum(KINDS) }).strict(),
     z.object({ step: z.literal('delivery_needs'), shipment: z.enum(['ltl', 'parcel']), liftgate: z.boolean(), residential: z.boolean(), shipFrom: z.enum(SHIP_FROM).optional() }).strict(),
-    z.object({ step: z.literal('ship'), shipFrom: z.enum(SHIP_FROM), carrier: z.string().trim().min(1).max(80), tracking: z.string().trim().min(1).max(80), eta: day.optional() }).strict(),
+    z.object({ step: z.literal('ship'), shipFrom: z.enum(SHIP_FROM), wmsOut: z.boolean().default(true), carrier: z.string().trim().min(1).max(80), tracking: z.string().trim().min(1).max(80), eta: day.optional() }).strict(),
     z.object({ step: z.literal('track'), eta: day.optional(), note: z.string().trim().max(500).default('') }).strict(),
     z.object({ step: z.literal('terminal') }).strict(),
     z.object({ step: z.literal('appointment'), on: day }).strict(),
@@ -216,6 +250,7 @@ export async function registerFulfillmentRoutes(app: FastifyInstance, db: Databa
     z.object({ step: z.literal('review_invited'), platform: z.enum(REVIEW_PLATFORMS) }).strict(),
     z.object({ step: z.literal('reviewed'), platform: z.enum(REVIEW_PLATFORMS), rating: z.number().int().min(1).max(5) }).strict(),
     z.object({ step: z.literal('content'), url: z.string().trim().url().max(500) }).strict(),
+    z.object({ step: z.literal('wms_out'), shipFrom: z.enum(SHIP_FROM), wmsOut: z.boolean().default(true) }).strict(),
     z.object({ step: z.literal('note'), text: z.string().trim().min(1).max(2000) }).strict(),
     z.object({ step: z.literal('cancel'), reason: z.string().trim().min(3).max(500) }).strict(),
     z.object({ step: z.literal('refund'), amount: z.number().positive().max(10_000_000), reason: z.string().trim().min(3).max(500) }).strict(),
@@ -247,7 +282,12 @@ export async function registerFulfillmentRoutes(app: FastifyInstance, db: Databa
           need(paidInFull || !!r.release, 'ORDER_NOT_PAID', 'Nothing ships before full payment: record the payment, or ask a main admin to release the order',
             r.kind === 'kol' ? 'KOL 订单要先由主管理员批准才能发货。' : '订单还没收全款，不能发货。请先记录收款，或请主管理员特批。');
           need(!r.shipped_at, 'ORDER_ALREADY_SHIPPED', 'This order has already shipped', '这张订单已经发货了。');
-          Object.assign(set, { shipped_at: at, ship_from: v.shipFrom, carrier: v.carrier, tracking: v.tracking, eta: v.eta || null, track_at: at }); break;
+          Object.assign(set, { shipped_at: at, ship_from: v.shipFrom, carrier: v.carrier, tracking: v.tracking, eta: v.eta || null, track_at: at });
+          Object.assign(set, await takeOut(tx, u, r, v.shipFrom, v.wmsOut, at)); break;
+        case 'wms_out':
+          need(!!r.shipped_at, 'ORDER_NOT_SHIPPED', 'This order has not shipped yet', '这张订单还没发货。');
+          need(!r.wms_out_at, 'ORDER_WMS_ALREADY_OUT', 'This order is already out of WMS stock', '这张订单已经从 WMS 出库了。');
+          set.ship_from = v.shipFrom; Object.assign(set, await takeOut(tx, u, r, v.shipFrom, v.wmsOut, at)); break;
         case 'track': need(!!r.shipped_at, 'ORDER_NOT_SHIPPED', 'This order has not shipped yet', '这张订单还没发货。'); set.track_at = at; if (v.eta) set.eta = v.eta; break;
         case 'terminal': need(!!r.shipped_at, 'ORDER_NOT_SHIPPED', 'This order has not shipped yet', '这张订单还没发货。'); set.terminal_at = at; set.track_at = at; break;
         case 'appointment': need(!!r.shipped_at, 'ORDER_NOT_SHIPPED', 'This order has not shipped yet', '这张订单还没发货。'); set.appointment_on = v.on; if (!r.terminal_at) set.terminal_at = at; break;
@@ -326,9 +366,7 @@ export async function registerFulfillmentRoutes(app: FastifyInstance, db: Databa
     ${withCustomer ? 'customer { displayName email phone } shippingAddress { name phone city provinceCode zip countryCodeV2 }' : ''}`;
   const protectedData = (j: any) => (j?.errors || []).some((e: any) => /access|protected|customer|denied/i.test(String(e?.message || '')));
 
-  app.post('/orders/sync', async req => {
-    const u = actorOf(req); requireManage(u);
-    if (!shopifyConfigured()) deny(503, 'SHOPIFY_NOT_CONFIGURED', 'Shopify is not connected here', '这里还没连接 Shopify。');
+  async function syncOrders(org: string) {
     const since = new Date(now() - 60 * D).toISOString().slice(0, 10);
     let withCustomer = true, after: string | null = null, pages = 0, seen = 0, created = 0, updated = 0;
     for (;;) {
@@ -344,17 +382,17 @@ export async function registerFulfillmentRoutes(app: FastifyInstance, db: Databa
         const tags: string[] = Array.isArray(n.tags) ? n.tags : [], k = kindOf(tags, total);
         const lines = (n.lineItems?.nodes || []).map((l: any) => ({ sku: String(l.sku || ''), name: String(l.name || '').slice(0, 200), qty: Number(l.quantity) || 0 }));
         const f = (n.fulfillments || []).find((x: any) => x?.trackingInfo?.[0]?.number);
-        const old = (await db.query('SELECT * FROM ful_orders WHERE org_id=$1 AND shopify_id=$2', [u.org_id, n.id])).rows[0];
+        const old = (await db.query('SELECT * FROM ful_orders WHERE org_id=$1 AND shopify_id=$2', [org, n.id])).rows[0];
         const c = n.customer || {}, a = n.shippingAddress || {};
         if (!old) {
           const id = randomUUID(); created++;
           await db.query(`INSERT INTO ful_orders(id,org_id,source,shopify_id,number,kind,kind_note,channel,placed_at,customer_name,customer_email,customer_phone,ship_city,ship_state,
-            ship_zip,ship_country,total_cents,paid_cents,lines,tags,paid_at,cancelled_at,shipped_at,carrier,tracking,track_at,refunded_cents,cancel_reason)
-            VALUES($1,$2,'shopify',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$22,$25,$26)`,
-            [id, u.org_id, n.id, n.name, k.kind, k.note, ['shopify_draft_order', 'pos'].includes(n.sourceName) ? 'offline' : k.channel, n.createdAt, c.displayName || a.name || '', c.email || '',
+            ship_zip,ship_country,total_cents,paid_cents,lines,tags,paid_at,cancelled_at,shipped_at,carrier,tracking,track_at,refunded_cents,cancel_reason,wms_out_at,wms_out)
+            VALUES($1,$2,'shopify',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$22,$25,$26,$22,CASE WHEN $22::timestamptz IS NULL THEN NULL ELSE '{"mode":"before"}'::jsonb END)`,
+            [id, org, n.id, n.name, k.kind, k.note, ['shopify_draft_order', 'pos'].includes(n.sourceName) ? 'offline' : k.channel, n.createdAt, c.displayName || a.name || '', c.email || '',
               c.phone || a.phone || '', a.city || '', a.provinceCode || '', a.zip || '', a.countryCodeV2 || 'US', total, paid, JSON.stringify(lines), JSON.stringify(tags),
               total > 0 && paid >= total ? n.createdAt : null, n.cancelledAt || null, f?.createdAt || null, f?.trackingInfo?.[0]?.company || '', f?.trackingInfo?.[0]?.number || '', refunded, cancelReason]);
-          await event(db, null, id, u.org_id, 'imported', { number: n.name });
+          await event(db, null, id, org, 'imported', { number: n.name });
         } else {
           updated++;
           // Shopify owns totals, payment, tags, lines and cancellation; people own the fulfillment steps. Tracking fills in only when empty.
@@ -362,7 +400,7 @@ export async function registerFulfillmentRoutes(app: FastifyInstance, db: Databa
             paid_at=CASE WHEN paid_at IS NULL AND $3::bigint>0 AND $4::bigint>=$3::bigint THEN now() ELSE paid_at END,
             customer_name=CASE WHEN $8::text<>'' THEN $8::text ELSE customer_name END, customer_email=CASE WHEN $9::text<>'' THEN $9::text ELSE customer_email END,
             shipped_at=COALESCE(shipped_at,$10::timestamptz), carrier=CASE WHEN carrier='' THEN $11::text ELSE carrier END, tracking=CASE WHEN tracking='' THEN $12::text ELSE tracking END, refunded_cents=$13::bigint, cancel_reason=CASE WHEN cancel_reason='' THEN $14::text ELSE cancel_reason END, updated_at=now()
-            WHERE id=$1 AND org_id=$2`, [old.id, u.org_id, total, paid, JSON.stringify(tags), JSON.stringify(lines), n.cancelledAt || null, c.displayName || a.name || '', c.email || '',
+            WHERE id=$1 AND org_id=$2`, [old.id, org, total, paid, JSON.stringify(tags), JSON.stringify(lines), n.cancelledAt || null, c.displayName || a.name || '', c.email || '',
             f?.createdAt || null, f?.trackingInfo?.[0]?.company || '', f?.trackingInfo?.[0]?.number || '', refunded, cancelReason]);
         }
       }
@@ -370,7 +408,22 @@ export async function registerFulfillmentRoutes(app: FastifyInstance, db: Databa
       if (!after || ++pages >= 40) break;
     }
     return { since, seen, created, updated, customerDetails: withCustomer };
+  }
+  app.post('/orders/sync', async req => {
+    const u = actorOf(req); requireManage(u);
+    if (!shopifyConfigured()) deny(503, 'SHOPIFY_NOT_CONFIGURED', 'Shopify is not connected here', '这里还没连接 Shopify。');
+    return syncOrders(u.org_id);
   });
+  // New Shopify orders come in on their own (owner, 2026-11-17), so they hold stock right away. Runs for organizations that
+  // have synced once by hand.
+  if (o.syncIntervalMs && shopifyConfigured()) {
+    let running = false;
+    const tick = async () => { if (running) return; running = true;
+      try { for (const r of (await db.query('SELECT DISTINCT org_id FROM ful_orders WHERE shopify_id IS NOT NULL')).rows) await syncOrders(r.org_id).catch(() => undefined); }
+      finally { running = false; } };
+    const timer = setInterval(() => { tick().catch(() => undefined); }, o.syncIntervalMs); timer.unref?.();
+    app.addHook('onClose', async () => clearInterval(timer));
+  }
 
   app.get('/orders/shopify-check', async req => {
     const u = actorOf(req);
