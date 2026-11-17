@@ -19,6 +19,9 @@ import { deny } from './errors.js';
 import type { ShopifyOptions } from './shopify.js';
 import { SHOPIFY_API_VERSION } from './shopify.js';
 
+/** Where an order ships from: a WMS warehouse (wms.ts LOCATIONS, without "in transit"). */
+export const SHIP_FROM = ['us', 'dg', 'jn'] as const;
+
 export const fulfillmentSchema = `
 CREATE TABLE IF NOT EXISTS ful_orders(
   id text PRIMARY KEY, org_id text NOT NULL, source text NOT NULL DEFAULT 'manual', shopify_id text, number text NOT NULL,
@@ -33,6 +36,12 @@ CREATE TABLE IF NOT EXISTS ful_orders(
   content_url text NOT NULL DEFAULT '', cancelled_at timestamptz, updated_at timestamptz NOT NULL DEFAULT now(), created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(org_id, shopify_id));
 CREATE INDEX IF NOT EXISTS ful_orders_org ON ful_orders(org_id, placed_at DESC);
+ALTER TABLE ful_orders ADD COLUMN IF NOT EXISTS ship_from text NOT NULL DEFAULT '';
+ALTER TABLE ful_orders ADD COLUMN IF NOT EXISTS cancel_reason text NOT NULL DEFAULT '';
+ALTER TABLE ful_orders ADD COLUMN IF NOT EXISTS refunded_cents bigint NOT NULL DEFAULT 0;
+ALTER TABLE ful_orders ADD COLUMN IF NOT EXISTS refund_note text NOT NULL DEFAULT '';
+ALTER TABLE ful_orders ADD COLUMN IF NOT EXISTS exchange jsonb;
+ALTER TABLE ful_orders ADD COLUMN IF NOT EXISTS note jsonb;
 CREATE TABLE IF NOT EXISTS ful_events(id text PRIMARY KEY, org_id text NOT NULL, order_id text NOT NULL REFERENCES ful_orders(id) ON DELETE CASCADE,
   actor_id text, kind text NOT NULL, details jsonb NOT NULL DEFAULT '{}', created_at timestamptz NOT NULL DEFAULT now());
 CREATE INDEX IF NOT EXISTS ful_events_order ON ful_events(order_id, created_at);
@@ -117,6 +126,11 @@ export async function registerFulfillmentRoutes(app: FastifyInstance, db: Databa
       shippedAt: iso(r.shipped_at), carrier: r.carrier, tracking: r.tracking, eta: ymd(r.eta), trackAt: iso(r.track_at), terminalAt: iso(r.terminal_at),
       appointmentOn: ymd(r.appointment_on), deliveredAt: iso(r.delivered_at), damage: r.damage, firstPieceAt: iso(r.first_piece_at),
       reviewInvitedAt: iso(r.review_invited_at), reviewPlatform: r.review_platform, reviewedAt: iso(r.reviewed_at), reviewRating: r.review_rating,
+      shipFrom: r.ship_from || '', cancelReason: r.cancel_reason || '',
+      // Refunds (Shopify's refunded total, or recorded here for manual orders) and exchanges (the "exchange" tag in Shopify, or marked here).
+      refundedCents: Number(r.refunded_cents || 0), refund: Number(r.refunded_cents || 0) <= 0 ? '' : Number(r.refunded_cents) >= Number(r.total_cents) ? 'full' : 'partial', refundNote: r.refund_note || '',
+      exchange: r.exchange ? { ...r.exchange, byName: r.exchange.by ? people.get(r.exchange.by) || '' : '' } : (Array.isArray(r.tags) && r.tags.some((t: string) => /^exchange$/i.test(String(t).trim())) ? { reason: '', fromTag: true } : null),
+      note: r.note ? { ...r.note, byName: r.note.by ? people.get(r.note.by) || '' : '' } : null,
       contentUrl: r.content_url, cancelledAt: iso(r.cancelled_at), updatedAt: iso(r.updated_at),
       stage: st.stage, due: st.due, late: st.late, owner: st.owner, ownerName: st.owner ? people.get(st.owner) || '' : '' };
   }
@@ -125,7 +139,7 @@ export async function registerFulfillmentRoutes(app: FastifyInstance, db: Databa
   app.get('/orders', async req => {
     const u = actorOf(req); requireView(u);
     const s = await settingsOf(u.org_id), people = await names(u.org_id);
-    const rows = (await db.query(`SELECT * FROM ful_orders WHERE org_id=$1 AND (cancelled_at IS NULL OR cancelled_at > now() - interval '30 days')
+    const rows = (await db.query(`SELECT * FROM ful_orders WHERE org_id=$1 AND (cancelled_at IS NULL OR cancelled_at > now() - interval '90 days')
       AND (delivered_at IS NULL OR delivered_at > now() - interval '120 days') ORDER BY placed_at DESC LIMIT 2000`, [u.org_id])).rows;
     const items = rows.map((r: any) => view(r, s, people));
     const open = items.filter(i => !['done', 'cancelled'].includes(i.stage));
@@ -157,7 +171,11 @@ export async function registerFulfillmentRoutes(app: FastifyInstance, db: Databa
     const people = await names(u.org_id);
     const events = (await db.query('SELECT * FROM ful_events WHERE order_id=$1 ORDER BY created_at DESC, id LIMIT 200', [r.id])).rows
       .map((e: any) => ({ id: e.id, kind: e.kind, details: e.details, at: iso(e.created_at), by: e.actor_id ? people.get(e.actor_id) || '' : 'Shopify' }));
-    return { ...view(r, await settingsOf(u.org_id), people), events };
+    // WMS stock of this order's SKUs in each warehouse, so whoever ships picks a warehouse that has it (read only: WMS owns stock).
+    const skus: string[] = [...new Set<string>((r.lines || []).map((l: any) => String(l.sku || '')).filter(Boolean))];
+    const stockRows = skus.length ? (await db.query('SELECT sku, location, qty FROM wms_stock WHERE org_id=$1 AND lower(sku) = ANY($2::text[])', [u.org_id, skus.map(x => x.toLowerCase())])).rows : [];
+    const stock = skus.map(sku => ({ sku, ...Object.fromEntries(SHIP_FROM.map(l => [l, Number((stockRows as any[]).find((x: any) => x.sku.toLowerCase() === sku.toLowerCase() && x.location === l)?.qty || 0)])) }));
+    return { ...view(r, await settingsOf(u.org_id), people), events, stock };
   });
 
   /* ---------- manual orders (phone, email, dealers before their own module exists) ---------- */
@@ -188,8 +206,8 @@ export async function registerFulfillmentRoutes(app: FastifyInstance, db: Databa
     z.object({ step: z.literal('payment'), paid: z.number().min(0).max(10_000_000) }).strict(),
     z.object({ step: z.literal('release'), reason: z.string().trim().min(3).max(500), payBy: day.optional() }).strict(),
     z.object({ step: z.literal('kind'), kind: z.enum(KINDS) }).strict(),
-    z.object({ step: z.literal('delivery_needs'), shipment: z.enum(['ltl', 'parcel']), liftgate: z.boolean(), residential: z.boolean() }).strict(),
-    z.object({ step: z.literal('ship'), carrier: z.string().trim().min(1).max(80), tracking: z.string().trim().min(1).max(80), eta: day.optional() }).strict(),
+    z.object({ step: z.literal('delivery_needs'), shipment: z.enum(['ltl', 'parcel']), liftgate: z.boolean(), residential: z.boolean(), shipFrom: z.enum(SHIP_FROM).optional() }).strict(),
+    z.object({ step: z.literal('ship'), shipFrom: z.enum(SHIP_FROM), carrier: z.string().trim().min(1).max(80), tracking: z.string().trim().min(1).max(80), eta: day.optional() }).strict(),
     z.object({ step: z.literal('track'), eta: day.optional(), note: z.string().trim().max(500).default('') }).strict(),
     z.object({ step: z.literal('terminal') }).strict(),
     z.object({ step: z.literal('appointment'), on: day }).strict(),
@@ -200,6 +218,8 @@ export async function registerFulfillmentRoutes(app: FastifyInstance, db: Databa
     z.object({ step: z.literal('content'), url: z.string().trim().url().max(500) }).strict(),
     z.object({ step: z.literal('note'), text: z.string().trim().min(1).max(2000) }).strict(),
     z.object({ step: z.literal('cancel'), reason: z.string().trim().min(3).max(500) }).strict(),
+    z.object({ step: z.literal('refund'), amount: z.number().positive().max(10_000_000), reason: z.string().trim().min(3).max(500) }).strict(),
+    z.object({ step: z.literal('exchange'), reason: z.string().trim().min(3).max(500), newOrder: z.string().trim().max(60).optional() }).strict(),
   ]);
   app.post<{ Params: { id: string } }>('/orders/:id/step', async req => {
     const u = actorOf(req), v = stepInput.parse(req.body);
@@ -208,7 +228,7 @@ export async function registerFulfillmentRoutes(app: FastifyInstance, db: Databa
     return db.transaction(async tx => {
       const r = (await tx.query('SELECT * FROM ful_orders WHERE id=$1 AND org_id=$2 FOR UPDATE', [req.params.id, u.org_id])).rows[0];
       if (!r) deny(404, 'ORDER_NOT_FOUND', 'Order not found', '找不到这张订单。');
-      if (r.cancelled_at && v.step !== 'note') deny(409, 'ORDER_CANCELLED', 'This order is cancelled', '这张订单已取消。');
+      if (r.cancelled_at && !['note', 'refund'].includes(v.step)) deny(409, 'ORDER_CANCELLED', 'This order is cancelled', '这张订单已取消。');
       const at = new Date(now()).toISOString(), set: Record<string, unknown> = {};
       const paidInFull = Number(r.total_cents) > 0 && Number(r.paid_cents) >= Number(r.total_cents);
       const need = (ok: boolean, code: string, en: string, zh: string) => { if (!ok) deny(409, code, en, zh); };
@@ -222,12 +242,12 @@ export async function registerFulfillmentRoutes(app: FastifyInstance, db: Databa
           need(!paidInFull && !r.release, 'ORDER_RELEASE_NOT_NEEDED', 'This order is already paid in full or released', '这张订单已经收全款或已经特批。');
           set.release = JSON.stringify({ by: u.id, at, reason: v.reason, payBy: v.payBy || null }); break;
         case 'kind': set.kind = v.kind; set.kind_note = ''; break;
-        case 'delivery_needs': Object.assign(set, { shipment: v.shipment, liftgate: v.liftgate, residential: v.residential }); break;
+        case 'delivery_needs': Object.assign(set, { shipment: v.shipment, liftgate: v.liftgate, residential: v.residential }); if (v.shipFrom) set.ship_from = v.shipFrom; break;
         case 'ship':
           need(paidInFull || !!r.release, 'ORDER_NOT_PAID', 'Nothing ships before full payment: record the payment, or ask a main admin to release the order',
             r.kind === 'kol' ? 'KOL 订单要先由主管理员批准才能发货。' : '订单还没收全款，不能发货。请先记录收款，或请主管理员特批。');
           need(!r.shipped_at, 'ORDER_ALREADY_SHIPPED', 'This order has already shipped', '这张订单已经发货了。');
-          Object.assign(set, { shipped_at: at, carrier: v.carrier, tracking: v.tracking, eta: v.eta || null, track_at: at }); break;
+          Object.assign(set, { shipped_at: at, ship_from: v.shipFrom, carrier: v.carrier, tracking: v.tracking, eta: v.eta || null, track_at: at }); break;
         case 'track': need(!!r.shipped_at, 'ORDER_NOT_SHIPPED', 'This order has not shipped yet', '这张订单还没发货。'); set.track_at = at; if (v.eta) set.eta = v.eta; break;
         case 'terminal': need(!!r.shipped_at, 'ORDER_NOT_SHIPPED', 'This order has not shipped yet', '这张订单还没发货。'); set.terminal_at = at; set.track_at = at; break;
         case 'appointment': need(!!r.shipped_at, 'ORDER_NOT_SHIPPED', 'This order has not shipped yet', '这张订单还没发货。'); set.appointment_on = v.on; if (!r.terminal_at) set.terminal_at = at; break;
@@ -237,8 +257,15 @@ export async function registerFulfillmentRoutes(app: FastifyInstance, db: Databa
           set.review_invited_at = r.review_invited_at || at; set.review_platform = v.platform; break;
         case 'reviewed': set.reviewed_at = at; set.review_platform = v.platform; set.review_rating = v.rating; if (!r.review_invited_at) set.review_invited_at = at; break;
         case 'content': need(r.kind === 'kol', 'ORDER_NOT_KOL', 'Content links are for KOL orders', '只有 KOL 订单需要填内容链接。'); set.content_url = v.url; break;
-        case 'cancel': set.cancelled_at = at; break;
-        case 'note': break;
+        case 'cancel': set.cancelled_at = at; set.cancel_reason = v.reason; break;
+        case 'refund': {
+          need(r.source === 'manual', 'ORDER_REFUND_FROM_SHOPIFY', 'Refunds for Shopify orders come from Shopify; refund there and sync', 'Shopify 订单的退款以 Shopify 为准：请在 Shopify 里退款，再同步。');
+          const add = centsOf(v.amount), was = Number(r.refunded_cents || 0);
+          need(was + add <= Number(r.paid_cents), 'ORDER_REFUND_TOO_MUCH', 'The refund is more than was paid', '退款金额超过了已收金额。');
+          set.refunded_cents = was + add; set.refund_note = v.reason; break;
+        }
+        case 'exchange': set.exchange = JSON.stringify({ by: u.id, at, reason: v.reason, newOrder: v.newOrder || '' }); break;
+        case 'note': set.note = JSON.stringify({ text: v.text, by: u.id, at }); break;
       }
       const keys = Object.keys(set);
       if (keys.length) await tx.query(`UPDATE ful_orders SET ${keys.map((k, i) => `${k}=$${i + 3}`).join(',')}, updated_at=now() WHERE id=$1 AND org_id=$2`, [r.id, u.org_id, ...keys.map(k => set[k])]);
@@ -293,7 +320,7 @@ export async function registerFulfillmentRoutes(app: FastifyInstance, db: Databa
     return await r.json() as any;
   };
   const ORDER_FIELDS = (withCustomer: boolean) => `id name createdAt cancelledAt test tags sourceName
-    totalPriceSet { shopMoney { amount } } totalOutstandingSet { shopMoney { amount } }
+    cancelReason totalPriceSet { shopMoney { amount } } totalOutstandingSet { shopMoney { amount } } totalRefundedSet { shopMoney { amount } }
     lineItems(first: 50) { nodes { sku name quantity } }
     fulfillments(first: 5) { createdAt trackingInfo(first: 1) { company number } }
     ${withCustomer ? 'customer { displayName email phone } shippingAddress { name phone city provinceCode zip countryCodeV2 }' : ''}`;
@@ -312,7 +339,8 @@ export async function registerFulfillmentRoutes(app: FastifyInstance, db: Databa
       const page = j?.data?.orders; if (!page) return deny(502, 'SHOPIFY_FAILED', 'Could not read orders from Shopify; check the app’s read_orders access', '读取 Shopify 订单失败，请检查 Shopify 应用是否开了 read_orders 权限。');
       for (const n of page.nodes || []) {
         if (n.test) continue; seen++;
-        const total = centsOf(n.totalPriceSet?.shopMoney?.amount), owed = centsOf(n.totalOutstandingSet?.shopMoney?.amount), paid = Math.max(0, total - owed);
+        const total = centsOf(n.totalPriceSet?.shopMoney?.amount), owed = centsOf(n.totalOutstandingSet?.shopMoney?.amount), paid = Math.max(0, total - owed), refunded = centsOf(n.totalRefundedSet?.shopMoney?.amount);
+        const cancelReason = n.cancelledAt ? String(n.cancelReason || 'other').toLowerCase() : '';
         const tags: string[] = Array.isArray(n.tags) ? n.tags : [], k = kindOf(tags, total);
         const lines = (n.lineItems?.nodes || []).map((l: any) => ({ sku: String(l.sku || ''), name: String(l.name || '').slice(0, 200), qty: Number(l.quantity) || 0 }));
         const f = (n.fulfillments || []).find((x: any) => x?.trackingInfo?.[0]?.number);
@@ -321,11 +349,11 @@ export async function registerFulfillmentRoutes(app: FastifyInstance, db: Databa
         if (!old) {
           const id = randomUUID(); created++;
           await db.query(`INSERT INTO ful_orders(id,org_id,source,shopify_id,number,kind,kind_note,channel,placed_at,customer_name,customer_email,customer_phone,ship_city,ship_state,
-            ship_zip,ship_country,total_cents,paid_cents,lines,tags,paid_at,cancelled_at,shipped_at,carrier,tracking,track_at)
-            VALUES($1,$2,'shopify',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$22)`,
-            [id, u.org_id, n.id, n.name, k.kind, k.note, n.sourceName === 'shopify_draft_order' ? 'offline' : k.channel, n.createdAt, c.displayName || a.name || '', c.email || '',
+            ship_zip,ship_country,total_cents,paid_cents,lines,tags,paid_at,cancelled_at,shipped_at,carrier,tracking,track_at,refunded_cents,cancel_reason)
+            VALUES($1,$2,'shopify',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$22,$25,$26)`,
+            [id, u.org_id, n.id, n.name, k.kind, k.note, ['shopify_draft_order', 'pos'].includes(n.sourceName) ? 'offline' : k.channel, n.createdAt, c.displayName || a.name || '', c.email || '',
               c.phone || a.phone || '', a.city || '', a.provinceCode || '', a.zip || '', a.countryCodeV2 || 'US', total, paid, JSON.stringify(lines), JSON.stringify(tags),
-              total > 0 && paid >= total ? n.createdAt : null, n.cancelledAt || null, f?.createdAt || null, f?.trackingInfo?.[0]?.company || '', f?.trackingInfo?.[0]?.number || '']);
+              total > 0 && paid >= total ? n.createdAt : null, n.cancelledAt || null, f?.createdAt || null, f?.trackingInfo?.[0]?.company || '', f?.trackingInfo?.[0]?.number || '', refunded, cancelReason]);
           await event(db, null, id, u.org_id, 'imported', { number: n.name });
         } else {
           updated++;
@@ -333,9 +361,9 @@ export async function registerFulfillmentRoutes(app: FastifyInstance, db: Databa
           await db.query(`UPDATE ful_orders SET total_cents=$3::bigint, paid_cents=$4::bigint, tags=$5::jsonb, lines=$6::jsonb, cancelled_at=COALESCE(cancelled_at,$7::timestamptz),
             paid_at=CASE WHEN paid_at IS NULL AND $3::bigint>0 AND $4::bigint>=$3::bigint THEN now() ELSE paid_at END,
             customer_name=CASE WHEN $8::text<>'' THEN $8::text ELSE customer_name END, customer_email=CASE WHEN $9::text<>'' THEN $9::text ELSE customer_email END,
-            shipped_at=COALESCE(shipped_at,$10::timestamptz), carrier=CASE WHEN carrier='' THEN $11::text ELSE carrier END, tracking=CASE WHEN tracking='' THEN $12::text ELSE tracking END, updated_at=now()
+            shipped_at=COALESCE(shipped_at,$10::timestamptz), carrier=CASE WHEN carrier='' THEN $11::text ELSE carrier END, tracking=CASE WHEN tracking='' THEN $12::text ELSE tracking END, refunded_cents=$13::bigint, cancel_reason=CASE WHEN cancel_reason='' THEN $14::text ELSE cancel_reason END, updated_at=now()
             WHERE id=$1 AND org_id=$2`, [old.id, u.org_id, total, paid, JSON.stringify(tags), JSON.stringify(lines), n.cancelledAt || null, c.displayName || a.name || '', c.email || '',
-            f?.createdAt || null, f?.trackingInfo?.[0]?.company || '', f?.trackingInfo?.[0]?.number || '']);
+            f?.createdAt || null, f?.trackingInfo?.[0]?.company || '', f?.trackingInfo?.[0]?.number || '', refunded, cancelReason]);
         }
       }
       after = page.pageInfo?.hasNextPage ? page.pageInfo.endCursor : null;
