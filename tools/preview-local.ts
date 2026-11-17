@@ -4,7 +4,8 @@
  * API under /api, on an in-memory database that starts fresh every run. Every name, number and record below is made up;
  * nothing here touches the live database, DingTalk, e-mail or any external service.
  *
- * Sign in with password:
+ * No sign-in needed: opening the site signs you in as the owner; /as/owner, /as/hr, /as/staff (links in the bottom strip)
+ * switch accounts. Password sign-in still works:
  *   owner@workos.test    company owner: sees everything, including the US HR region and costs
  *   hr@workos.test       HR for China and other countries
  *   staff@workos.test    a regular employee
@@ -19,7 +20,7 @@ import { extname, join, normalize, resolve } from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { buildApp } from '../src/app.js';
 import { createDatabase, schema, seedDemo } from '../src/db.js';
-import { issueSession } from '../src/auth.js';
+import { cookie, issueSession, readCookie, resolveSession, sessionCookieName } from '../src/auth.js';
 import { hashPassword } from '../src/members.js';
 
 const PORT = Number(process.env.PORT || 4174), HOST = process.env.HOST || '127.0.0.1';
@@ -27,7 +28,7 @@ const ORIGIN = (process.env.RENDER_EXTERNAL_URL || process.env.PREVIEW_PUBLIC_UR
 const DIST = resolve(process.env.FRONTEND_DIST || resolve(import.meta.dirname, '..', '..', 'onelaser-workos', 'dist'));
 const FRONTEND_COMMIT = (await readFile(process.env.PREVIEW_FRONTEND_COMMIT_FILE || '/nonexistent', 'utf8').catch(() => 'local')).trim();
 // A strip on every page so nobody mistakes the test site for craftos.app.
-const BANNER = `<div style="position:fixed;left:50%;bottom:10px;transform:translateX(-50%);z-index:9999;background:#a15c00;color:#fff;font:600 12px system-ui;padding:5px 12px;border-radius:999px;box-shadow:0 4px 14px #0003;pointer-events:none">测试站 · 虚构数据，每次部署都会重置 · Test site, fictional data · ${FRONTEND_COMMIT.slice(0, 7)}</div>`;
+const BANNER = `<div style="position:fixed;left:50%;bottom:10px;transform:translateX(-50%);z-index:9999;background:#a15c00;color:#fff;font:600 12px system-ui;padding:5px 12px;border-radius:999px;box-shadow:0 4px 14px #0003;">测试站 · 虚构数据，每次部署都会重置 · Test site, fictional data · ${FRONTEND_COMMIT.slice(0, 7)} · 切换身份 Switch: <a href="/as/owner" style="color:#fff">老板 Owner</a> · <a href="/as/hr" style="color:#fff">HR</a> · <a href="/as/staff" style="color:#fff">员工 Staff</a></div>`;
 const PASSWORD = process.env.PREVIEW_PASSWORD || 'workos-preview', ORG = 'demo';
 if (process.env.RENDER && !process.env.PREVIEW_PASSWORD) throw new Error('Set PREVIEW_PASSWORD on the hosted test site; the default password is public.');
 
@@ -303,6 +304,7 @@ const app = await buildApp({
     await call('PATCH', `/products/library/${sku}`, { values: { landed, lastMile } });
 }
 
+const AUTO_USERS: Record<string, string> = { owner: 'm1', hr: 'm4', staff: 'm2' }, SESSION_COOKIE = sessionCookieName(false);
 const TYPES: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.otf': 'font/otf', '.woff2': 'font/woff2', '.png': 'image/png', '.json': 'application/json', '.webp': 'image/webp', '.ico': 'image/x-icon' };
 createServer(async (req, res) => {
   try {
@@ -318,16 +320,27 @@ createServer(async (req, res) => {
     }
     if (url.pathname === '/runtime-config.js') { res.writeHead(200, { 'content-type': 'text/javascript', 'cache-control': 'no-store' }); return res.end("'use strict';window.WORKOS_CONFIG=Object.freeze({mode:'live',apiBase:'/api'});"); }
     if (url.pathname === '/build-info.json') { res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); return res.end(JSON.stringify({ frontendCommit: FRONTEND_COMMIT, preview: true })); }
+    // No password on the test site (owner, 2026-11-17: the data is fictional): opening a page signs the visitor in as the owner,
+    // and /as/owner, /as/hr, /as/staff switch to that account. Signing out just lands back on the owner.
+    const as = /^\/as\/(owner|hr|staff)\/?$/.exec(url.pathname)?.[1];
+    if (as) {
+      const s = await issueSession(db, AUTO_USERS[as]);
+      res.writeHead(302, { location: '/', 'set-cookie': cookie(SESSION_COOKIE, s.accessToken, false), 'cache-control': 'no-store' }); return res.end();
+    }
     let file = normalize(join(DIST, decodeURIComponent(url.pathname)));
     if (!file.startsWith(DIST)) { res.writeHead(403); return res.end(); }
     if ((await stat(file).catch(() => null))?.isDirectory()) file = join(file, 'index.html');
     let body = await readFile(file).catch(() => null);
     if (!body) { res.writeHead(404); return res.end('Not found'); }
-    if (file.endsWith('index.html')) body = Buffer.from(body.toString('utf8').replace('</body>', BANNER + '</body>'));
+    if (file.endsWith('index.html')) {
+      body = Buffer.from(body.toString('utf8').replace('</body>', BANNER + '</body>'));
+      const token = readCookie(req.headers.cookie, SESSION_COOKIE);
+      if (!token || !(await resolveSession(db, `Bearer ${token}`))) res.setHeader('set-cookie', cookie(SESSION_COOKIE, (await issueSession(db, AUTO_USERS.owner)).accessToken, false));
+    }
     res.writeHead(200, { 'content-type': TYPES[extname(file)] || 'application/octet-stream', 'cache-control': 'no-store' }); res.end(body);
   } catch (error) { console.error(error); res.writeHead(500); res.end('Preview server error'); }
 }).listen(PORT, HOST, () => {
   console.log(`WorkOS preview (fictional test data, resets on every start): ${ORIGIN}/`);
   console.log(`Frontend from ${DIST}`);
-  console.log(`Sign in: owner@workos.test · hr@workos.test · staff@workos.test — password ${process.env.PREVIEW_PASSWORD ? '(PREVIEW_PASSWORD)' : PASSWORD}`);
+  console.log(`No sign-in needed: visitors are the owner; /as/hr and /as/staff switch accounts. Password sign-in still works: owner@workos.test · hr@workos.test · staff@workos.test — password ${process.env.PREVIEW_PASSWORD ? '(PREVIEW_PASSWORD)' : PASSWORD}`);
 });

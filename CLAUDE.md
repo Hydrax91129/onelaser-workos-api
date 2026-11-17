@@ -107,7 +107,7 @@
   登录：owner@workos.test（主管理员）、hr@workos.test（中国 / 海外 HR）、staff@workos.test（普通员工），密码 workos-preview。
   改了页面的 PR，合并前先用它跑一遍、截图给用户确认；新模块要用的示例数据也加在这个文件里。
 - **测试站**：用户在 Render 上另建的服务（和正式服务 onelaser-workos-migration、正式数据库完全分开），用 `Dockerfile.preview`
-  构建 `claude/preview` 分支：只有内存里的虚构数据，登录密码是那个服务上的 `PREVIEW_PASSWORD`（不写进仓库），页面底部有“测试站”标记。
+  构建 `claude/preview` 分支：只有内存里的虚构数据，不用登录（2026-11-17 老板定）：打开就是主管理员，页面底部“测试站”标记里可切换 老板 / HR / 员工（`/as/owner`、`/as/hr`、`/as/staff`）；密码登录仍可用，密码是那个服务上的 `PREVIEW_PASSWORD`（不写进仓库）。
   给用户预览时：把后端 PR 的提交推到 `claude/preview`，要预览的前端提交写进 `deploy/preview-frontend-revision.txt`。
   `claude/preview` 永远不合进 `main`；第 5 节对正式服务的规则不变。
 
