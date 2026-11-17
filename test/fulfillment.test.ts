@@ -67,14 +67,17 @@ test('orders: access levels, nothing ships before full payment, main-admin relea
     const made = await call('m4', 'POST', '/orders', order()); assert.equal(made.statusCode, 201, made.body); const id = made.json().id;
     assert.equal((await call('m4', 'POST', '/orders', order())).json().error.code, 'ORDER_NUMBER_EXISTS');
     const step = (who: string, body: any) => call(who, 'POST', `/orders/${id}/step`, body);
-    const blocked = await step('m4', { step: 'ship', carrier: 'Demo Freight', tracking: 'PRO-000123' });
+    const blocked = await step('m4', { step: 'ship', shipFrom: 'us', carrier: 'Demo Freight', tracking: 'PRO-000123' });
     assert.equal(blocked.statusCode, 409); assert.match(blocked.json().error.message, /还没收全款/);
     let b = (await call('m3', 'GET', '/orders')).json();
     assert.deepEqual([b.items[0].stage, b.items[0].owedCents, b.summary.owedCents, b.canManage], ['pay', 399900, 399900, false]);
     assert.equal(b.items[0].customer.state, 'TX');
     assert.equal((await step('m4', { step: 'release', reason: 'Trusted repeat buyer' })).json().error.code, 'ORDER_RELEASE_ADMIN_ONLY');
     assert.equal((await step('m4', { step: 'payment', paid: 5999 })).statusCode, 200);
-    assert.equal((await step('m4', { step: 'ship', carrier: 'Demo Freight', tracking: 'PRO-000123', eta: '2026-11-25' })).statusCode, 200);
+    assert.equal((await step('m4', { step: 'ship', shipFrom: 'us', carrier: 'Demo Freight', tracking: 'PRO-000123', eta: '2026-11-25' })).statusCode, 200);
+    { const d = (await call('m3', 'GET', `/orders/${id}`)).json(); assert.equal(d.shipFrom, 'us', 'ships from a WMS warehouse');
+      assert.ok(Array.isArray(d.stock) && d.stock.every((x: any) => 'us' in x && 'dg' in x && 'jn' in x), 'the detail shows WMS stock per warehouse'); }
+    assert.equal((await step('m4', { step: 'delivery_needs', shipment: 'ltl', liftgate: true, residential: true, shipFrom: 'transit' })).statusCode, 400, 'in transit is not a warehouse to ship from');
     assert.deepEqual([(await call('m3', 'GET', `/orders/${id}`)).json().stage, (await call('m3', 'GET', '/orders')).statusCode], ['transit', 200], 'an ETA read back from the database works');
     assert.equal((await step('m4', { step: 'first_piece' })).json().error.code, 'ORDER_NOT_DELIVERED');
     for (const s of [{ step: 'terminal' }, { step: 'appointment', on: '2026-11-20' }, { step: 'delivered', damage: 'none' }, { step: 'first_piece' }]) assert.equal((await step('m4', s)).statusCode, 200, JSON.stringify(s));
@@ -85,7 +88,7 @@ test('orders: access levels, nothing ships before full payment, main-admin relea
     // KOL: approved by a main admin instead of paid
     const kol = (await call('m4', 'POST', '/orders', order({ number: 'DEMO-KOL-1', kind: 'kol', total: 0, paid: 0 }))).json().id;
     assert.equal((await call('m4', 'GET', `/orders/${kol}`)).json().stage, 'approve');
-    assert.equal((await call('m4', 'POST', `/orders/${kol}/step`, { step: 'ship', carrier: 'Demo Freight', tracking: 'PRO-9' })).json().error.message, 'KOL 订单要先由主管理员批准才能发货。');
+    assert.equal((await call('m4', 'POST', `/orders/${kol}/step`, { step: 'ship', shipFrom: 'us', carrier: 'Demo Freight', tracking: 'PRO-9' })).json().error.message, 'KOL 订单要先由主管理员批准才能发货。');
     assert.equal((await call('m1', 'POST', `/orders/${kol}/step`, { step: 'release', reason: 'KOL agreement signed' })).statusCode, 200);
     const k = (await call('m1', 'GET', `/orders/${kol}`)).json(); assert.equal(k.stage, 'ship'); assert.equal(k.release.reason, 'KOL agreement signed');
     assert.equal((await call('m4', 'POST', `/orders/${id}/step`, { step: 'content', url: 'https://example.test/v' })).json().error.code, 'ORDER_NOT_KOL');
@@ -128,7 +131,7 @@ test('Shopify sync: open orders of the last 60 days, kinds from tags, payment fr
     assert.deepEqual([by('#1003').kind, by('#1003').kindNote, by('#1003').tracking], ['kol', 'zero_untagged', 'PRO-42']);
     assert.equal(b.summary.zeroUntagged, 1);
     // A second sync updates payment from Shopify and keeps the steps people recorded.
-    await call('m4', 'POST', `/orders/${by('#1001').id}/step`, { step: 'ship', carrier: 'Demo LTL', tracking: 'PRO-7' });
+    await call('m4', 'POST', `/orders/${by('#1001').id}/step`, { step: 'ship', shipFrom: 'us', carrier: 'Demo LTL', tracking: 'PRO-7' });
     nodes[1].totalOutstandingSet.shopMoney.amount = '0.00';
     const r2 = await call('m4', 'POST', '/orders/sync', {}); assert.equal(r2.json().updated, 3, r2.body);
     const b2 = (await call('m4', 'GET', '/orders')).json(), by2 = (n: string) => b2.items.find((i: any) => i.number === n);
@@ -136,4 +139,25 @@ test('Shopify sync: open orders of the last 60 days, kinds from tags, payment fr
     assert.deepEqual([by2('#1001').carrier, by2('#1001').tracking], ['Demo LTL', 'PRO-7']);
     assert.equal((await db.query('SELECT count(*)::int n FROM ful_orders')).rows[0].n, 3);
   } finally { await app.close(); }
+});
+
+test('orders: cancel with a reason, refunds (manual orders here, Shopify orders from Shopify), exchanges, the latest note on the board', async () => {
+  const { call } = await setup();
+  try {
+    const id = (await call('m4', 'POST', '/orders', order({ number: 'DEMO-2001', paid: 5999 }))).json().id;
+    const step = (body: any) => call('m4', 'POST', `/orders/${id}/step`, body);
+    assert.equal((await step({ step: 'note', text: 'Customer asked to deliver after 3 pm' })).statusCode, 200);
+    let o = (await call('m3', 'GET', '/orders')).json().items.find((x: any) => x.id === id);
+    assert.equal(o.note.text, 'Customer asked to deliver after 3 pm'); assert.ok(o.note.byName, 'who wrote it');
+    assert.equal((await step({ step: 'refund', amount: 9000, reason: 'Too much' })).json().error.code, 'ORDER_REFUND_TOO_MUCH');
+    assert.equal((await step({ step: 'refund', amount: 500, reason: 'Missing accessory' })).statusCode, 200);
+    assert.equal((await step({ step: 'exchange', reason: 'Wrong lens size', newOrder: 'DEMO-2002' })).statusCode, 200);
+    o = (await call('m3', 'GET', `/orders/${id}`)).json();
+    assert.deepEqual([o.refundedCents, o.refund, o.exchange.newOrder], [50000, 'partial', 'DEMO-2002']);
+    assert.equal((await step({ step: 'cancel', reason: 'Customer changed their mind' })).statusCode, 200);
+    assert.equal((await step({ step: 'refund', amount: 5499, reason: 'Order cancelled' })).statusCode, 200, 'a cancelled order can still be refunded');
+    o = (await call('m3', 'GET', `/orders/${id}`)).json();
+    assert.deepEqual([o.stage, o.cancelReason, o.refund], ['cancelled', 'Customer changed their mind', 'full']);
+    assert.equal((await step({ step: 'ship', shipFrom: 'us', carrier: 'X', tracking: 'Y' })).json().error.code, 'ORDER_CANCELLED');
+  } finally { /* in-memory database */ }
 });

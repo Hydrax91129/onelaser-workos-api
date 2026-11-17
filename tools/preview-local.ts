@@ -216,6 +216,9 @@ const app = await buildApp({
     { n: '#K-301', kind: 'kol', ch: 'offline', who: 'Demo Maker Channel', city: 'Nashville', st: 'TN', sku: H9[0], name: H9[1], total: 0, placed: 20, tags: ['kol'] },
     { n: '#K-302', kind: 'kol', ch: 'offline', who: 'Sample Woodcraft Creator', city: 'Seattle', st: 'WA', sku: F2[0], name: F2[1], total: 0, placed: 400, release: 'KOL agreement signed (sample)', shipped: 350, carrier: 'Demo Freight', pro: 'PRO-DEMO-K302', terminal: 200, appt: d(-6), delivered: 150, first: 60, tags: ['kol'] },
     { n: '#5114', who: 'Sample Buyer M', city: 'Albany', st: 'NY', sku: LENS[0], name: LENS[1], total: 0, ship: 'parcel', placed: 10 },
+    { n: '#5115', who: 'Sample Buyer N', city: 'Toronto', st: 'ON', sku: F2[0], name: F2[1], total: 6999, placed: 200, paidAt: 198 },
+    { n: '#5116', who: 'Sample Buyer O', city: 'Reno', st: 'NV', sku: F60[0], name: F60[1], total: 4999, placed: 600, paidAt: 598, shipped: 560, carrier: 'Demo Freight', pro: 'PRO-DEMO-1116', terminal: 420, appt: d(-14), delivered: 380, first: 300 },
+    { n: '#5117', who: 'Sample Buyer P', city: 'Austin', st: 'TX', sku: LENS[0], name: LENS[1], total: 49, ship: 'parcel', placed: 90, paidAt: 89, tags: ['exchange'] },
   ];
   for (const r of rows) {
     const total = Math.round(r.total * 100), paid = r.paid != null ? Math.round(r.paid * 100) : total, id = randomUUID();
@@ -232,6 +235,16 @@ const app = await buildApp({
         r.platform || '', r.reviewed != null ? t(r.reviewed) : null, r.rating ?? null]);
     await db.query("INSERT INTO ful_events(id,org_id,order_id,actor_id,kind,details,created_at) VALUES($1,$2,$3,NULL,'imported',$4,$5)", [randomUUID(), ORG, id, JSON.stringify({ number: r.n }), t(r.placed)]);
   }
+  // Shipped orders went out of the US LA warehouse; one dealer order straight from the Dongguan factory.
+  await db.query("UPDATE ful_orders SET ship_from='us' WHERE org_id=$1 AND shipped_at IS NOT NULL", [ORG]);
+  await db.query("UPDATE ful_orders SET ship_from='dg' WHERE org_id=$1 AND number='#D-2202'", [ORG]);
+  // Cancelled + refunded, partly refunded, an exchange, a Canadian address and a few notes (all fictional).
+  await db.query("UPDATE ful_orders SET ship_country='CA' WHERE org_id=$1 AND number='#5115'", [ORG]);
+  await db.query("UPDATE ful_orders SET cancelled_at=now()-interval '2 days', cancel_reason='customer', refunded_cents=total_cents, refund_note='Cancelled before shipping (sample)' WHERE org_id=$1 AND number='#5115'", [ORG]);
+  await db.query("UPDATE ful_orders SET refunded_cents=30000, refund_note='Partial refund: missing air assist hose (sample)' WHERE org_id=$1 AND number='#5116'", [ORG]);
+  await db.query(`UPDATE ful_orders SET exchange=$2::jsonb WHERE org_id=$1 AND number='#5111'`, [ORG, JSON.stringify({ by: 'm6', at: new Date(Date.now() - 20 * 3600_000).toISOString(), reason: 'Damaged on delivery, replacement unit sent (sample)', newOrder: '#5118' })]);
+  for (const [n, by, text] of [['#5107', 'm6', 'Carrier says the truck is delayed in Memphis; customer informed (sample)'], ['#5101', 'm4', 'Customer will wire the balance on Friday (sample)'], ['#5108', 'm4', 'Left two voicemails, try again tomorrow morning (sample)']])
+    await db.query(`UPDATE ful_orders SET note=$3::jsonb WHERE org_id=$1 AND number=$2`, [ORG, n, JSON.stringify({ text, by, at: new Date(Date.now() - 5 * 3600_000).toISOString() })]);
 }
 
 // Example shelf bins in the US LA warehouse (fictional).
