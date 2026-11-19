@@ -247,7 +247,9 @@ export async function registerCompletionRoutes(app: FastifyInstance, db: Databas
     const c = await latestCompletion(db, taskId);
     const locked = !!(task.board_status === 'done' && task.board_done_at && Date.now() - new Date(task.board_done_at).getTime() >= COMPLETION_LOCK_MS);
     const unscored = !!c && c.final_score == null;
-    return { completion: c, locked, canHumanScore: unscored && task.board_status === 'done' && await canHumanScore(user, task),
+    // The completion's files, so the task details drawer can show them next to the result.
+    const attachments = c?.attachment_ids?.length ? (await db.query('SELECT id,name,mime,size FROM task_attachments WHERE task_id=$1 AND id=ANY($2::text[]) ORDER BY created_at,id', [taskId, c.attachment_ids])).rows : [];
+    return { completion: c, attachments, locked, canHumanScore: unscored && task.board_status === 'done' && await canHumanScore(user, task),
       canRetryScore: !!o.model && canScore(user,task) && unscored && !windowOpen(c), lockAt: task.board_done_at ? new Date(new Date(task.board_done_at).getTime() + COMPLETION_LOCK_MS).toISOString() : null };
   });
 

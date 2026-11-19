@@ -140,6 +140,10 @@ const app = await buildApp({
   await m2('POST', `/tasks/${t1.id}/updates`, { requestId: randomUUID(), body: '价目表初稿已完成，正在核对（示例）。' });
   const v1 = (await m2('GET', `/tasks/${t1.id}`)).json().version;
   await m2('POST', `/tasks/${t1.id}/submissions`, { expectedVersion: v1, description: '价目表已上传，请验收（示例）。' });
+  // A task given to m2 and completed with "完成": the owner opens it from the task list and sees the result and can score it.
+  const t2 = (await call('POST', '/tasks', { title: '示例：运往英国的运费报价', description: '虚构示例任务：把运费报价发给我。', ownerId: 'm2', criteria: ['报价已发出'], dueAt: day(2) })).json();
+  const v2 = (await m2('GET', `/tasks/${t2.id}`)).json().version;
+  await m2('POST', `/tasks/${t2.id}/complete`, { expectedVersion: v2, result: '400 USD，50–60 天（示例）', attachmentIds: [] });
   await m4('POST', '/tasks/assign', { assigneeId: 'm1', title: '确认示例新员工入职资料', description: '虚构示例任务，用来演示“去领取”。', criteria: ['资料确认完毕'], dueAt: day(6) });
 }
 
