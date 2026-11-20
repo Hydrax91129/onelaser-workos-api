@@ -1,0 +1,65 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createDatabase, schema, seedDemo } from '../src/db.js';
+import { buildApp } from '../src/app.js';
+import { issueSession } from '../src/auth.js';
+
+// AI超算 (owner, 2026-11-20): owner only, replies stream into the chat in the background, previews run sandboxed.
+function fakeClient(chunks: string[], seen: any[] = []) {
+  return { messages: { stream(body: any, opts: any) {
+    seen.push(body);
+    return (async function* () {
+      for (const t of chunks) { if (opts?.signal?.aborted) throw new Error('aborted'); await new Promise(r => setTimeout(r, 2)); yield { type: 'content_block_delta', delta: { type: 'text_delta', text: t } }; }
+    })();
+  } } } as any;
+}
+async function setup(client?: any) {
+  const db = await createDatabase(); await db.exec(schema); await seedDemo(db);
+  const app = await buildApp({ db, integrations: { executiveUserIds: ['m1', 'm4'] }, completionModel: null, translationModel: null, mailer: null, nudgeIntervalMs: 0, aiLab: { client, userIds: ['m1'] } } as any);
+  const tokens: Record<string, string> = {};
+  const call = async (who: string, method: 'GET' | 'POST' | 'DELETE', url: string, payload?: any) => { tokens[who] ??= (await issueSession(db, who)).accessToken;
+    return app.inject({ method, url, payload, headers: { authorization: 'Bearer ' + tokens[who], 'accept-language': 'zh-CN' } }); };
+  return { app, call };
+}
+const until = async (f: () => Promise<boolean>) => { for (let i = 0; i < 200; i++) { if (await f()) return; await new Promise(r => setTimeout(r, 10)); } throw new Error('timed out'); };
+
+test('AI超算: only the listed owner (and a main admin) sees it; others get a plain 404', async () => {
+  const { call } = await setup(fakeClient(['hi']));
+  assert.equal((await call('m1', 'GET', '/me')).json().aiLabAccess, true);
+  assert.equal((await call('m4', 'GET', '/me')).json().aiLabAccess, false, 'another main admin, not on the list');
+  for (const who of ['m4', 'm2']) assert.equal((await call(who, 'GET', '/ai-lab/chats')).statusCode, 404, who);
+});
+
+test('AI超算: a desk conversation streams its reply into the chat; the desk prompt never names the provider', async () => {
+  const seen: any[] = [];
+  const { call } = await setup(fakeClient(['## 方案\n', '```svg\n<svg viewBox="0 0 10 10"></svg>\n```'], seen));
+  const chat = (await call('m1', 'POST', '/ai-lab/chats', { desk: 'mech' })).json();
+  const sent = await call('m1', 'POST', `/ai-lab/chats/${chat.id}/messages`, { text: '设计一个 1300×900 激光切割机的龙门结构' });
+  assert.equal(sent.statusCode, 202, sent.body);
+  await until(async () => !(await call('m1', 'GET', `/ai-lab/chats/${chat.id}`)).json().busy);
+  const c = (await call('m1', 'GET', `/ai-lab/chats/${chat.id}`)).json();
+  assert.equal(c.title, '设计一个 1300×900 激光切割机的龙门结构');
+  assert.deepEqual(c.messages.map((m: any) => [m.role, m.status ?? null]), [['user', null], ['assistant', 'done']]);
+  assert.match(c.messages[1].text, /```svg/);
+  assert.match(seen[0].system, /机械/); assert.doesNotMatch(seen[0].system, /claude|anthropic/i);
+  // the second turn carries the history
+  await call('m1', 'POST', `/ai-lab/chats/${chat.id}/messages`, { text: '改成 1600×1000' });
+  await until(async () => !(await call('m1', 'GET', `/ai-lab/chats/${chat.id}`)).json().busy);
+  assert.equal(seen[1].messages.length, 3);
+  assert.equal((await call('m1', 'GET', '/ai-lab/chats')).json().chats.length, 1);
+  assert.equal((await call('m1', 'DELETE', `/ai-lab/chats/${chat.id}`)).statusCode, 200);
+  assert.equal((await call('m1', 'GET', `/ai-lab/chats/${chat.id}`)).statusCode, 404);
+});
+
+test('AI超算: previews open sandboxed; not configured says so', async () => {
+  const { call } = await setup(fakeClient(['x']));
+  const p = (await call('m1', 'POST', '/ai-lab/previews', { kind: 'html', body: '<!doctype html><h1>Demo</h1>' })).json();
+  const r = await call('m1', 'GET', p.url.replace('/api', ''));
+  assert.equal(r.statusCode, 200); assert.match(r.headers['content-security-policy'] as string, /^sandbox allow-scripts/);
+  assert.doesNotMatch(r.headers['content-security-policy'] as string, /allow-same-origin/);
+  assert.match(r.body, /<h1>Demo<\/h1>/);
+  assert.equal((await call('m4', 'GET', p.url.replace('/api', ''))).statusCode, 404);
+  const off = await setup(undefined);
+  const chat = (await off.call('m1', 'POST', '/ai-lab/chats', { desk: 'soft' })).json();
+  assert.equal((await off.call('m1', 'POST', `/ai-lab/chats/${chat.id}/messages`, { text: '做一个落地页' })).json().error.code, 'AI_LAB_NOT_CONFIGURED');
+});
