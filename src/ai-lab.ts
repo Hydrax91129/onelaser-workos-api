@@ -19,6 +19,9 @@ export const aiLabSchema = `
 CREATE TABLE IF NOT EXISTS ai_lab_chats(id text PRIMARY KEY, org_id text NOT NULL, owner_id text NOT NULL, desk text NOT NULL,
   title text NOT NULL DEFAULT '', messages jsonb NOT NULL DEFAULT '[]', created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
 CREATE INDEX IF NOT EXISTS ai_lab_chats_owner ON ai_lab_chats(owner_id, updated_at DESC);
+CREATE TABLE IF NOT EXISTS ai_lab_files(id text PRIMARY KEY, owner_id text NOT NULL, name text NOT NULL, mime text NOT NULL, kind text NOT NULL,
+  size integer NOT NULL, data bytea NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
+CREATE INDEX IF NOT EXISTS ai_lab_files_owner ON ai_lab_files(owner_id, created_at);
 CREATE TABLE IF NOT EXISTS ai_lab_previews(id text PRIMARY KEY, owner_id text NOT NULL, kind text NOT NULL, body text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
 `;
 
@@ -48,7 +51,15 @@ const DESK_PROMPTS: Record<Desk, string> = {
 };
 
 const TITLE_MAX = 60, MSG_MAX = 20000, MAX_TURNS = 40;
-type Msg = { role: 'user' | 'assistant'; text: string; at: string; status?: 'streaming' | 'done' | 'error' | 'stopped'; error?: string };
+/* Files the owner attaches (drawings, photos, PDFs, CAD text exports). Images and PDFs go to the model as they are; text-like
+ * files (DXF, STEP, G-code, CSV, code…) go in as text. Sizes stay inside what the model accepts. */
+const IMAGE_MIME = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+const TEXT_EXT = /\.(txt|csv|tsv|md|json|xml|svg|dxf|step|stp|iges|igs|scad|gcode|nc|ngc|py|js|ts|html|css|c|cpp|h|ino|yaml|yml|ini|log)$/i;
+const LIMIT = { image: 5 * 1024 * 1024, pdf: 25 * 1024 * 1024, text: 2 * 1024 * 1024 };
+const kindOf = (name: string, mime: string) => IMAGE_MIME.includes(mime) ? 'image' : mime === 'application/pdf' || /\.pdf$/i.test(name) ? 'pdf' : (mime.startsWith('text/') || TEXT_EXT.test(name)) ? 'text' : '';
+type FileRef = { id: string; name: string; mime: string; kind: string; size: number };
+const FILES_PER_MSG = 10, FILE_TURNS = 4; // files ride along on the latest few user turns; older ones are named only
+type Msg = { role: 'user' | 'assistant'; text: string; at: string; files?: FileRef[]; status?: 'streaming' | 'done' | 'error' | 'stopped'; error?: string };
 type Client = Pick<Anthropic, 'messages'>;
 export type AiLabOptions = { userIds: string[]; isExecutive: (u: User) => boolean; client?: Client; model?: string; now?: () => number };
 
@@ -92,19 +103,43 @@ export async function registerAiLabRoutes(app: FastifyInstance, db: Database, o:
 
   // Send a message: the reply is generated in the background and saved as it streams.
   app.post<{ Params: { id: string } }>('/ai-lab/chats/:id/messages', async (req, reply) => {
-    const u = owner(req), v = z.object({ text: z.string().trim().min(1).max(MSG_MAX) }).strict().parse(req.body);
+    const u = owner(req), v = z.object({ text: z.string().trim().max(MSG_MAX).default(''), fileIds: z.array(z.string().max(100)).max(FILES_PER_MSG).default([]) }).strict()
+      .refine(x => x.text || x.fileIds.length, { message: 'Write a message or attach a file' }).parse(req.body);
+    const files: FileRef[] = v.fileIds.length ? (await db.query('SELECT id,name,mime,kind,size FROM ai_lab_files WHERE owner_id=$1 AND id = ANY($2::text[])', [u.id, v.fileIds])).rows : [];
+    if (files.length !== new Set(v.fileIds).size) deny(400, 'AI_LAB_FILE_NOT_FOUND', 'An attached file was not found', '有附件找不到了，请重新上传。');
     if (!o.client) deny(503, 'AI_LAB_NOT_CONFIGURED', 'The AI engine is not connected', 'AI 引擎还没有接入。');
     const chat = await chatOf(u, req.params.id);
     if (running.has(chat.id)) deny(409, 'AI_LAB_BUSY', 'Still working on the previous message', '上一条还在生成，请稍等或先停止。');
     const at = new Date(now()).toISOString();
-    const history: Msg[] = (chat.messages || []).filter((m: Msg) => m.text && m.status !== 'error').slice(-MAX_TURNS);
-    const messages: Msg[] = [...(chat.messages || []), { role: 'user', text: v.text, at }, { role: 'assistant', text: '', at, status: 'streaming' }];
-    const title = chat.title || v.text.replace(/\s+/g, ' ').slice(0, TITLE_MAX);
+    const history: Msg[] = (chat.messages || []).filter((m: Msg) => (m.text || m.files?.length) && m.status !== 'error').slice(-MAX_TURNS);
+    const messages: Msg[] = [...(chat.messages || []), { role: 'user', text: v.text, at, ...(files.length ? { files } : {}) }, { role: 'assistant', text: '', at, status: 'streaming' }];
+    const title = chat.title || (v.text || files.map(f => f.name).join(', ')).replace(/\s+/g, ' ').slice(0, TITLE_MAX);
     await db.query('UPDATE ai_lab_chats SET messages=$3::jsonb, title=$4, updated_at=now() WHERE id=$1 AND owner_id=$2', [chat.id, u.id, JSON.stringify(messages), title]);
     const ctrl = new AbortController(); running.set(chat.id, ctrl);
-    void generate(u.id, chat.id, chat.desk as Desk, [...history, { role: 'user', text: v.text, at }], ctrl);
+    void generate(u.id, chat.id, chat.desk as Desk, [...history, { role: 'user', text: v.text, at, ...(files.length ? { files } : {}) }], ctrl);
     reply.code(202); return view(await chatOf(u, chat.id));
   });
+
+  // The model input: files on the latest FILE_TURNS user turns go in whole (image / PDF document / text); older ones by name.
+  async function contentOf(ownerId: string, turns: Msg[]) {
+    const withFiles = turns.map((m, i) => m.role === 'user' && m.files?.length ? i : -1).filter(i => i >= 0).slice(-FILE_TURNS);
+    const ids = withFiles.flatMap(i => turns[i].files!.map(f => f.id));
+    const rows = new Map(ids.length ? ((await db.query('SELECT id,name,mime,kind,data FROM ai_lab_files WHERE owner_id=$1 AND id = ANY($2::text[])', [ownerId, ids])).rows as any[]).map(r => [r.id, r]) : []);
+    return turns.map((m, i) => {
+      if (m.role !== 'user' || !m.files?.length) return { role: m.role, content: m.text || '…' };
+      const blocks: any[] = [];
+      for (const f of m.files) {
+        const r = withFiles.includes(i) ? rows.get(f.id) : null;
+        if (!r) { blocks.push({ type: 'text', text: `[附件：${f.name}（较早上传，内容未重新附上）]` }); continue; }
+        const b64 = Buffer.from(r.data).toString('base64');
+        if (r.kind === 'image') blocks.push({ type: 'image', source: { type: 'base64', media_type: r.mime, data: b64 } });
+        else if (r.kind === 'pdf') blocks.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 }, title: r.name });
+        else blocks.push({ type: 'text', text: `附件 ${r.name}：\n\n${Buffer.from(r.data).toString('utf8')}` });
+      }
+      blocks.push({ type: 'text', text: m.text || '请先看附件，说明你看到了什么，再给出专业意见。' });
+      return { role: m.role, content: blocks };
+    });
+  }
 
   async function generate(ownerId: string, chatId: string, desk: Desk, turns: Msg[], ctrl: AbortController) {
     let text = '', lastSave = 0, status: Msg['status'] = 'done', error = '';
@@ -119,7 +154,7 @@ export async function registerAiLabRoutes(app: FastifyInstance, db: Database, o:
     try {
       const stream = o.client!.messages.stream({
         model, max_tokens: 32000, system: DESK_PROMPTS[desk], thinking: { type: 'adaptive' } as any,
-        messages: turns.map(m => ({ role: m.role, content: m.text })),
+        messages: await contentOf(ownerId, turns),
       } as any, { signal: ctrl.signal });
       for await (const ev of stream as any) {
         if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
@@ -135,6 +170,27 @@ export async function registerAiLabRoutes(app: FastifyInstance, db: Database, o:
       await save(true).catch(() => undefined);
     }
   }
+
+  // Attach a drawing, photo, PDF or CAD text export (sent as base64, like the other modules' uploads).
+  app.post('/ai-lab/files', { bodyLimit: Math.ceil(LIMIT.pdf * 4 / 3) + 4096 }, async (req, reply) => {
+    const u = owner(req), v = z.object({ name: z.string().trim().min(1).max(200), mime: z.string().max(120).default(''), dataBase64: z.string().min(1) }).strict().parse(req.body);
+    const kind = kindOf(v.name, v.mime);
+    if (!kind) deny(400, 'AI_LAB_FILE_TYPE', 'Use an image (PNG, JPEG, WebP, GIF), a PDF or a text file such as DXF, STEP or CSV', '请上传图片（PNG、JPEG、WebP、GIF）、PDF，或 DXF、STEP、CSV 等文本文件。');
+    const data = Buffer.from(v.dataBase64, 'base64');
+    if (!data.length) deny(400, 'AI_LAB_FILE_EMPTY', 'The file is empty', '文件是空的。');
+    if (data.length > LIMIT[kind as keyof typeof LIMIT]) deny(400, 'AI_LAB_FILE_TOO_BIG', 'The file is too large (images 5 MB, PDF 25 MB, text 2 MB)', '文件太大（图片 5 MB、PDF 25 MB、文本 2 MB 以内）。');
+    const id = randomUUID(), mime = kind === 'pdf' ? 'application/pdf' : kind === 'text' ? 'text/plain' : v.mime;
+    await db.query('INSERT INTO ai_lab_files(id,owner_id,name,mime,kind,size,data) VALUES($1,$2,$3,$4,$5,$6,$7)', [id, u.id, v.name, mime, kind, data.length, data]);
+    await db.query("DELETE FROM ai_lab_files WHERE owner_id=$1 AND created_at < now() - interval '180 days'", [u.id]);
+    reply.code(201); return { id, name: v.name, mime, kind, size: data.length };
+  });
+  app.get<{ Params: { id: string } }>('/ai-lab/files/:id', async (req, reply) => {
+    const u = owner(req);
+    const r = (await db.query('SELECT name,mime,data FROM ai_lab_files WHERE id=$1 AND owner_id=$2', [req.params.id, u.id])).rows[0];
+    if (!r) deny(404, 'NOT_FOUND', 'Not found', '未找到。');
+    reply.header('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(r.name)}`).header('X-Content-Type-Options', 'nosniff').header('Cache-Control', 'private, max-age=3600');
+    reply.type(r.mime === 'text/plain' ? 'text/plain; charset=utf-8' : r.mime); return Buffer.from(r.data);
+  });
 
   // A web page / drawing / 3D model the AI wrote, stored so it can open in its own sandboxed response.
   app.post('/ai-lab/previews', async (req, reply) => {

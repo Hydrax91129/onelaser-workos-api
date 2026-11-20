@@ -70,3 +70,27 @@ test('AI超算: with no list set, every main admin sees it and no one else does'
   const me = async (who: string) => (await app.inject({ method: 'GET', url: '/me', headers: { authorization: 'Bearer ' + (await issueSession(db, who)).accessToken } })).json().aiLabAccess;
   assert.deepEqual([await me('m1'), await me('m4'), await me('m2')], [true, false, false]);
 });
+
+test('AI超算: attach a drawing photo, a PDF and a DXF; they reach the model as image, document and text', async () => {
+  const seen: any[] = [];
+  const { call } = await setup(fakeClient(['看到了'], seen));
+  const up = (name: string, mime: string, body: Buffer) => call('m1', 'POST', '/ai-lab/files', { name, mime, dataBase64: body.toString('base64') });
+  const png = (await up('sketch.png', 'image/png', Buffer.from([137, 80, 78, 71, 1, 2, 3]))).json();
+  const pdf = (await up('spec.pdf', 'application/pdf', Buffer.from('%PDF-1.4 demo'))).json();
+  const dxf = (await up('bracket.dxf', '', Buffer.from('0\nSECTION\n2\nENTITIES'))).json();
+  assert.deepEqual([png.kind, pdf.kind, dxf.kind], ['image', 'pdf', 'text']);
+  assert.equal((await up('virus.exe', 'application/octet-stream', Buffer.from('MZ'))).json().error.code, 'AI_LAB_FILE_TYPE');
+  assert.equal((await call('m4', 'POST', '/ai-lab/files', { name: 'a.png', mime: 'image/png', dataBase64: 'AAAA' })).statusCode, 404, 'not for others');
+  const chat = (await call('m1', 'POST', '/ai-lab/chats', { desk: 'mech' })).json();
+  assert.equal((await call('m1', 'POST', `/ai-lab/chats/${chat.id}/messages`, { fileIds: [png.id, pdf.id, dxf.id] })).statusCode, 202, 'files alone are enough');
+  await until(async () => !(await call('m1', 'GET', `/ai-lab/chats/${chat.id}`)).json().busy);
+  const content = seen[0].messages[0].content;
+  assert.deepEqual(content.map((b: any) => b.type), ['image', 'document', 'text', 'text']);
+  assert.match(content[2].text, /bracket\.dxf[\s\S]*ENTITIES/);
+  const c = (await call('m1', 'GET', `/ai-lab/chats/${chat.id}`)).json();
+  assert.deepEqual(c.messages[0].files.map((f: any) => f.name), ['sketch.png', 'spec.pdf', 'bracket.dxf']);
+  assert.equal(c.title, 'sketch.png, spec.pdf, bracket.dxf');
+  const got = await call('m1', 'GET', `/ai-lab/files/${png.id}`);
+  assert.equal(got.headers['content-type'], 'image/png');
+  assert.equal((await call('m1', 'POST', `/ai-lab/chats/${chat.id}/messages`, { fileIds: ['nope'] })).json().error.code, 'AI_LAB_FILE_NOT_FOUND');
+});
