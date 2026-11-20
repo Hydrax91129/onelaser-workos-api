@@ -4,7 +4,8 @@
  * API under /api, on an in-memory database that starts fresh every run. Every name, number and record below is made up;
  * nothing here touches the live database, DingTalk, e-mail or any external service.
  *
- * Sign in with password:
+ * No sign-in needed: opening the site signs you in as the owner; /as/owner, /as/hr, /as/staff (links in the bottom strip)
+ * switch accounts. Password sign-in still works:
  *   owner@workos.test    company owner: sees everything, including the US HR region and costs
  *   hr@workos.test       HR for China and other countries
  *   staff@workos.test    a regular employee
@@ -19,7 +20,7 @@ import { extname, join, normalize, resolve } from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { buildApp } from '../src/app.js';
 import { createDatabase, schema, seedDemo } from '../src/db.js';
-import { issueSession } from '../src/auth.js';
+import { cookie, issueSession, readCookie, resolveSession, sessionCookieName } from '../src/auth.js';
 import { hashPassword } from '../src/members.js';
 
 const PORT = Number(process.env.PORT || 4174), HOST = process.env.HOST || '127.0.0.1';
@@ -27,7 +28,7 @@ const ORIGIN = (process.env.RENDER_EXTERNAL_URL || process.env.PREVIEW_PUBLIC_UR
 const DIST = resolve(process.env.FRONTEND_DIST || resolve(import.meta.dirname, '..', '..', 'onelaser-workos', 'dist'));
 const FRONTEND_COMMIT = (await readFile(process.env.PREVIEW_FRONTEND_COMMIT_FILE || '/nonexistent', 'utf8').catch(() => 'local')).trim();
 // A strip on every page so nobody mistakes the test site for craftos.app.
-const BANNER = `<div style="position:fixed;left:50%;bottom:10px;transform:translateX(-50%);z-index:9999;background:#a15c00;color:#fff;font:600 12px system-ui;padding:5px 12px;border-radius:999px;box-shadow:0 4px 14px #0003;pointer-events:none">测试站 · 虚构数据，每次部署都会重置 · Test site, fictional data · ${FRONTEND_COMMIT.slice(0, 7)}</div>`;
+const BANNER = `<div style="position:fixed;left:50%;bottom:10px;transform:translateX(-50%);z-index:9999;background:#a15c00;color:#fff;font:600 12px system-ui;padding:5px 12px;border-radius:999px;box-shadow:0 4px 14px #0003;">测试站 · 虚构数据，每次部署都会重置 · Test site, fictional data · ${FRONTEND_COMMIT.slice(0, 7)} · 切换身份 Switch: <a href="/as/owner" style="color:#fff">老板 Owner</a> · <a href="/as/hr" style="color:#fff">HR</a> · <a href="/as/staff" style="color:#fff">员工 Staff</a></div>`;
 const PASSWORD = process.env.PREVIEW_PASSWORD || 'workos-preview', ORG = 'demo';
 if (process.env.RENDER && !process.env.PREVIEW_PASSWORD) throw new Error('Set PREVIEW_PASSWORD on the hosted test site; the default password is public.');
 
@@ -190,6 +191,68 @@ const app = await buildApp({
   }
 }
 
+// Sample orders for 订单履约 (fictional customers, addresses and tracking numbers), one or more in every stage.
+{
+  await db.query(`UPDATE users SET grants=grants || '["orders","orders_manage"]'::jsonb WHERE id IN ('m4','m6')`);
+  await db.query(`UPDATE users SET grants=grants || '["orders"]'::jsonb WHERE id IN ('m5')`);
+  await db.query(`INSERT INTO ful_settings(org_id,pay_owner,ship_owner,call_owner,train_owner) VALUES($1,'m4','m6','m4','m5') ON CONFLICT DO NOTHING`, [ORG]);
+  const t = (h: number) => h == null ? null : new Date(Date.now() - h * 3600_000).toISOString(), d = (days: number) => new Date(Date.now() + days * 864e5).toISOString().slice(0, 10);
+  type Row = { n: string; kind?: string; ch?: string; who: string; city: string; st: string; sku: string; name: string; qty?: number; total: number; paid?: number; ship?: string;
+    placed: number; paidAt?: number | null; shipped?: number; carrier?: string; pro?: string; eta?: string; terminal?: number; appt?: string; delivered?: number; damage?: string;
+    first?: number; invited?: number; platform?: string; reviewed?: number; rating?: number; note?: string; release?: string; content?: string; tags?: string[] };
+  const H9 = ['DEMO-H7-PRO', 'Demo H7 Pro'], F2 = ['DEMO-F2-100W', 'Demo F2 100W CO2 Laser'], F60 = ['DEMO-F2-60W', 'Demo F2 60W CO2 Laser'], LENS = ['DEMO-LENS-2', 'Demo Focus Lens 2"'];
+  const rows: Row[] = [
+    { n: '#5101', who: 'Sample Buyer A', city: 'Austin', st: 'TX', sku: H9[0], name: H9[1], total: 11999, paid: 4000, placed: 30 },
+    { n: '#5102', ch: 'offline', who: 'Demo Sign Shop', city: 'Reno', st: 'NV', sku: F2[0], name: F2[1], total: 6999, paid: 0, placed: 100 },
+    { n: '#5103', who: 'Sample Buyer B', city: 'Denver', st: 'CO', sku: F60[0], name: F60[1], total: 4999, placed: 70, paidAt: 66 },
+    { n: '#5104', who: 'Sample Buyer C', city: 'Tampa', st: 'FL', sku: F2[0], name: F2[1], total: 6999, placed: 30, paidAt: 20 },
+    { n: '#5105', who: 'Sample Buyer D', city: 'Portland', st: 'OR', sku: LENS[0], name: LENS[1], qty: 2, total: 98, ship: 'parcel', placed: 30, paidAt: 29 },
+    { n: '#5106', who: 'Sample Buyer E', city: 'Columbus', st: 'OH', sku: H9[0], name: H9[1], total: 11999, placed: 150, paidAt: 148, shipped: 120, carrier: 'Demo Freight', pro: 'PRO-DEMO-1106', eta: d(3) },
+    { n: '#5107', who: 'Sample Buyer F', city: 'Raleigh', st: 'NC', sku: F2[0], name: F2[1], total: 6999, placed: 300, paidAt: 298, shipped: 260, carrier: 'Demo LTL Lines', pro: 'PRO-DEMO-1107', eta: d(-3) },
+    { n: '#5108', who: 'Sample Buyer G', city: 'Phoenix', st: 'AZ', sku: F60[0], name: F60[1], total: 4999, placed: 280, paidAt: 278, shipped: 240, carrier: 'Demo Freight', pro: 'PRO-DEMO-1108', terminal: 100 },
+    { n: '#5109', who: 'Sample Buyer H', city: 'Boise', st: 'ID', sku: F2[0], name: F2[1], total: 6999, placed: 320, paidAt: 318, shipped: 280, carrier: 'Demo Freight', pro: 'PRO-DEMO-1109', terminal: 30, appt: d(1) },
+    { n: '#5110', who: 'Sample Buyer I', city: 'Omaha', st: 'NE', sku: H9[0], name: H9[1], total: 11999, placed: 500, paidAt: 498, shipped: 450, carrier: 'Demo LTL Lines', pro: 'PRO-DEMO-1110', terminal: 220, appt: d(-6), delivered: 170 },
+    { n: '#5111', who: 'Sample Buyer J', city: 'Fresno', st: 'CA', sku: F60[0], name: F60[1], total: 4999, placed: 400, paidAt: 398, shipped: 350, carrier: 'Demo Freight', pro: 'PRO-DEMO-1111', terminal: 150, appt: d(-4), delivered: 80, damage: 'damaged' },
+    { n: '#5112', who: 'Sample Buyer K', city: 'Madison', st: 'WI', sku: F2[0], name: F2[1], total: 6999, placed: 420, paidAt: 418, shipped: 380, carrier: 'Demo Freight', pro: 'PRO-DEMO-1112', terminal: 200, appt: d(-6), delivered: 140, first: 30 },
+    { n: '#5113', who: 'Sample Buyer L', city: 'Tulsa', st: 'OK', sku: H9[0], name: H9[1], total: 11999, placed: 900, paidAt: 898, shipped: 850, carrier: 'Demo LTL Lines', pro: 'PRO-DEMO-1113', terminal: 700, appt: d(-27), delivered: 640, first: 500, invited: 470, platform: 'trustpilot', reviewed: 440, rating: 5 },
+    { n: '#D-2201', kind: 'dealer', ch: 'offline', who: 'Demo Laser Supply LLC', city: 'Dallas', st: 'TX', sku: F2[0], name: F2[1], qty: 4, total: 23996, paid: 12000, placed: 50, tags: ['dealer'] },
+    { n: '#D-2202', kind: 'dealer', ch: 'offline', who: 'Example Engraving Distributors', city: 'Atlanta', st: 'GA', sku: F60[0], name: F60[1], qty: 3, total: 13497, placed: 200, paidAt: 190, shipped: 150, carrier: 'Demo Freight', pro: 'PRO-DEMO-2202', eta: d(2), tags: ['dealer'] },
+    { n: '#K-301', kind: 'kol', ch: 'offline', who: 'Demo Maker Channel', city: 'Nashville', st: 'TN', sku: H9[0], name: H9[1], total: 0, placed: 20, tags: ['kol'] },
+    { n: '#K-302', kind: 'kol', ch: 'offline', who: 'Sample Woodcraft Creator', city: 'Seattle', st: 'WA', sku: F2[0], name: F2[1], total: 0, placed: 400, release: 'KOL agreement signed (sample)', shipped: 350, carrier: 'Demo Freight', pro: 'PRO-DEMO-K302', terminal: 200, appt: d(-6), delivered: 150, first: 60, tags: ['kol'] },
+    { n: '#5114', who: 'Sample Buyer M', city: 'Albany', st: 'NY', sku: LENS[0], name: LENS[1], total: 0, ship: 'parcel', placed: 10 },
+    { n: '#5115', who: 'Sample Buyer N', city: 'Toronto', st: 'ON', sku: F2[0], name: F2[1], total: 6999, placed: 200, paidAt: 198 },
+    { n: '#5116', who: 'Sample Buyer O', city: 'Reno', st: 'NV', sku: F60[0], name: F60[1], total: 4999, placed: 600, paidAt: 598, shipped: 560, carrier: 'Demo Freight', pro: 'PRO-DEMO-1116', terminal: 420, appt: d(-14), delivered: 380, first: 300 },
+    { n: '#5117', who: 'Sample Buyer P', city: 'Austin', st: 'TX', sku: LENS[0], name: LENS[1], total: 49, ship: 'parcel', placed: 90, paidAt: 89, tags: ['exchange'] },
+  ];
+  for (const r of rows) {
+    const total = Math.round(r.total * 100), paid = r.paid != null ? Math.round(r.paid * 100) : total, id = randomUUID();
+    const note = r.kind ? '' : (total === 0 ? 'zero_untagged' : '');
+    await db.query(`INSERT INTO ful_orders(id,org_id,source,shopify_id,number,kind,kind_note,channel,placed_at,customer_name,customer_email,customer_phone,ship_city,ship_state,ship_zip,
+      total_cents,paid_cents,lines,tags,shipment,liftgate,residential,paid_at,release,shipped_at,carrier,tracking,eta,track_at,terminal_at,appointment_on,delivered_at,damage,
+      first_piece_at,review_invited_at,review_platform,reviewed_at,review_rating,content_url)
+      VALUES($1,$2,'shopify',$3,$4,$5,$6,$7,$8,$9,$10,'+1 555 010 0000',$11,$12,'00000',$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$22,$26,$27,$28,$29,$30,$31,$32,$33,$34,'')`,
+      [id, ORG, 'gid://demo/Order/' + r.n, r.n, r.kind || (total === 0 ? 'kol' : 'retail'), note, r.ch || 'online', t(r.placed), r.who, 'buyer@example.test', r.city, r.st, total, paid,
+        JSON.stringify([{ sku: r.sku, name: r.name, qty: r.qty || 1 }]), JSON.stringify(r.tags || []), r.ship || 'ltl', !r.ship, r.kind !== 'dealer' && !r.ship,
+        r.paidAt != null ? t(r.paidAt) : (total > 0 && paid >= total ? t(r.placed) : null), r.release ? JSON.stringify({ by: 'm1', at: t(r.placed - 2), reason: r.release, payBy: null }) : null,
+        r.shipped != null ? t(r.shipped) : null, r.carrier || '', r.pro || '', r.eta || null, r.terminal != null ? t(r.terminal) : null, r.appt || null,
+        r.delivered != null ? t(r.delivered) : null, r.damage || (r.delivered != null ? 'none' : ''), r.first != null ? t(r.first) : null, r.invited != null ? t(r.invited) : null,
+        r.platform || '', r.reviewed != null ? t(r.reviewed) : null, r.rating ?? null]);
+    await db.query("INSERT INTO ful_events(id,org_id,order_id,actor_id,kind,details,created_at) VALUES($1,$2,$3,NULL,'imported',$4,$5)", [randomUUID(), ORG, id, JSON.stringify({ number: r.n }), t(r.placed)]);
+  }
+  // Shipped orders went out of the US LA warehouse; one dealer order straight from the Dongguan factory.
+  await db.query("UPDATE ful_orders SET ship_from='us' WHERE org_id=$1 AND shipped_at IS NOT NULL", [ORG]);
+  // Shipped sample orders already left WMS stock; the open ones hold stock (on hand vs available).
+  await db.query(`UPDATE ful_orders SET wms_out_at=shipped_at, wms_out='{"mode":"before"}'::jsonb WHERE org_id=$1 AND shipped_at IS NOT NULL`, [ORG]);
+  await db.query("UPDATE ful_orders SET ship_from='dg' WHERE org_id=$1 AND number='#D-2202'", [ORG]);
+  // Cancelled + refunded, partly refunded, an exchange, a Canadian address and a few notes (all fictional).
+  await db.query("UPDATE ful_orders SET ship_country='CA' WHERE org_id=$1 AND number='#5115'", [ORG]);
+  await db.query("UPDATE ful_orders SET cancelled_at=now()-interval '2 days', cancel_reason='customer', refunded_cents=total_cents, refund_note='Cancelled before shipping (sample)' WHERE org_id=$1 AND number='#5115'", [ORG]);
+  await db.query("UPDATE ful_orders SET refunded_cents=30000, refund_note='Partial refund: missing air assist hose (sample)' WHERE org_id=$1 AND number='#5116'", [ORG]);
+  await db.query(`UPDATE ful_orders SET exchange=$2::jsonb WHERE org_id=$1 AND number='#5111'`, [ORG, JSON.stringify({ by: 'm6', at: new Date(Date.now() - 20 * 3600_000).toISOString(), reason: 'Damaged on delivery, replacement unit sent (sample)', newOrder: '#5118' })]);
+  for (const [n, by, text] of [['#5107', 'm6', 'Carrier says the truck is delayed in Memphis; customer informed (sample)'], ['#5101', 'm4', 'Customer will wire the balance on Friday (sample)'], ['#5108', 'm4', 'Left two voicemails, try again tomorrow morning (sample)']])
+    await db.query(`UPDATE ful_orders SET note=$3::jsonb WHERE org_id=$1 AND number=$2`, [ORG, n, JSON.stringify({ text, by, at: new Date(Date.now() - 5 * 3600_000).toISOString() })]);
+}
+
 // Example shelf bins in the US LA warehouse (fictional).
 {
   const token = (await issueSession(db, 'm1')).accessToken;
@@ -260,6 +323,7 @@ const app = await buildApp({
     await call('PATCH', `/products/library/${sku}`, { values: { landed, lastMile } });
 }
 
+const AUTO_USERS: Record<string, string> = { owner: 'm1', hr: 'm4', staff: 'm2' }, SESSION_COOKIE = sessionCookieName(false);
 const TYPES: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.otf': 'font/otf', '.woff2': 'font/woff2', '.png': 'image/png', '.json': 'application/json', '.webp': 'image/webp', '.ico': 'image/x-icon' };
 createServer(async (req, res) => {
   try {
@@ -275,16 +339,27 @@ createServer(async (req, res) => {
     }
     if (url.pathname === '/runtime-config.js') { res.writeHead(200, { 'content-type': 'text/javascript', 'cache-control': 'no-store' }); return res.end("'use strict';window.WORKOS_CONFIG=Object.freeze({mode:'live',apiBase:'/api'});"); }
     if (url.pathname === '/build-info.json') { res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); return res.end(JSON.stringify({ frontendCommit: FRONTEND_COMMIT, preview: true })); }
+    // No password on the test site (owner, 2026-11-17: the data is fictional): opening a page signs the visitor in as the owner,
+    // and /as/owner, /as/hr, /as/staff switch to that account. Signing out just lands back on the owner.
+    const as = /^\/as\/(owner|hr|staff)\/?$/.exec(url.pathname)?.[1];
+    if (as) {
+      const s = await issueSession(db, AUTO_USERS[as]);
+      res.writeHead(302, { location: '/', 'set-cookie': cookie(SESSION_COOKIE, s.accessToken, false), 'cache-control': 'no-store' }); return res.end();
+    }
     let file = normalize(join(DIST, decodeURIComponent(url.pathname)));
     if (!file.startsWith(DIST)) { res.writeHead(403); return res.end(); }
     if ((await stat(file).catch(() => null))?.isDirectory()) file = join(file, 'index.html');
     let body = await readFile(file).catch(() => null);
     if (!body) { res.writeHead(404); return res.end('Not found'); }
-    if (file.endsWith('index.html')) body = Buffer.from(body.toString('utf8').replace('</body>', BANNER + '</body>'));
+    if (file.endsWith('index.html')) {
+      body = Buffer.from(body.toString('utf8').replace('</body>', BANNER + '</body>'));
+      const token = readCookie(req.headers.cookie, SESSION_COOKIE);
+      if (!token || !(await resolveSession(db, `Bearer ${token}`))) res.setHeader('set-cookie', cookie(SESSION_COOKIE, (await issueSession(db, AUTO_USERS.owner)).accessToken, false));
+    }
     res.writeHead(200, { 'content-type': TYPES[extname(file)] || 'application/octet-stream', 'cache-control': 'no-store' }); res.end(body);
   } catch (error) { console.error(error); res.writeHead(500); res.end('Preview server error'); }
 }).listen(PORT, HOST, () => {
   console.log(`WorkOS preview (fictional test data, resets on every start): ${ORIGIN}/`);
   console.log(`Frontend from ${DIST}`);
-  console.log(`Sign in: owner@workos.test · hr@workos.test · staff@workos.test — password ${process.env.PREVIEW_PASSWORD ? '(PREVIEW_PASSWORD)' : PASSWORD}`);
+  console.log(`No sign-in needed: visitors are the owner; /as/hr and /as/staff switch accounts. Password sign-in still works: owner@workos.test · hr@workos.test · staff@workos.test — password ${process.env.PREVIEW_PASSWORD ? '(PREVIEW_PASSWORD)' : PASSWORD}`);
 });
