@@ -31,7 +31,7 @@ http://:{$PORT:10000} {
     header @private_or_uncached Cache-Control no-store
     # The original public Wiki keeps its existing framing restriction. Every
     # other same-origin route retains DENY/none, including the employee app/API.
-    @not_wiki not path /wiki/*
+    @not_wiki not path /wiki/* /api/ai-lab/previews/*
     header @not_wiki {
         X-Frame-Options DENY
         Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self' https://login.dingtalk.com"
@@ -44,6 +44,10 @@ http://:{$PORT:10000} {
         X-Frame-Options SAMEORIGIN
         Content-Security-Policy "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; object-src 'self'; frame-ancestors 'self'"
     }
+    # AI超算 previews (src/ai-lab.ts): a page or drawing the AI wrote, framed only by WorkOS itself. The app sends
+    # its own CSP with "sandbox" (opaque origin: no WorkOS cookies or API) and the CDNs the page may load.
+    @ai_lab_preview path /api/ai-lab/previews/*
+    header @ai_lab_preview X-Frame-Options SAMEORIGIN
     # Enable only after the approved origin is switched. Keep the destination
     # literal: neither an incoming Host nor arbitrary environment text is a URL.
     @old_render_origin {
