@@ -1,7 +1,6 @@
 /*
  * AI超算 (owner, 2026-11-20): a private AI workbench inside WorkOS with three desks: mechanical / industrial design,
- * electrical design and software development. Only the owner sees it (WORKOS_AI_LAB_USER_IDS, or WORKOS_MCP_USER_IDS
- * when unset, and a main admin). The page never names the AI provider; the server calls the model with the
+ * electrical design and software development. Only main admins see it (WORKOS_AI_LAB_USER_IDS narrows it to some of them). The page never names the AI provider; the server calls the model with the
  * ANTHROPIC_API_KEY already used for translation (AI_LAB_MODEL picks the model).
  *
  * A reply is generated in the background and written to the chat as it streams, so the page polls

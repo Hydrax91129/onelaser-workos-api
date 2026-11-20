@@ -37,7 +37,7 @@
 | KOL ROI | — | kol.js | （待补充） |
 | Bug 与建议、版本记录 | feedback.ts | feedback.js, changelog.js | feedback |
 | AI 连接（WorkOS MCP） | mcp.ts | mcp-connect.js | mcp_clients、mcp_auth_codes、mcp_tokens、mcp_calls。`https://craftos.app/api/mcp` 给老板自己的 Claude（OAuth）或 Composio（个人令牌）用；只有 `WORKOS_MCP_USER_IDS` 里、同时是主管理员的人能连，见第 3 节第 10 条 |
-| AI超算（老板私用） | ai-lab.ts | ai-lab.js | ai_lab_chats（对话，每个人只看自己的）、ai_lab_previews（AI 写的网页 / 图纸，30 天清理）。左侧“AI超算”组下三个工位：机械 / 工业设计、电气设计、软件开发（2026-11-20 老板定）。只有 `WORKOS_AI_LAB_USER_IDS`（没设时用 `WORKOS_MCP_USER_IDS`）里、同时是主管理员的人能看到，其他人接口一律 404、菜单不显示、版本记录不写。用 `ANTHROPIC_API_KEY`，模型 `AI_LAB_MODEL`（默认 claude-opus-5-5）；页面和系统提示词里不出现 AI 厂商或模型名（ai-lab.js 有测试检查）。回复在后台生成、边写边存，页面轮询；```svg / ```html 代码块在 `/api/ai-lab/previews/:id` 预览：响应头 CSP `sandbox`（不带 allow-same-origin，拿不到 WorkOS cookie 和接口），只允许从 cdnjs / jsdelivr / unpkg 加载脚本，Caddyfile 的 `@not_wiki` 排除这个路径 |
+| AI超算（老板私用） | ai-lab.ts | ai-lab.js | ai_lab_chats（对话，每个人只看自己的）、ai_lab_previews（AI 写的网页 / 图纸，30 天清理）。左侧“AI超算”组下三个工位：机械 / 工业设计、电气设计、软件开发（2026-11-20 老板定）。主管理员登录就能看到（`WORKOS_AI_LAB_USER_IDS` 可以再缩小到其中几个人，不用设），其他人接口一律 404、菜单不显示、版本记录不写。用 `ANTHROPIC_API_KEY`，模型 `AI_LAB_MODEL`（默认 claude-opus-5-5）；页面和系统提示词里不出现 AI 厂商或模型名（ai-lab.js 有测试检查）。回复在后台生成、边写边存，页面轮询；```svg / ```html 代码块在 `/api/ai-lab/previews/:id` 预览：响应头 CSP `sandbox`（不带 allow-same-origin，拿不到 WorkOS cookie 和接口），只允许从 cdnjs / jsdelivr / unpkg 加载脚本，Caddyfile 的 `@not_wiki` 排除这个路径 |
 | CalDock（Mac mini 托管） | caldock*.ts | 独立前端仓库 | caldock_*，与 WorkOS 用户完全隔离 |
 
 ## 3. 共享数据规则（最重要）

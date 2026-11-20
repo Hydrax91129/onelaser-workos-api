@@ -63,3 +63,10 @@ test('AI超算: previews open sandboxed; not configured says so', async () => {
   const chat = (await off.call('m1', 'POST', '/ai-lab/chats', { desk: 'soft' })).json();
   assert.equal((await off.call('m1', 'POST', `/ai-lab/chats/${chat.id}/messages`, { text: '做一个落地页' })).json().error.code, 'AI_LAB_NOT_CONFIGURED');
 });
+
+test('AI超算: with no list set, every main admin sees it and no one else does', async () => {
+  const db = await createDatabase(); await db.exec(schema); await seedDemo(db);
+  const app = await buildApp({ db, integrations: { executiveUserIds: ['m1'], mcpUserIds: ['m4'] }, completionModel: null, translationModel: null, mailer: null, nudgeIntervalMs: 0 } as any);
+  const me = async (who: string) => (await app.inject({ method: 'GET', url: '/me', headers: { authorization: 'Bearer ' + (await issueSession(db, who)).accessToken } })).json().aiLabAccess;
+  assert.deepEqual([await me('m1'), await me('m4'), await me('m2')], [true, false, false]);
+});
