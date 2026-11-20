@@ -22,6 +22,8 @@ import { registerItRoutes, type ItOptions } from './it-accounts.js';
 import { registerQualityRoutes, qualityFactoryOf, factoryPathAllowed, type QualityOptions } from './quality.js';
 import { registerProductRoutes } from './products.js';
 import { registerMcpRoutes, MCP_PUBLIC_PATHS } from './mcp.js';
+import Anthropic from '@anthropic-ai/sdk';
+import { registerAiLabRoutes, aiLabAllowed } from './ai-lab.js';
 import { registerFinanceRoutes, financeAccessOf } from './finance.js';
 import { registerFulfillmentRoutes } from './fulfillment.js';
 import { registerProductLibraryRoutes } from './product-library.js';
@@ -72,7 +74,7 @@ async function okrListOwners(db:Database,user:User,executiveUserIds:string[]){
   const mine=rows.find(r=>r.id===user.id)?.manager_id;if(mine)for(const r of rows)if(r.manager_id===mine&&r.id!==user.id)out.add(r.id);
   return out;
 }
-export type AppOptions = { clock?:()=>number; nudgeIntervalMs?:number; translationModel?:JsonModel|null; okrDraftModel?:JsonModel|null; mailer?:Mailer|null; completionModel?:JsonModel|null; fxFetcher?:typeof fetch; db:Database; environment?:string; allowDevLogin?:boolean; devLoginSecret?:string; closeDatabase?:boolean; integrations?:IntegrationOptions; support?:SupportOptions; publicWiki?:PublicWikiOptions; shopify?:ShopifyOptions; caldock?:CaldockOptions; studio?:StudioOptions; hr?:HrOptions; it?:ItOptions; quality?:QualityOptions; dealer?:DealerOptions };
+export type AppOptions = { clock?:()=>number; nudgeIntervalMs?:number; translationModel?:JsonModel|null; okrDraftModel?:JsonModel|null; mailer?:Mailer|null; completionModel?:JsonModel|null; fxFetcher?:typeof fetch; db:Database; environment?:string; allowDevLogin?:boolean; devLoginSecret?:string; closeDatabase?:boolean; integrations?:IntegrationOptions; support?:SupportOptions; publicWiki?:PublicWikiOptions; shopify?:ShopifyOptions; caldock?:CaldockOptions; studio?:StudioOptions; hr?:HrOptions; it?:ItOptions; quality?:QualityOptions; dealer?:DealerOptions; aiLab?:{ client?:any; model?:string; userIds?:string[] } };
 
 function actor(req: FastifyRequest): User { return req.actor || deny(401,'UNAUTHENTICATED','Authentication is required'); }
 function scope(user: User) {
@@ -191,7 +193,9 @@ export async function buildApp(options:AppOptions) {
   });
   app.delete('/auth/session',async(req,reply)=>{await db.query('DELETE FROM sessions WHERE token_hash=$1',[hash(req.sessionToken!)]);reply.header('Set-Cookie',cookie(sessionCookieName(integrations.secureCookies),'',integrations.secureCookies,0));return {revoked:true};});
   const isExecutive=(user:User)=>integrations.executiveUserIds?.includes(user.id)===true;
-  app.get('/me',async req=>({...actor(req),isAdmin:isOrgAdmin(actor(req) as any,{executiveUserIds:integrations.executiveUserIds||[]}),executiveAccess:isExecutive(actor(req)),mcpAccess:isExecutive(actor(req))&&(integrations.mcpUserIds||[]).includes(actor(req).id),financeAccess:await financeAccessOf(db,actor(req),isExecutive(actor(req))),supportAccess:supportPermissions(actor(req),options.support||{},integrations.executiveUserIds||[]),qualityFactory:(req as any).qualityFactory||null}));
+  const aiLabUsers=options.aiLab?.userIds||(process.env.WORKOS_AI_LAB_USER_IDS||'').split(',').map(x=>x.trim()).filter(Boolean);
+  if(!aiLabUsers.length)aiLabUsers.push(...(integrations.mcpUserIds||[]));
+  app.get('/me',async req=>({...actor(req),isAdmin:isOrgAdmin(actor(req) as any,{executiveUserIds:integrations.executiveUserIds||[]}),executiveAccess:isExecutive(actor(req)),mcpAccess:isExecutive(actor(req))&&(integrations.mcpUserIds||[]).includes(actor(req).id),aiLabAccess:aiLabAllowed(actor(req),{userIds:aiLabUsers,isExecutive}),financeAccess:await financeAccessOf(db,actor(req),isExecutive(actor(req))),supportAccess:supportPermissions(actor(req),options.support||{},integrations.executiveUserIds||[]),qualityFactory:(req as any).qualityFactory||null}));
   app.get('/executive/summary',async req=>{const user=actor(req);if(!isExecutive(user))deny(403,'FORBIDDEN','Executive access is required');return db.transaction(tx=>executiveSummary(tx,user.org_id,integrations.teamMode));});
   registerSupportRoutes(app,db,options.support,integrations.executiveUserIds);
   await registerOkrPublish(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
@@ -329,6 +333,8 @@ export async function buildApp(options:AppOptions) {
   await registerQualityRoutes(app,db,{...options.quality,notify,intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0),isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),now:options.clock});
   await registerItRoutes(app,db,{...options.it,quality:options.quality,executiveIds:integrations.executiveUserIds||[],now:options.clock,intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0)});
   await registerInboxRoutes(app,db);
+  // AI超算 (owner only): WORKOS_AI_LAB_USER_IDS, or the MCP owner list when unset; uses ANTHROPIC_API_KEY and AI_LAB_MODEL.
+  await registerAiLabRoutes(app,db,{userIds:aiLabUsers,isExecutive,model:options.aiLab?.model||process.env.AI_LAB_MODEL,now:options.clock,client:options.aiLab?.client||(process.env.ANTHROPIC_API_KEY?new Anthropic({apiKey:process.env.ANTHROPIC_API_KEY,timeout:15*60000,maxRetries:1}):undefined)});
   await registerMcpRoutes(app,db,{userIds:integrations.mcpUserIds||[],executiveUserIds:integrations.executiveUserIds||[],publicUrl:integrations.appPublicUrl,secureCookies:integrations.secureCookies,extraRedirectUris:integrations.mcpRedirectUris||[],taskScope:scope});
   const productHelpers=await registerProductRoutes(app,db,{isAdmin:isExecutive /* sensitive ERP data: only deployment-configured executives bypass grants; in-app admins need grants */});
   await registerProductLibraryRoutes(app,db,{isAdmin:isExecutive,requestPrice:productHelpers.requestPrice,audit:productHelpers.audit});

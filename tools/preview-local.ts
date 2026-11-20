@@ -110,10 +110,22 @@ const previewAi = { model: 'preview-sample', json: async (_system: string, user:
     stage: Math.min(input.stages.length, 1 + Math.floor(i * input.stages.length / Math.max(1, parts.length))), dueDate: new Date(now + (end - now) * (i + 1) / (parts.length + 1)).toISOString().slice(0, 10), priority: i === 0 ? 'high' : 'medium' })) };
 } };
 
+// AI超算 on the test site: no AI key here, so a canned sample answer streams in, with a drawing and a 3D model / web page to preview.
+const AI_LAB_DEMO: Record<string, string> = {
+  mech: '## 方案概述（测试站示例回答）\n\n这是测试站的固定示例，正式站会按你的需求实时计算。\n\n| 项目 | 参数 |\n| --- | --- |\n| 工作幅面 | 1300 × 900 mm |\n| 导轨 | HGR20 直线导轨 ×4 |\n| 传动 | 同步带 HTD-3M，宽 15 mm |\n\n```svg\n<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 240"><rect width="420" height="240" fill="#fff"/><rect x="40" y="60" width="300" height="120" fill="none" stroke="#1f2433" stroke-width="2"/><rect x="170" y="40" width="40" height="160" fill="#dfe6ff" stroke="#3c64f4" stroke-width="2"/><line x1="40" y1="210" x2="340" y2="210" stroke="#d92d20"/><text x="160" y="228" font-size="12" fill="#d92d20">1300 mm</text><text x="40" y="30" font-size="13" fill="#1f2433">龙门结构示意（俯视）</text></svg>\n```\n\n```html\n<!doctype html><html><body style="margin:0;background:#f6f7fb"><script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script><script>const s=new THREE.Scene(),c=new THREE.PerspectiveCamera(50,innerWidth/innerHeight,.1,100),r=new THREE.WebGLRenderer({antialias:true});r.setSize(innerWidth,innerHeight);r.setClearColor(0xf6f7fb);document.body.appendChild(r.domElement);const m=new THREE.Mesh(new THREE.BoxGeometry(3,.3,2),new THREE.MeshStandardMaterial({color:0x3c64f4}));s.add(m,new THREE.AmbientLight(0xffffff,.6));const l=new THREE.DirectionalLight(0xffffff,.8);l.position.set(3,5,4);s.add(l);c.position.set(3,3,4);c.lookAt(0,0,0);(function a(){m.rotation.y+=.01;r.render(s,c);requestAnimationFrame(a)})();</script></body></html>\n```\n',
+  elec: '## 电气架构（测试站示例回答）\n\n1. 220V AC 进线 → 断路器 16A → 漏电保护 30mA\n2. 24V 开关电源 350W 供步进驱动和控制板\n3. 门盖、急停、水流开关串联进激光使能\n\n```svg\n<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 160"><rect width="420" height="160" fill="#fff"/><rect x="20" y="60" width="80" height="40" fill="#fff4e0" stroke="#9a5b00"/><text x="32" y="85" font-size="12">220V 进线</text><line x1="100" y1="80" x2="160" y2="80" stroke="#1f2433" stroke-width="2"/><rect x="160" y="60" width="90" height="40" fill="#eef3ff" stroke="#245bdb"/><text x="170" y="85" font-size="12">24V 电源</text><line x1="250" y1="80" x2="310" y2="80" stroke="#1f2433" stroke-width="2"/><rect x="310" y="60" width="90" height="40" fill="#e8f6ee" stroke="#17803d"/><text x="322" y="85" font-size="12">步进驱动</text></svg>\n```\n',
+  soft: '## 落地页（测试站示例回答）\n\n下面是一个可以直接预览的示例页面。\n\n```html\n<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{margin:0;font-family:system-ui;background:#0b0d17;color:#fff}.hero{padding:80px 24px;text-align:center;background:radial-gradient(circle at top,#3c64f4,#0b0d17 70%)}h1{font-size:44px;margin:0 0 12px}p{color:#c9ccd6}.btn{display:inline-block;margin-top:20px;padding:12px 28px;border-radius:999px;background:#fff;color:#0b0d17;font-weight:700}</style></head><body><section class="hero"><h1>Demo Laser X1</h1><p>示例产品落地页（测试站）</p><span class="btn">立即购买</span></section></body></html>\n```\n',
+};
+const previewLabClient = { messages: { stream(body: any, opts: any) {
+  const text = body.system.includes('“机械 / 工业设计”工位') ? AI_LAB_DEMO.mech : body.system.includes('“电气设计”工位') ? AI_LAB_DEMO.elec : AI_LAB_DEMO.soft;
+  return (async function* () { for (let i = 0; i < text.length; i += 40) { if (opts?.signal?.aborted) throw new Error('aborted'); await new Promise(r => setTimeout(r, 40)); yield { type: 'content_block_delta', delta: { type: 'text_delta', text: text.slice(i, i + 40) } }; } })();
+} } };
+
 const app = await buildApp({
   db, environment: 'development', mailer: null, completionModel: null, translationModel: null, okrDraftModel: previewAi, nudgeIntervalMs: 0,
   integrations: { appPublicUrl: ORIGIN, executiveUserIds: ['m1'], mcpUserIds: ['m1'] }, // the owner may try the WorkOS MCP server here
   hr: { dataKey: randomBytes(32).toString('base64') }, // a throwaway key: sensitive HR fields work, and vanish with the process
+  aiLab: { userIds: ['m1'], client: previewLabClient },
 });
 
 // A sample project with stages, tasks, a file and a status update, made through the same API the page uses.
@@ -141,6 +153,10 @@ const app = await buildApp({
   await m2('POST', `/tasks/${t1.id}/updates`, { requestId: randomUUID(), body: '价目表初稿已完成，正在核对（示例）。' });
   const v1 = (await m2('GET', `/tasks/${t1.id}`)).json().version;
   await m2('POST', `/tasks/${t1.id}/submissions`, { expectedVersion: v1, description: '价目表已上传，请验收（示例）。' });
+  // A task given to m2 and completed with "完成": the owner opens it from the task list and sees the result and can score it.
+  const t2 = (await call('POST', '/tasks', { title: '示例：运往英国的运费报价', description: '虚构示例任务：把运费报价发给我。', ownerId: 'm2', criteria: ['报价已发出'], dueAt: day(2) })).json();
+  const v2 = (await m2('GET', `/tasks/${t2.id}`)).json().version;
+  await m2('POST', `/tasks/${t2.id}/complete`, { expectedVersion: v2, result: '400 USD，50–60 天（示例）', attachmentIds: [] });
   await m4('POST', '/tasks/assign', { assigneeId: 'm1', title: '确认示例新员工入职资料', description: '虚构示例任务，用来演示“去领取”。', criteria: ['资料确认完毕'], dueAt: day(6) });
 }
 

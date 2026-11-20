@@ -93,6 +93,8 @@ test('attachments: allowed types only, size-checked, scoped to visible tasks, do
   const pdfDl=await call('m2','GET',`/tasks/${t.id}/attachments/${pdf.json().id}`);const csp=String(pdfDl.headers['content-security-policy']);
   assert.doesNotMatch(csp,/sandbox/,'Chrome refuses to show a sandboxed PDF');assert.doesNotMatch(csp,/script-src/);assert.match(csp,/frame-ancestors 'self'/);assert.match(String(pdfDl.headers['content-disposition']),/^inline/);
   const done=await call('m2','POST',`/tasks/${t.id}/complete`,{expectedVersion:t.version,result:'Uploaded the screenshot of the fictional result as evidence.',selfReview:'Evidence attached.',attachmentIds:[ok.json().id]});assert.equal(done.statusCode,201,done.body);
+  const info=(await call('m2','GET',`/tasks/${t.id}/completion`)).json();assert.equal(info.completion.result,'Uploaded the screenshot of the fictional result as evidence.');
+  assert.deepEqual(info.attachments.map((a:any)=>a.name),['result.png'],'only the files the completion refers to');
   assert.equal((await call('m2','POST',`/tasks/${(await create()).id}/complete`,{expectedVersion:1,result:'Referencing an attachment from a different task is not allowed.',selfReview:'Should fail.',attachmentIds:[ok.json().id]})).statusCode,400);
 });
 
