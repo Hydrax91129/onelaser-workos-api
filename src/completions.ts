@@ -146,6 +146,28 @@ export function claudeModel(config: { apiKey?: string; model?: string } | undefi
   };
 }
 
+/** A fetch-shaped bridge for the two older callers written against an OpenAI-style chat endpoint (Wiki assistant,
+ * task-evidence reviewer): it answers their /chat/completions request with Claude (Haiku by default) and returns the
+ * same response shape ({ choices: [{ finish_reason, message: { content } }] }), so their checks stay as they are. */
+export function claudeChatFetcher(config: { apiKey?: string; model?: string }, client?: Pick<Anthropic, 'messages'>): typeof fetch {
+  const api = client || new Anthropic({ apiKey: config.apiKey, timeout: 60000, maxRetries: 1 }), model = config.model?.trim() || 'claude-haiku-5-5';
+  return (async (_url: any, init?: any) => {
+    const body = JSON.parse(String(init?.body || '{}'));
+    const msgs = (body.messages || []) as { role: string; content: string }[];
+    const system = msgs.filter(m => m.role === 'system').map(m => m.content).join('\n\n');
+    const schema = body.response_format?.json_schema?.schema;
+    const r = await api.messages.create({
+      model, max_tokens: Math.max(256, Math.min(8000, Number(body.max_tokens) || 2000)),
+      system: system + (body.response_format && !schema ? '\n\nReply with one JSON object only.' : ''),
+      thinking: { type: 'disabled' }, ...(schema ? { output_config: { effort: 'low', format: { type: 'json_schema', schema } } } : {}),
+      messages: msgs.filter(m => m.role !== 'system').map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content })),
+    } as any, { signal: init?.signal });
+    let text = r.content.filter((b): b is Anthropic.TextBlock => b.type === 'text').map(b => b.text).join('');
+    if (body.response_format && !schema) { const m = /\{[\s\S]*\}/.exec(text); text = m ? m[0] : text; }
+    return new Response(JSON.stringify({ choices: [{ finish_reason: r.stop_reason === 'end_turn' ? 'stop' : 'length', message: { role: 'assistant', content: text } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+}
+
 const SCORE_SCHEMA = { type: 'object', additionalProperties: false, required: ['score', 'summary'], properties: { score: { type: 'number' }, summary: { type: 'string' } } };
 export async function scoreCompletion(model: JsonModel, task: { title: string; description?: string | null }, c: { result: string; selfReview: string; attachments: string[] }, lang: 'zh' | 'en') {
   const out = await model.json(

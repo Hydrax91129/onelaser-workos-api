@@ -1,3 +1,4 @@
+import { claudeChatFetcher } from '../completions.js';
 import { objectivePlanning, krPlanning } from '../okr.js';
 import { assertKrWeight, assertObjectivePoints, rebalanceKrs, rebalanceObjectives } from '../okr-weights.js';
 import { PUBLIC_USER_COLUMNS, isAdmin as isOrgAdmin } from '../org.js';
@@ -94,7 +95,9 @@ export function integrationOptionsFromEnv(env:NodeJS.ProcessEnv):IntegrationOpti
   const botOAuth:BotOAuthConfig|undefined=botMcpAuthMode==='oauth'?{publicUrl,orgId:botOrgId,redirectUris,secureCookies:env.NODE_ENV==='production',preRegisteredClientId:env.GROK_BOT_OAUTH_PRE_REGISTERED_CLIENT_ID||undefined}:undefined;
   if(botMcpAuthMode==='oauth'){if(!redirectUris.length)botMissing.push('GROK_BOT_OAUTH_REDIRECT_URIS');if(!publicUrl)botMissing.push('APP_PUBLIC_URL');}
   if(aiReviewMode==='bot'&&!transportMissing.length&&botOrgId?.trim())bot=new GrokBotAdapter({webhookUrl:env.GROK_BOT_WEBHOOK_URL!,webhookSecret:env.GROK_BOT_WEBHOOK_SECRET!,allowedHost:env.GROK_BOT_WEBHOOK_ALLOWED_HOST!,workerToken:botMcpAuthMode==='bearer'?env.GROK_BOT_WORKER_TOKEN:undefined,orgId:botOrgId});
-  if(aiReviewMode==='api'&&key&&env.AI_MODEL_ID){ai=new GrokReviewer({apiKey:key,model:env.AI_MODEL_ID,baseUrl:env.AI_PROVIDER_BASE_URL,timeoutMs:Number(env.AI_REVIEW_TIMEOUT_MS)||45000});}
+  // Claude Haiku once ANTHROPIC_API_KEY is set (owner, 2026-11-20: everything but AI超算 on Haiku); otherwise the xAI settings.
+  if(aiReviewMode==='api'&&env.ANTHROPIC_API_KEY){ai=new GrokReviewer({apiKey:'anthropic',model:env.ANTHROPIC_MODEL||'claude-haiku-5-5',timeoutMs:Number(env.AI_REVIEW_TIMEOUT_MS)||45000},claudeChatFetcher({apiKey:env.ANTHROPIC_API_KEY,model:env.ANTHROPIC_MODEL}));}
+  else if(aiReviewMode==='api'&&key&&env.AI_MODEL_ID){ai=new GrokReviewer({apiKey:key,model:env.AI_MODEL_ID,baseUrl:env.AI_PROVIDER_BASE_URL,timeoutMs:Number(env.AI_REVIEW_TIMEOUT_MS)||45000});}
   return {additionalUserIds,managerUserIds,executiveUserIds:(env.WORKOS_EXECUTIVE_USER_IDS||'').split(',').map(x=>x.trim()).filter(Boolean),mcpUserIds:(env.WORKOS_MCP_USER_IDS||'').split(',').map(x=>x.trim()).filter(Boolean),mcpRedirectUris:validMcpRedirects(env.WORKOS_MCP_REDIRECT_URIS),teamMode:env.WORKOS_TEAM_MODE==='company'?'company':'department',teamName:env.WORKOS_TEAM_NAME||'OneLaser',allowedDepartmentIds:(env.DINGTALK_ALLOWED_DEPARTMENT_IDS||'').split(',').map(x=>x.trim()).filter(Boolean),dingtalk,corpId:env.DINGTALK_CORP_ID,appPublicUrl:publicUrl,secureCookies:env.NODE_ENV==='production',ai,aiReviewMode,bot,botMcpAuthMode,botOAuth,notificationsEnabled:env.DINGTALK_NOTIFICATIONS_ENABLED==='true'&&!!env.DINGTALK_AGENT_ID,frontendConnected:env.FRONTEND_CONNECTED==='true',setup:{dingtalkMissing,aiMissing:aiReviewMode==='bot'?botMissing:[...(!key?['AI_PROVIDER_API_KEY']:[]),...(!env.AI_MODEL_ID?['AI_MODEL_ID']:[])],notificationMissing:[...(!env.DINGTALK_AGENT_ID?['DINGTALK_AGENT_ID']:[]),...(env.DINGTALK_NOTIFICATIONS_ENABLED!=='true'?['DINGTALK_NOTIFICATIONS_ENABLED']:[])]}};
 }
 export async function registerIntegrationRoutes(app:FastifyInstance,db:Database,options:IntegrationOptions){

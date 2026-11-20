@@ -14,7 +14,7 @@
 - 后端 `Hydrax91129/onelaser-workos-api`：Fastify + TypeScript，PostgreSQL（本地测试用 PGlite），参数校验用 zod。
   每个模块一个文件，导出 `xxxSchema`（建表 SQL，汇总到 `src/db.ts` 的 `schema`）和 `registerXxxRoutes`（在 `src/app.ts` 注册）。
 - AI（翻译、OKR 起草、成果评分）：设了 `ANTHROPIC_API_KEY` 就用 Claude（`ANTHROPIC_MODEL`，默认 `claude-haiku-5-5`，completions.ts 的 `claudeModel`）；
-  没设时沿用 xAI（`AI_PROVIDER_API_KEY` / `XAI_API_KEY` 和 `AI_*_MODEL_ID`）。Wiki 助手和 Grok Bot 仍走 xAI。
+  没设时沿用 xAI（`AI_PROVIDER_API_KEY` / `XAI_API_KEY` 和 `AI_*_MODEL_ID`）。除 AI超算（Opus）外全部用 Haiku（2026-11-20 老板定）：Wiki 助手（`PUBLIC_WIKI_MODEL_ENABLED` 打开时）和成果证据审核（`aiReviewMode` 为 api 时）设了 `ANTHROPIC_API_KEY` 也走 Claude，通过 completions.ts 的 `claudeChatFetcher` 把原来的 chat-completions 请求转给 Claude；外部的 Grok Bot（bot 模式，webhook 到 xAI 那边的机器人）不在本系统里，换不了。
 - 上线：后端仓库 `deploy/frontend-revision.txt` 写死前端的 commit，Docker 构建时拉取这个版本的前端。线上服务在 Render（onelaser-workos-migration）。
 
 ## 2. 模块地图（谁负责什么数据）
@@ -37,7 +37,7 @@
 | KOL ROI | — | kol.js | （待补充） |
 | Bug 与建议、版本记录 | feedback.ts | feedback.js, changelog.js | feedback |
 | AI 连接（WorkOS MCP） | mcp.ts | mcp-connect.js | mcp_clients、mcp_auth_codes、mcp_tokens、mcp_calls。`https://craftos.app/api/mcp` 给老板自己的 Claude（OAuth）或 Composio（个人令牌）用；只有 `WORKOS_MCP_USER_IDS` 里、同时是主管理员的人能连，见第 3 节第 10 条 |
-| AI超算（老板私用） | ai-lab.ts | ai-lab.js | ai_lab_chats（对话，每个人只看自己的）、ai_lab_previews（AI 写的网页 / 图纸，30 天清理）。左侧“AI超算”组下三个工位：机械 / 工业设计、电气设计、软件开发（2026-11-20 老板定）。主管理员登录就能看到（`WORKOS_AI_LAB_USER_IDS` 可以再缩小到其中几个人，不用设），其他人接口一律 404、菜单不显示、版本记录不写。用 `ANTHROPIC_API_KEY`，模型 `AI_LAB_MODEL`（默认 claude-opus-5-5）；页面和系统提示词里不出现 AI 厂商或模型名（ai-lab.js 有测试检查）。回复在后台生成、边写边存，页面轮询；```svg / ```html 代码块在 `/api/ai-lab/previews/:id` 预览：响应头 CSP `sandbox`（不带 allow-same-origin，拿不到 WorkOS cookie 和接口），只允许从 cdnjs / jsdelivr / unpkg 加载脚本，Caddyfile 的 `@not_wiki` 排除这个路径 |
+| AI超算（老板私用） | ai-lab.ts | ai-lab.js | ai_lab_chats（对话，每个人只看自己的）、ai_lab_previews（AI 写的网页 / 图纸，30 天清理）。对话框可以上传附件 ai_lab_files（2026-11-20 老板定：任何文件都能传，单个 50 MB 以内，大照片在浏览器里先缩到长边 2400 px；图片、PDF 原样交给模型，文本格式（DXF、STEP、CSV、代码…，按内容判断）作为文字，DWG / SolidWorks / Office 等读不了的格式只告诉模型文件名、由它请用户导出，用公共的 upload-zone.js，`/api/ai-lab/files/:id` 已加进 file-preview.js 的 `FILE_PATH` 和 Caddyfile 的 `@stored_file`；最近 4 轮带附件的消息把文件原样交给模型，更早的只写文件名）。左侧“AI超算”组下三个工位：机械 / 工业设计、电气设计、软件开发（2026-11-20 老板定）。主管理员登录就能看到（`WORKOS_AI_LAB_USER_IDS` 可以再缩小到其中几个人，不用设），其他人接口一律 404、菜单不显示、版本记录不写。用 `ANTHROPIC_API_KEY`，模型 `AI_LAB_MODEL`（默认 claude-opus-5-5）；页面和系统提示词里不出现 AI 厂商或模型名（ai-lab.js 有测试检查）。回复在后台生成、边写边存，页面轮询；```svg / ```html 代码块在 `/api/ai-lab/previews/:id` 预览：响应头 CSP `sandbox`（不带 allow-same-origin，拿不到 WorkOS cookie 和接口），只允许从 cdnjs / jsdelivr / unpkg 加载脚本，Caddyfile 的 `@not_wiki` 排除这个路径 |
 | CalDock（Mac mini 托管） | caldock*.ts | 独立前端仓库 | caldock_*，与 WorkOS 用户完全隔离 |
 
 ## 3. 共享数据规则（最重要）
