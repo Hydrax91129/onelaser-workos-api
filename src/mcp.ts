@@ -1,5 +1,5 @@
 /**
- * WorkOS MCP server (https://craftos.app/api/mcp) for the company owner's own AI: Claude (custom connector,
+ * WorkOS MCP server (https://erp.1laser.com/api/mcp; craftos.app until the move) for the company owner's own AI: Claude (custom connector,
  * OAuth) or Composio and other clients (personal access token).
  *
  * Who may use it: only the people listed in WORKOS_MCP_USER_IDS who are also main admins

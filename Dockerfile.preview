@@ -1,5 +1,5 @@
 # Test site with fictional data (tools/preview-local.ts), deployed by a separate Render service from the claude/preview branch.
-# It has no database: everything lives in memory and resets on every deploy or restart. Never point it at craftos.app data.
+# It has no database: everything lives in memory and resets on every deploy or restart. Never point it at production (erp.1laser.com / craftos.app) data.
 FROM node:24-bookworm-slim AS frontend
 WORKDIR /app
 COPY tools/github-fetch-auth.mjs tools/fetch-frontend.mjs ./tools/
