@@ -194,7 +194,8 @@ export async function buildApp(options:AppOptions) {
   app.delete('/auth/session',async(req,reply)=>{await db.query('DELETE FROM sessions WHERE token_hash=$1',[hash(req.sessionToken!)]);reply.header('Set-Cookie',cookie(sessionCookieName(integrations.secureCookies),'',integrations.secureCookies,0));return {revoked:true};});
   const isExecutive=(user:User)=>integrations.executiveUserIds?.includes(user.id)===true;
   const aiLabUsers=options.aiLab?.userIds||(process.env.WORKOS_AI_LAB_USER_IDS||'').split(',').map(x=>x.trim()).filter(Boolean);
-  if(!aiLabUsers.length)aiLabUsers.push(...(integrations.mcpUserIds||[]));
+  // AI超算 (owner, 2026-11-20): every main admin sees it when WORKOS_AI_LAB_USER_IDS is not set (no extra setup).
+  if(!aiLabUsers.length)aiLabUsers.push(...(integrations.executiveUserIds||[]));
   app.get('/me',async req=>({...actor(req),isAdmin:isOrgAdmin(actor(req) as any,{executiveUserIds:integrations.executiveUserIds||[]}),executiveAccess:isExecutive(actor(req)),mcpAccess:isExecutive(actor(req))&&(integrations.mcpUserIds||[]).includes(actor(req).id),aiLabAccess:aiLabAllowed(actor(req),{userIds:aiLabUsers,isExecutive}),financeAccess:await financeAccessOf(db,actor(req),isExecutive(actor(req))),supportAccess:supportPermissions(actor(req),options.support||{},integrations.executiveUserIds||[]),qualityFactory:(req as any).qualityFactory||null}));
   app.get('/executive/summary',async req=>{const user=actor(req);if(!isExecutive(user))deny(403,'FORBIDDEN','Executive access is required');return db.transaction(tx=>executiveSummary(tx,user.org_id,integrations.teamMode));});
   registerSupportRoutes(app,db,options.support,integrations.executiveUserIds);

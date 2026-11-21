@@ -1,3 +1,4 @@
+import { claudeChatFetcher } from './completions.js';
 import type { FastifyInstance } from 'fastify';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -33,8 +34,9 @@ const sessionFields={sessionId:z.string().uuid(),sessionToken:z.string().regex(/
 const reviewFields={contentHash:z.string().regex(/^[a-f0-9]{64}$/),decision:z.enum(['approved','changes_requested']),note:z.string().trim().min(3).max(4000),humanConfirmation:z.literal(true)};
 const articleHash=(a:PublicArticle)=>digest({id:a.id,title:a.title,family:a.family,body:a.body_text});
 export function publicWikiOptionsFromEnv(env:NodeJS.ProcessEnv):PublicWikiOptions {
- const enabled=env.PUBLIC_WIKI_MODEL_ENABLED==='true',key=env.PUBLIC_WIKI_API_KEY,model=env.PUBLIC_WIKI_MODEL_ID;
- return {dataDir:env.PUBLIC_WIKI_DATA_DIR||'/app/wiki/data',orgId:env.WORKOS_SUPPORT_ORG_ID,publicUrl:env.APP_PUBLIC_URL,model:enabled&&key&&model?{apiKey:key,id:model,dailyLimit:Math.max(1,Math.min(500,Number(env.PUBLIC_WIKI_MODEL_DAILY_LIMIT)||50))}:undefined};
+ const enabled=env.PUBLIC_WIKI_MODEL_ENABLED==='true',claude=!!env.ANTHROPIC_API_KEY,key=claude?'anthropic':env.PUBLIC_WIKI_API_KEY,model=claude?(env.ANTHROPIC_MODEL||'claude-haiku-5-5'):env.PUBLIC_WIKI_MODEL_ID;
+ // Claude Haiku once ANTHROPIC_API_KEY is set (owner, 2026-11-20); otherwise the xAI settings as before.
+ return {dataDir:env.PUBLIC_WIKI_DATA_DIR||'/app/wiki/data',orgId:env.WORKOS_SUPPORT_ORG_ID,publicUrl:env.APP_PUBLIC_URL,model:enabled&&key&&model?{apiKey:key,id:model,dailyLimit:Math.max(1,Math.min(500,Number(env.PUBLIC_WIKI_MODEL_DAILY_LIMIT)||50))}:undefined,...(enabled&&claude?{fetcher:claudeChatFetcher({apiKey:env.ANTHROPIC_API_KEY,model:env.ANTHROPIC_MODEL})}:{})};
 }
 function terms(q:string){return q.toLowerCase().replace(/固件/g,' firmware ').replace(/安装/g,' installation setup ').replace(/气辅|气辅助/g,' air assist ').replace(/自动对焦/g,' autofocus ').replace(/软件/g,' software ').replace(/下载/g,' download ').replace(/不出光/g,' laser firing ').match(/[a-z0-9]+|[\u4e00-\u9fff]{2,}/g)?.filter(t=>t.length>1&&!['the','and','how','can','for','with','does','this','that','please','what'].includes(t))||[];}
 export function retrievePublicArticles(articles:PublicArticle[],question:string,c:{articleId?:string;family?:string}={}) {
