@@ -263,6 +263,8 @@ const app = await buildApp({
   await db.query(`UPDATE ful_orders SET exchange=$2::jsonb WHERE org_id=$1 AND number='#5111'`, [ORG, JSON.stringify({ by: 'm6', at: new Date(Date.now() - 20 * 3600_000).toISOString(), reason: 'Damaged on delivery, replacement unit sent (sample)', newOrder: '#5118' })]);
   for (const [n, by, text] of [['#5107', 'm6', 'Carrier says the truck is delayed in Memphis; customer informed (sample)'], ['#5101', 'm4', 'Customer will wire the balance on Friday (sample)'], ['#5108', 'm4', 'Left two voicemails, try again tomorrow morning (sample)']])
     await db.query(`UPDATE ful_orders SET note=$3::jsonb WHERE org_id=$1 AND number=$2`, [ORG, n, JSON.stringify({ text, by, at: new Date(Date.now() - 5 * 3600_000).toISOString() })]);
+}
+
 // 公司制度: sample handbook, policies, SOPs and culture (fictional example text, not real company rules).
 {
   const tok: Record<string, string> = {};
