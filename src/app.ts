@@ -25,6 +25,7 @@ import { registerMcpRoutes, MCP_PUBLIC_PATHS } from './mcp.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { registerAiLabRoutes, aiLabAllowed } from './ai-lab.js';
 import { registerFinanceRoutes, financeAccessOf } from './finance.js';
+import { registerPoliciesRoutes, policyTodoOf } from './policies.js';
 import { registerProductLibraryRoutes } from './product-library.js';
 import { registerProductImportRoutes } from './product-import.js';
 import { registerInboxRoutes, pushInbox, taskFollowers } from './inbox.js';
@@ -195,7 +196,7 @@ export async function buildApp(options:AppOptions) {
   const aiLabUsers=options.aiLab?.userIds||(process.env.WORKOS_AI_LAB_USER_IDS||'').split(',').map(x=>x.trim()).filter(Boolean);
   // AI超算 (owner, 2026-11-20): every main admin sees it when WORKOS_AI_LAB_USER_IDS is not set (no extra setup).
   if(!aiLabUsers.length)aiLabUsers.push(...(integrations.executiveUserIds||[]));
-  app.get('/me',async req=>({...actor(req),isAdmin:isOrgAdmin(actor(req) as any,{executiveUserIds:integrations.executiveUserIds||[]}),executiveAccess:isExecutive(actor(req)),mcpAccess:isExecutive(actor(req))&&(integrations.mcpUserIds||[]).includes(actor(req).id),aiLabAccess:aiLabAllowed(actor(req),{userIds:aiLabUsers,isExecutive}),financeAccess:await financeAccessOf(db,actor(req),isExecutive(actor(req))),supportAccess:supportPermissions(actor(req),options.support||{},integrations.executiveUserIds||[]),qualityFactory:(req as any).qualityFactory||null}));
+  app.get('/me',async req=>({...actor(req),isAdmin:isOrgAdmin(actor(req) as any,{executiveUserIds:integrations.executiveUserIds||[]}),executiveAccess:isExecutive(actor(req)),mcpAccess:isExecutive(actor(req))&&(integrations.mcpUserIds||[]).includes(actor(req).id),aiLabAccess:aiLabAllowed(actor(req),{userIds:aiLabUsers,isExecutive}),financeAccess:await financeAccessOf(db,actor(req),isExecutive(actor(req))),policyTodo:await policyTodoOf(db,actor(req)),policiesManage:isExecutive(actor(req))||(Array.isArray((actor(req) as any).grants)&&(actor(req) as any).grants.includes('policies_manage')),supportAccess:supportPermissions(actor(req),options.support||{},integrations.executiveUserIds||[]),qualityFactory:(req as any).qualityFactory||null}));
   app.get('/executive/summary',async req=>{const user=actor(req);if(!isExecutive(user))deny(403,'FORBIDDEN','Executive access is required');return db.transaction(tx=>executiveSummary(tx,user.org_id,integrations.teamMode));});
   registerSupportRoutes(app,db,options.support,integrations.executiveUserIds);
   await registerOkrPublish(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
@@ -326,6 +327,7 @@ export async function buildApp(options:AppOptions) {
   await registerProjectRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),model:options.okrDraftModel===undefined?(aiModel(()=>jsonModel({apiKey:process.env.AI_PROVIDER_API_KEY||process.env.XAI_API_KEY,model:process.env.AI_OKR_MODEL_ID||process.env.AI_MODEL_ID||process.env.AI_TRANSLATION_MODEL_ID||process.env.AI_SCORING_MODEL_ID,baseUrl:process.env.AI_PROVIDER_BASE_URL}))||null):options.okrDraftModel});
   await registerWmsRoutes(app,db,{isAdmin:isExecutive /* sensitive ERP data: only deployment-configured executives bypass grants; in-app admins need grants */});
   await registerFinanceRoutes(app,db,{isAdmin:isExecutive /* finance is sensitive: only deployment-configured main admins bypass grants */,now:options.clock});
+  await registerPoliciesRoutes(app,db,{isAdmin:isExecutive,executiveUserIds:integrations.executiveUserIds||[],quality:options.quality,now:options.clock});
   await registerRmaRoutes(app,db,{isAdmin:isExecutive /* sensitive ERP data: only deployment-configured executives bypass grants; in-app admins need grants */,now:options.clock});
   await registerScmRoutes(app,db,{isAdmin:isExecutive,shopify:options.shopify,now:options.clock});
   await registerHrRoutes(app,db,{...options.hr,executiveUserIds:integrations.executiveUserIds||[],quality:options.quality,now:options.clock,intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0)});

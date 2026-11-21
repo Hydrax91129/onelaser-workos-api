@@ -13,7 +13,7 @@ if(!treeResponse.ok) throw new Error(`Frontend tree unavailable (${describeStatu
 const tree=await treeResponse.json();
 if(tree.truncated) throw new Error('Frontend tree unexpectedly truncated.');
 const files=tree.tree.filter(x=>x.type==='blob'&&x.path.startsWith('dist/')&&x.path!=='dist/.nojekyll');
-if(!files.length||files.length>100||!files.some(x=>x.path==='dist/live-app.js')) throw new Error('Pinned revision is not the live-capable frontend.');
+if(!files.length||files.length>200||!files.some(x=>x.path==='dist/live-app.js')) throw new Error('Pinned revision is not the live-capable frontend.');
 let total=0;
 for(const file of files){
   const relative=file.path.slice(5);
