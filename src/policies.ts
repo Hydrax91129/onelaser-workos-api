@@ -12,6 +12,10 @@
  * Who it applies to: everyone, or one region (us / cn / intl, the region of the person's HR record) and / or chosen
  * departments. Factory contact accounts are left out (CLAUDE.md rule 7).
  *
+ * Opening (2026-11-21, owner): the area starts closed. Until a main admin switches on “open to everyone”, only main admins and
+ * policy editors see it (others get 404, the menu is hidden, nobody else is notified). Opening it sends the sign-off
+ * requests that are due.
+ *
  * Access (grants set only by main admins, in the module's 权限 tab):
  *   main admins (WORKOS_EXECUTIVE_USER_IDS)  write, publish, archive, see sign-off for everything
  *   policies_manage                          write drafts and send them for approval; see sign-off; remind
@@ -48,6 +52,7 @@ CREATE INDEX IF NOT EXISTS policy_acks_user ON policy_acks(user_id);
 CREATE TABLE IF NOT EXISTS policy_files(id text PRIMARY KEY, org_id text NOT NULL, doc_id text NOT NULL, name text NOT NULL, mime text NOT NULL, size integer NOT NULL,
   data bytea NOT NULL, uploader_id text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
 CREATE INDEX IF NOT EXISTS policy_files_doc ON policy_files(doc_id);
+CREATE TABLE IF NOT EXISTS policy_settings(org_id text PRIMARY KEY, open boolean NOT NULL DEFAULT false, updated_by text, updated_at timestamptz NOT NULL DEFAULT now());
 `;
 
 export const POLICY_CATEGORIES = ['handbook', 'policy', 'sop', 'culture'] as const;
@@ -78,6 +83,14 @@ export async function registerPoliciesRoutes(app: FastifyInstance, db: Database,
   const actorOf = (req: FastifyRequest): User => req.actor || deny(401, 'UNAUTHENTICATED', 'Authentication is required');
   const levelOf = (u: User): 'admin' | 'manage' | 'read' => o.isAdmin(u) ? 'admin' : grantsOf(u).includes('policies_manage') ? 'manage' : 'read';
   const editor = (u: User) => levelOf(u) !== 'read';
+  const isOpen = (tx: Queryable, orgId: string) => policiesOpen(tx, orgId);
+  /* Closed area: everyone but main admins and editors gets a plain 404 on every policies route. */
+  app.addHook('preHandler', async req => {
+    const url = req.routeOptions?.url || '';
+    if (!/^\/policies(\/|$|\?)/.test(url) || !req.actor) return;
+    if (editor(req.actor) || await isOpen(db, req.actor.org_id)) return;
+    deny(404, 'NOT_FOUND', 'Not found', '找不到这个页面。');
+  });
   const requireEditor = (u: User) => { if (!editor(u)) deny(403, 'POLICY_MANAGE_ONLY', 'Only people allowed to manage company policies can do this', '只有公司制度管理权限的人可以操作。'); };
   /** Main admins publish everything; an SOP for one department may also be published by a policy editor who manages that department. */
   const canPublish = (u: User, d: any) => levelOf(u) === 'admin' || (levelOf(u) === 'manage' && d.category === 'sop' && (u as any).role === 'manager'
@@ -99,7 +112,8 @@ export async function registerPoliciesRoutes(app: FastifyInstance, db: Database,
     const rows = (await tx.query(`SELECT u.id,u.display_name,u.name_zh,u.name_en,u.department_id,COALESCE(h.region,'') region,dp.name department FROM users u
       LEFT JOIN hr_profiles h ON h.user_id=u.id LEFT JOIN departments dp ON dp.org_id=u.org_id AND dp.id=u.department_id
       WHERE u.org_id=$1 AND u.active=true AND u.disabled_at IS NULL`, [orgId])).rows;
-    return rows.filter((p: any) => !factory.has(p.id) && appliesTo(d, p));
+    const open = await isOpen(tx, orgId), canSee = new Set(open ? [] : (await tx.query("SELECT id FROM users WHERE org_id=$1 AND grants ? 'policies_manage'", [orgId])).rows.map((r: any) => r.id));
+    return rows.filter((p: any) => !factory.has(p.id) && appliesTo(d, p) && (open || canSee.has(p.id) || o.isAdmin(p)));
   }
   /** A document this person may open: editors see all of them (drafts too); readers only published ones that apply to them. */
   async function docOf(tx: Queryable, u: User, docId: string, lock = false) {
@@ -155,7 +169,7 @@ export async function registerPoliciesRoutes(app: FastifyInstance, db: Database,
     });
     const depts = await departmentsOf(db, u.org_id);
     const people = editor(u) ? [...ppl.values()].filter((p: any) => p.active).map((p: any) => ({ id: p.id, name: nameOf(p) })).sort((a, b) => a.name.localeCompare(b.name)) : [];
-    return { level, today: today(), docs, departments: depts, people,
+    return { level, open: await isOpen(db, u.org_id), today: today(), docs, departments: depts, people,
       counts: { todo: docs.filter((d: any) => d.myAck === 'todo').length, pending: docs.filter((d: any) => d.draft?.state === 'pending' && d.canPublish).length,
         reviewDue: editor(u) ? docs.filter((d: any) => d.reviewDue).length : 0 } };
   });
@@ -432,6 +446,28 @@ export async function registerPoliciesRoutes(app: FastifyInstance, db: Database,
     });
   });
 
+  /* Open the area to everyone (or close it again). Opening asks everyone a published sign-off document applies to. */
+  app.get('/policies-settings', async req => { const u = actorOf(req); if (!editor(u)) deny(404, 'NOT_FOUND', 'Not found', '找不到这个页面。'); return { open: await isOpen(db, u.org_id) }; });
+  app.post('/policies-settings', async req => {
+    const u = actorOf(req); if (levelOf(u) !== 'admin') deny(403, 'POLICY_ADMIN_ONLY', 'Only main administrators can open company policies to everyone', '只有主管理员可以把公司制度开放给全员。');
+    const v = z.object({ open: z.boolean() }).strict().parse(req.body);
+    return db.transaction(async tx => {
+      const was = await isOpen(tx, u.org_id);
+      await tx.query(`INSERT INTO policy_settings(org_id,open,updated_by,updated_at) VALUES($1,$2,$3,now()) ON CONFLICT (org_id) DO UPDATE SET open=EXCLUDED.open,updated_by=EXCLUDED.updated_by,updated_at=now()`, [u.org_id, v.open, u.id]);
+      let asked = 0;
+      if (v.open && !was) {
+        const docs = (await tx.query("SELECT * FROM policy_docs WHERE org_id=$1 AND status='published' AND requires_ack AND ack_version_id IS NOT NULL", [u.org_id])).rows;
+        for (const d of docs) {
+          const signed = new Set((await tx.query('SELECT user_id FROM policy_acks WHERE version_id=$1', [d.ack_version_id])).rows.map((r: any) => r.user_id));
+          asked += await pushInbox(tx, { orgId: u.org_id, recipients: (await audienceOf(tx, u.org_id, d)).filter((p: any) => !signed.has(p.id)).map((p: any) => p.id), actorId: u.id,
+            kind: 'policy_ack', title: `请阅读并签收：${d.title_zh || d.title_en}`, body: '新发布' });
+        }
+      }
+      await audit(tx, u, v.open ? 'policies.opened' : 'policies.closed', u.org_id, { asked });
+      return { open: v.open, asked };
+    });
+  });
+
   /* 权限: main admins choose who may write company policies. */
   const execOnly = (u: User) => { if (levelOf(u) !== 'admin') deny(403, 'POLICY_ACCESS_ADMIN_ONLY', 'Only main administrators can set who manages company policies', '只有主管理员可以设置公司制度的管理权限。'); };
   app.get('/policies-access', async req => {
@@ -453,8 +489,17 @@ export async function registerPoliciesRoutes(app: FastifyInstance, db: Database,
   });
 }
 
+/** Has a main admin opened company policies to everyone yet? */
+export async function policiesOpen(db: Queryable, orgId: string) {
+  return (await db.query('SELECT open FROM policy_settings WHERE org_id=$1', [orgId])).rows[0]?.open === true;
+}
+/** For /me: may this person see the policies area at all (main admins and editors always; others once it is open). */
+export async function policiesAccessOf(db: Queryable, u: any, admin: boolean) {
+  return admin || grantsOf(u).includes('policies_manage') || (!u.quality_factory && await policiesOpen(db, u.org_id));
+}
 /** For /me: how many published documents this person still has to sign. */
-export async function policyTodoOf(db: Queryable, u: any) {
+export async function policyTodoOf(db: Queryable, u: any, admin = false) {
+  if (!(await policiesAccessOf(db, u, admin))) return 0;
   const rows = (await db.query(`SELECT d.region,d.department_ids,d.ack_version_id FROM policy_docs d WHERE d.org_id=$1 AND d.status='published' AND d.requires_ack AND d.ack_version_id IS NOT NULL
     AND NOT EXISTS (SELECT 1 FROM policy_acks a WHERE a.version_id=d.ack_version_id AND a.user_id=$2)`, [u.org_id, u.id])).rows;
   if (!rows.length) return 0;

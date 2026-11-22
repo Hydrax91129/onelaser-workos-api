@@ -26,6 +26,7 @@ test('a document applies by region and department', () => {
 
 test('policies: editors write drafts, main admins publish, everyone it applies to signs; new versions keep history', async () => {
   const { db, call } = await setup();
+  assert.equal((await call('m1', 'POST', '/policies-settings', { open: true })).statusCode, 200);
   // Nobody but main admins and granted editors writes.
   assert.equal((await call('m2', 'POST', '/policies', { category: 'handbook', titleZh: '员工手册' })).statusCode, 403);
   assert.equal((await call('m4', 'GET', '/policies-access')).statusCode, 403, 'a manager cannot set access');
@@ -81,6 +82,7 @@ test('policies: editors write drafts, main admins publish, everyone it applies t
 
 test('policies: an SOP for one department reaches only that department, and that department\'s manager may publish it', async () => {
   const { db, call } = await setup();
+  await call('m1', 'POST', '/policies-settings', { open: true });
   await call('m1', 'POST', '/policies-access', { userId: 'm4', level: 'manage' });
   await call('m1', 'POST', '/policies-access', { userId: 'm2', level: 'manage' });
   const sop = (await call('m4', 'POST', '/policies', { category: 'sop', titleZh: '示例盘点 SOP', departmentIds: ['product'], requiresAck: true, bodyZh: '1. 清点\n2. 复核' })).json();
@@ -107,4 +109,22 @@ test('policies: an SOP for one department reaches only that department, and that
   const f = (await call('m4', 'POST', `/policies/${sop.id}/files`, { name: 'sop.pdf', mime: 'application/pdf', dataBase64: pdf })).json();
   assert.equal((await call('m5', 'GET', `/policies/${sop.id}/files/${f.id}`)).headers['content-type'], 'application/pdf');
   assert.equal((await call('m3', 'GET', `/policies/${sop.id}/files/${f.id}`)).statusCode, 404);
+});
+
+test('policies start closed: only main admins and editors see them until a main admin opens them; opening asks for signatures', async () => {
+  const { db, call } = await setup();
+  assert.equal((await call('m1', 'GET', '/me')).json().policiesAccess, true);
+  assert.equal((await call('m2', 'GET', '/me')).json().policiesAccess, false);
+  assert.equal((await call('m2', 'GET', '/policies')).statusCode, 404, 'closed: a plain 404 for everyone else');
+  const doc = (await call('m1', 'POST', '/policies', { category: 'handbook', titleZh: '示例手册', requiresAck: true, bodyZh: '内容' })).json();
+  assert.equal((await call('m1', 'POST', `/policies/${doc.id}/draft/publish`)).json().asked, 0, 'nobody else is notified while closed');
+  assert.equal((await inboxOf(db, 'm2')).length, 0);
+  assert.equal((await call('m1', 'GET', '/policies')).json().open, false);
+  assert.equal((await call('m4', 'POST', '/policies-settings', { open: true })).statusCode, 403, 'only main admins open it');
+  const opened = (await call('m1', 'POST', '/policies-settings', { open: true })).json();
+  assert.equal(opened.asked, 5, 'opening asks everyone who has not signed');
+  assert.equal((await call('m2', 'GET', '/me')).json().policyTodo, 1);
+  assert.equal((await call('m2', 'GET', `/policies/${doc.id}`)).json().myAck, 'todo');
+  await call('m1', 'POST', '/policies-settings', { open: false });
+  assert.equal((await call('m2', 'GET', `/policies/${doc.id}`)).statusCode, 404, 'closing hides it again');
 });

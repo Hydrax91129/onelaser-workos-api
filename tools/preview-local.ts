@@ -271,6 +271,7 @@ const app = await buildApp({
   const as = async (who: string, method: string, url: string, payload?: unknown) => { tok[who] ??= (await issueSession(db, who)).accessToken;
     const r = await app.inject({ method: method as any, url, payload: payload as any, headers: { authorization: `Bearer ${tok[who]}` } }); return r.json(); };
   await as('m1', 'POST', '/policies-access', { userId: 'm4', level: 'manage' });
+  await as('m1', 'POST', '/policies-settings', { open: true }); // the test site shows the employee view too
   const ago = (n: number) => new Date(Date.now() - n * 864e5).toISOString().slice(0, 10);
   const make = async (who: string, doc: any, publish: boolean) => { const d = await as(who, 'POST', '/policies', doc); if (publish) await as('m1', 'POST', `/policies/${d.id}/draft/publish`); return d.id as string; };
   const handbookZh = `> 示例内容，仅用于测试站展示。\n\n## 1. 总则\n本手册适用于公司在中国的全体员工，与劳动合同一起构成双方的权利义务。\n\n## 2. 工作时间与考勤\n- 标准工作时间：周一至周五 9:00–18:00，午休 1 小时。\n- 迟到、早退超过 30 分钟按事假半天处理。\n- 加班需提前在钉钉提交申请，经直属领导批准。\n\n## 3. 休假\n| 假别 | 天数 | 说明 |\n| --- | --- | --- |\n| 年假 | 5–15 天 | 按累计工龄 |\n| 病假 | 按实际 | 需医院证明 |\n| 婚假 | 3 天 | 入职后登记结婚 |\n\n## 4. 行为准则\n1. 诚信：不得收受供应商礼品礼金。\n2. 保密：产品成本、客户资料不得外传。\n3. 安全：进入车间必须佩戴护目镜。\n\n## 5. 离职\n试用期提前 3 天、转正后提前 30 天书面通知。`;
