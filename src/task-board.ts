@@ -42,25 +42,34 @@ const priorityIds=['urgent','high','medium','low',''];
 // Status rules: Not started is automatic; the first progress update moves a task to Working; past the due date
 // Not started / Working tasks become Overdue (On hold never does); see applyAutoStatus.
 const STATUS_LABELS=[{id:'not_started',en:'Not started',zh:'未开始',color:'#797e93'},{id:'working',en:'Working',zh:'进行中',color:'#fdbc65'},{id:'hold',en:'Paused',zh:'被暂停',color:'#df7689'},{id:'review',en:'In review',zh:'待审批',color:'#b483d7'},{id:'done',en:'Done',zh:'完成',color:'#34d391'},{id:'overdue',en:'Overdue',zh:'延期',color:'#e2445c'},{id:'abandoned',en:'Abandoned',zh:'放弃',color:'#4b4f5c'}];
-/* 延期 follows the due date: past it the task is overdue, and moving the due date later brings it back (进行中, or
- * 未开始 when the owner has not posted an update yet). 放弃 is never automatic: a person chooses it, or deleting the
- * task's key result closes a task that already has work on it (okr-publish.ts retireKrTasks). (2026-11-26 老板定) */
+/* 延期 follows the due date: past it the task is overdue. Moving the due date later brings it back (进行中, or 未开始
+ * when the owner has not posted an update yet): that happens where the date is saved (boardPatch, projects.ts via
+ * statusAfterDueChange), so a 延期 someone picks by hand stays. 放弃 is never automatic: a person chooses it, or deleting
+ * the task's key result closes a task that already has work on it (okr-publish.ts retireKrTasks). (2026-11-26 老板定) */
 export async function applyAutoStatus(db:Queryable,orgId?:string){
  const scope=orgId?' AND org_id=$1':'',params=orgId?[orgId]:[];
  await db.query(`UPDATE tasks SET board_status='overdue',version=version+1,updated_at=now() WHERE board_status IN ('not_started','working') AND status<>'accepted' AND due_at<now()${scope}`,params);
- await db.query(`UPDATE tasks SET board_status=${STARTED_OR_NOT},version=version+1,updated_at=now() WHERE board_status='overdue' AND due_at>=now()${scope}`,params);
+}
+/** The status after a due date change: an overdue task whose due date moves into the future is working again
+ * (not started when its owner has posted no update). Any other status, or a date still past, stays as it is. */
+export async function statusAfterDueChange(tx:Queryable,task:any,dueAt:string|Date){
+ if(task.board_status!=='overdue'||new Date(dueAt).getTime()<Date.now())return task.board_status;
+ return (await tx.query('SELECT 1 FROM task_updates WHERE task_id=$1 AND actor_id=$2 LIMIT 1',[task.id,task.owner_id])).rows.length?'working':'not_started';
 }
 const STARTED_OR_NOT="CASE WHEN EXISTS(SELECT 1 FROM task_updates u WHERE u.task_id=tasks.id AND u.actor_id=tasks.owner_id) THEN 'working' ELSE 'not_started' END";
-/** Once: tasks the old 15-day rule marked 放弃 go back to what they were (延期 when past due). Kept as 放弃: tasks whose last
- * write was a person's status edit on the task board (its audit event carries the version the task still has; the old rule's
- * write would have raised it), tasks a project set to 放弃, and tasks closed because their key result was deleted. */
+/** Once: tasks the old 15-day rule marked 放弃 go back to what they were (延期 when past due), deleted ones included.
+ * Kept as 放弃: a person's last status edit on the task board, when every later version step is one of their audited
+ * board edits (the old rule wrote without an audit event, so its write leaves a step unexplained); a project's last
+ * status change to 放弃; and tasks closed because their key result was deleted. */
 export async function migrateAutoAbandoned(db:Database){
  await db.transaction(async tx=>{
   if(!(await tx.query(`INSERT INTO erp_migrations(id) VALUES('task_auto_abandon_off_v1') ON CONFLICT DO NOTHING RETURNING id`)).rows.length)return;
   await tx.query(`UPDATE tasks SET board_status=CASE WHEN due_at<now() THEN 'overdue' ELSE ${STARTED_OR_NOT} END,version=version+1,updated_at=now()
-   WHERE board_status='abandoned' AND archived_at IS NULL
-    AND NOT EXISTS(SELECT 1 FROM audit_events e WHERE e.object_id=tasks.id AND e.action='task.board.updated' AND e.details->'fields' ? 'status' AND e.details->>'version'=tasks.version::text)
-    AND NOT EXISTS(SELECT 1 FROM project_activity a WHERE a.task_id=tasks.id AND a.detail::jsonb->>'status'='abandoned')
+   WHERE board_status='abandoned'
+    AND NOT EXISTS(SELECT 1 FROM audit_events e WHERE e.object_id=tasks.id AND e.action='task.board.updated' AND e.details->'fields' ? 'status'
+      AND NOT EXISTS(SELECT 1 FROM audit_events l WHERE l.object_id=tasks.id AND l.action='task.board.updated' AND l.details->'fields' ? 'status' AND (l.details->>'version')::int>(e.details->>'version')::int)
+      AND (e.details->>'version')::int+(SELECT count(*) FROM audit_events l WHERE l.object_id=tasks.id AND l.action='task.board.updated' AND (l.details->>'version')::int>(e.details->>'version')::int)=tasks.version)
+    AND COALESCE((SELECT a.detail::jsonb->>'status' FROM project_activity a WHERE a.task_id=tasks.id AND a.detail::jsonb ? 'status' ORDER BY a.created_at DESC LIMIT 1),'')<>'abandoned'
     AND NOT (kr_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM key_results k JOIN objectives o ON o.id=k.objective_id WHERE k.id=tasks.kr_id AND k.archived_at IS NULL AND o.archived_at IS NULL))`);
  });
 }
@@ -256,8 +265,7 @@ export function registerTaskBoardRoutes(app:FastifyInstance,db:Database,o:{isAdm
    if(v.criteria!==undefined&&task.submission_version>0&&JSON.stringify(v.criteria)!==JSON.stringify(task.criteria))deny(409,'CRITERIA_LOCKED','The acceptance criteria cannot change after evidence was submitted','已经提交过成果的任务，验收标准不能再修改。');
    if(v.status==='done'&&task.board_status!=='done')deny(409,'COMPLETION_RESULT_REQUIRED','Write the result and a self-evaluation to complete this task');
    if(v.status&&v.status!=='done'&&task.board_status==='done'&&task.board_done_at&&Date.now()-new Date(task.board_done_at).getTime()>=COMPLETION_LOCK_MS)deny(409,'COMPLETION_LOCKED','This task was completed more than 3 days ago; its result and score are locked');
-   const later=v.dueAt!==undefined&&v.status===undefined&&task.board_status==='overdue'&&new Date(v.dueAt).getTime()>=Date.now();
-   const status=v.status??(later?((await tx.query('SELECT 1 FROM task_updates WHERE task_id=$1 AND actor_id=$2 LIMIT 1',[taskId,task.owner_id])).rows.length?'working':'not_started'):task.board_status),doneAt=status==='done'?(task.board_status==='done'&&task.board_done_at?task.board_done_at:new Date().toISOString()):null;
+   const status=v.status??(v.dueAt!==undefined?await statusAfterDueChange(tx,task,v.dueAt):task.board_status),doneAt=status==='done'?(task.board_status==='done'&&task.board_done_at?task.board_done_at:new Date().toISOString()):null;
    const next=(await tx.query('UPDATE tasks SET title=$2,board_priority=$3,board_status=$4,board_category=$5,board_group_id=$6,board_notes=$7,due_at=$8,owner_id=$9,reviewer_id=$10,board_done_at=$11,updated_at=now(),updated_by=$12,version=version+1 WHERE id=$1 RETURNING *',[taskId,v.title??task.title,v.priority??task.board_priority,status,v.category??task.board_category,v.groupId??task.board_group_id,v.notes??task.board_notes,v.dueAt??task.due_at,owner,reviewer,doneAt,user.id])).rows[0];
    if(v.description!==undefined||v.criteria!==undefined){const d=(await tx.query('UPDATE tasks SET description=$2,criteria=$3 WHERE id=$1 RETURNING description,criteria',[taskId,v.description??task.description,JSON.stringify(v.criteria??task.criteria)])).rows[0];Object.assign(next,d);}
    if(v.groupId)await tx.query('UPDATE tasks SET board_group_id=$2,version=version+1,updated_at=now(),updated_by=$3 WHERE parent_task_id=$1 AND org_id=$4 AND department_id=$5 AND archived_at IS NULL',[taskId,v.groupId,user.id,user.org_id,user.department_id]);

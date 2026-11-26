@@ -66,7 +66,12 @@ test('status rules: first update starts a task, past due becomes Overdue (not wh
   await db.query("UPDATE tasks SET due_at=now()-interval '1 day' WHERE id=ANY($1::text[])",[[a.id,b.id]]);
   assert.equal(await status(a.id),'overdue');assert.equal(await status(b.id),'hold','paused tasks never turn overdue');
   await db.query("UPDATE tasks SET created_at=now()-interval '16 days' WHERE id=$1",[c.id]);assert.equal(await status(c.id),'not_started','silence alone never abandons a task');
-  await db.query("UPDATE tasks SET due_at=now()+interval '5 days' WHERE id=$1",[a.id]);assert.equal(await status(a.id),'working','a later due date clears overdue');
+  const av=(await call('m1','GET',`/tasks/${a.id}`)).json().version;
+  const later=await call('m1','POST',`/tasks/${a.id}/board`,{expectedVersion:av,dueAt:new Date(Date.now()+5*864e5).toISOString()});assert.equal(later.statusCode,200,later.body);
+  assert.equal(await status(a.id),'working','the assigner moves the date later: overdue clears');
+  const av2=(await call('m2','GET','/task-board')).json().items.find((t:any)=>t.id===a.id).version;
+  assert.equal((await call('m2','POST',`/tasks/${a.id}/board`,{expectedVersion:av2,status:'overdue'})).statusCode,200);
+  assert.equal(await status(a.id),'overdue','a 延期 picked by hand stays after the page reloads');
   const cfg=(await call('m2','GET','/task-board')).json().config.status.map((x:any)=>x.zh);
   for(const z of ['未开始','进行中','被暂停','待审批','完成','延期','放弃'])assert.ok(cfg.includes(z),z);
   const dv=(await call('m2','GET','/task-board')).json().items.find((t:any)=>t.id===d.id).version;
@@ -114,14 +119,19 @@ test('once: tasks the old 15-day rule abandoned come back; chosen ones and retir
  const token=(await issueSession(db,'m1')).accessToken;
  try{
   const mk=async(title:string,days:number)=>(await app.inject({method:'POST',url:'/tasks/assign',headers:{authorization:'Bearer '+token},payload:{assigneeId:'m2',title,dueAt:new Date(Date.now()+days*864e5).toISOString(),description:'说明说明说明说明说明',criteria:['完成']}})).json();
-  const auto=await mk('自动放弃的任务',3),late=await mk('自动放弃且过期',3),chosen=await mk('自己选的放弃',3),retired=await mk('KR 已删除',3),earlier=await mk('先改过状态后被自动放弃',3);
-  await db.query("UPDATE tasks SET board_status='abandoned' WHERE id=ANY($1::text[])",[[auto.id,late.id,chosen.id,retired.id,earlier.id]]);
+  const auto=await mk('自动放弃的任务',3),late=await mk('自动放弃且过期',3),chosen=await mk('自己选的放弃',3),retired=await mk('KR 已删除',3),earlier=await mk('先改过状态后被自动放弃',3),
+   chosenThenEdited=await mk('选了放弃后又改了优先级',3),archived=await mk('自动放弃后被删除',3);
+  await db.query("UPDATE tasks SET board_status='abandoned' WHERE id=ANY($1::text[])",[[auto.id,late.id,chosen.id,retired.id,earlier.id,chosenThenEdited.id,archived.id]]);
+  await db.query("UPDATE tasks SET archived_at=now() WHERE id=$1",[archived.id]);
   const ver=async(id:string)=>(await db.query('SELECT version FROM tasks WHERE id=$1',[id])).rows[0].version;
   const edit=(eid:string,taskId:string,version:number)=>db.query("INSERT INTO audit_events(id,org_id,department_id,owner_id,actor_id,action,object_id,details) SELECT $3,org_id,department_id,'m2','m2','task.board.updated',$1,$2::jsonb FROM users WHERE id='m2'",[taskId,JSON.stringify({fields:['status'],version}),eid]);
   // A person set a status once, later the old rule abandoned it (one more write): it comes back.
   await edit('ae-earlier',earlier.id,await ver(earlier.id));await db.query('UPDATE tasks SET version=version+1 WHERE id=$1',[earlier.id]);
   await db.query("UPDATE tasks SET due_at=now()-interval '2 days' WHERE id=$1",[late.id]);
   await edit('ae-chosen',chosen.id,await ver(chosen.id));
+  // Chose 放弃 (status edit), then changed the priority (one more audited board edit): still their choice.
+  await edit('ae-chosen2',chosenThenEdited.id,await ver(chosenThenEdited.id));await db.query('UPDATE tasks SET version=version+1 WHERE id=$1',[chosenThenEdited.id]);
+  await db.query("INSERT INTO audit_events(id,org_id,department_id,owner_id,actor_id,action,object_id,details) SELECT 'ae-prio',org_id,department_id,'m2','m2','task.board.updated',$1,$2::jsonb FROM users WHERE id='m2'",[chosenThenEdited.id,JSON.stringify({fields:['priority'],version:await ver(chosenThenEdited.id)})]);
   const kr=(await db.query('SELECT id FROM key_results ORDER BY id LIMIT 1')).rows[0];assert.ok(kr,'seed has a key result');
   await db.query("UPDATE tasks SET kr_id=$2,source='okr' WHERE id=$1",[retired.id,kr.id]);await db.query('UPDATE key_results SET archived_at=now() WHERE id=$1',[kr.id]);
   await db.query("DELETE FROM erp_migrations WHERE id='task_auto_abandon_off_v1'");
@@ -129,6 +139,7 @@ test('once: tasks the old 15-day rule abandoned come back; chosen ones and retir
   await migrateAutoAbandoned(db);await migrateAutoAbandoned(db);
   const st=async(id:string)=>(await db.query('SELECT board_status FROM tasks WHERE id=$1',[id])).rows[0].board_status;
   assert.equal(await st(auto.id),'not_started');assert.equal(await st(late.id),'overdue');assert.equal(await st(earlier.id),'not_started','an older status edit does not keep it abandoned');
+  assert.equal(await st(chosenThenEdited.id),'abandoned','a later priority edit does not undo a chosen 放弃');assert.equal(await st(archived.id),'not_started','deleted tasks come back right too');
   assert.equal(await st(chosen.id),'abandoned','set by the person');assert.equal(await st(retired.id),'abandoned','its key result was deleted');
  }finally{await app.close();}
 });

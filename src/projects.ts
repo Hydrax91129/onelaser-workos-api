@@ -10,7 +10,7 @@ import type { Database, Queryable } from './db.js';
 import type { User } from './auth.js';
 import { deny } from './errors.js';
 import { createAssignedTask, TASK_SOURCE_COLUMNS } from './assign.js';
-import { applyAutoStatus } from './task-board.js';
+import { applyAutoStatus, statusAfterDueChange } from './task-board.js';
 import type { JsonModel } from './completions.js';
 
 export const projectSchema = `
@@ -222,7 +222,7 @@ export async function registerProjectRoutes(app: FastifyInstance, db: Database, 
       const before = projectTaskCriteria(p, t.project_group_id, t.title, t.description), auto = JSON.stringify(t.criteria) === JSON.stringify(before) || JSON.stringify(t.criteria) === JSON.stringify(['按项目要求完成']);
       const criteria = auto ? projectTaskCriteria(p, v.groupId ?? t.project_group_id, v.title ?? t.title, t.description) : t.criteria;
       await tx.query(`UPDATE tasks SET board_status=$2,board_priority=$3,owner_id=$4,department_id=$5,project_group_id=$6,due_at=$7,title=$8,reviewer_id=CASE WHEN reviewer_id=$4 THEN $9 ELSE reviewer_id END,criteria=$10,version=version+1,updated_at=now(),updated_by=$9 WHERE id=$1`,
-        [t.id, v.status ? STATUS_TO_BOARD[v.status] : t.board_status, v.priority ?? t.board_priority, owner, department, v.groupId ?? t.project_group_id, v.dueAt ?? t.due_at, v.title ?? t.title, user.id, JSON.stringify(criteria)]);
+        [t.id, v.status ? STATUS_TO_BOARD[v.status] : v.dueAt ? await statusAfterDueChange(tx, t, v.dueAt) : t.board_status, v.priority ?? t.board_priority, owner, department, v.groupId ?? t.project_group_id, v.dueAt ?? t.due_at, v.title ?? t.title, user.id, JSON.stringify(criteria)]);
       const changes: Record<string, unknown> = {};
       if (v.status && STATUS_TO_BOARD[v.status] !== t.board_status) changes.status = v.status;
       if (v.priority !== undefined && v.priority !== t.board_priority) changes.priority = v.priority;
