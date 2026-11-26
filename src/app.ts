@@ -1,5 +1,5 @@
 import { registerCaldockStudio, type StudioOptions } from './caldock-studio.js';
-import { registerTaskBoardRoutes, validateBoardCreation, applyAutoStatus } from './task-board.js';
+import { registerTaskBoardRoutes, validateBoardCreation, applyAutoStatus, migrateAutoAbandoned } from './task-board.js';
 import { registerCaldockRoutes, type CaldockOptions } from './caldock.js';
 import { registerDealerRoutes, type DealerOptions } from './dealer.js';
 import { registerDealerAdminRoutes } from './dealer-admin.js';
@@ -105,7 +105,9 @@ async function taskDetail(db:Queryable, task:any) {
   const files=(await db.query('SELECT id,name,mime,size,uploader_id,created_at FROM task_attachments WHERE task_id=$1 ORDER BY created_at,id',[task.id])).rows;
   const submissions=(await db.query('SELECT * FROM submissions WHERE task_id=$1 ORDER BY version',[task.id])).rows.map((s:any)=>({...s,attachments:submissionFiles(s,files)}));
   const reviews=(await db.query('SELECT * FROM reviews WHERE task_id=$1 ORDER BY created_at,id',[task.id])).rows;
-  return {...task,submissions,reviews,currentReview:task.status==='accepted' ? [...reviews].reverse().find(r=>r.submission_version===task.submission_version&&r.decision==='accept') || null : null};
+  // The owner re-plans (due date, priority) only tasks generated from their own key result; see boardPatch in task-board.ts.
+  const own_plan=task.source==='okr'&&!!task.kr_id&&(await db.query('SELECT 1 FROM key_results k JOIN objectives o ON o.id=k.objective_id WHERE k.id=$1 AND o.owner_id=$2',[task.kr_id,task.owner_id])).rows.length>0;
+  return {...task,own_plan,submissions,reviews,currentReview:task.status==='accepted' ? [...reviews].reverse().find(r=>r.submission_version===task.submission_version&&r.decision==='accept') || null : null};
 }
 export async function buildApp(options:AppOptions) {
   const aiReviewConfigured=()=>{const integrations:any=(options as any).integrations||{};return !!(integrations.aiReviewMode==='bot'?integrations.bot:integrations.ai);};
@@ -325,6 +327,7 @@ export async function buildApp(options:AppOptions) {
   await registerAssignRoutes(app,db,{model:completionModel||null,notify,intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0),isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
   await registerOkrCycle(app,db,{now:options.clock,notify,timeZone:process.env.OKR_TIMEZONE||'America/Los_Angeles',intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0),isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
   await registerProjectRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),model:options.okrDraftModel===undefined?(aiModel(()=>jsonModel({apiKey:process.env.AI_PROVIDER_API_KEY||process.env.XAI_API_KEY,model:process.env.AI_OKR_MODEL_ID||process.env.AI_MODEL_ID||process.env.AI_TRANSLATION_MODEL_ID||process.env.AI_SCORING_MODEL_ID,baseUrl:process.env.AI_PROVIDER_BASE_URL}))||null):options.okrDraftModel});
+  await migrateAutoAbandoned(db);
   await registerWmsRoutes(app,db,{isAdmin:isExecutive /* sensitive ERP data: only deployment-configured executives bypass grants; in-app admins need grants */});
   await registerFinanceRoutes(app,db,{isAdmin:isExecutive /* finance is sensitive: only deployment-configured main admins bypass grants */,now:options.clock});
   await registerPoliciesRoutes(app,db,{isAdmin:isExecutive,executiveUserIds:integrations.executiveUserIds||[],quality:options.quality,now:options.clock});

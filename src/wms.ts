@@ -262,10 +262,17 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     return new Map(g.map((x: any) => [`${x.created_by}|${new Date(x.created_at).toISOString()}|${x.type}`, { n: Number(x.n), units: Number(x.units) }]));
   };
   const ymd = (d: unknown) => d ? (d instanceof Date ? d.toISOString() : String(d)).slice(0, 10) : null;
-  const movementOut = (u: User, people: Map<any, any>, batches = new Map<string, { n: number; units: number }>()) => (m: any) => {
+  /** Chinese and English names from the product library (SKU 管理) for the movement list's name columns. */
+  const catalogNames = async (org: string, rows: any[]) => {
+    const skus = [...new Set(rows.map(r => String(r.sku).toLowerCase()))];
+    if (!skus.length) return new Map<string, { zh: string; en: string }>();
+    return new Map((await db.query('SELECT lower(sku) k,name_zh,name_en FROM product_catalog WHERE org_id=$1 AND lower(sku)=ANY($2::text[])', [org, skus])).rows
+      .map((r: any) => [r.k, { zh: r.name_zh || '', en: r.name_en || '' }]));
+  };
+  const movementOut = (u: User, people: Map<any, any>, batches = new Map<string, { n: number; units: number }>(), names = new Map<string, { zh: string; en: string }>()) => (m: any) => {
     const b = batches.get(`${m.created_by}|${new Date(m.created_at).toISOString()}|${m.type}`) || { n: 1, units: Math.abs(Number(m.qty)) };
     return {
-    id: m.id, type: m.type, sku: m.sku, opDate: ymd(m.op_date) || ymd(m.created_at), method: methodOf(m, b.n), batchSkus: b.n, batchUnits: b.units, location: m.location, toLocation: m.to_location || undefined, qty: Number(m.qty), counted: m.counted, systemQty: m.system_qty,
+    id: m.id, type: m.type, sku: m.sku, nameZh: names.get(String(m.sku).toLowerCase())?.zh || '', nameEn: names.get(String(m.sku).toLowerCase())?.en || '', opDate: ymd(m.op_date) || ymd(m.created_at), method: methodOf(m, b.n), batchSkus: b.n, batchUnits: b.units, location: m.location, toLocation: m.to_location || undefined, qty: Number(m.qty), counted: m.counted, systemQty: m.system_qty,
     reason: m.reason, reference: m.reference || '', status: m.status, createdAt: m.created_at, byName: nameOf(people.get(m.created_by)),
     approvedByName: m.status !== 'pending' && m.decided_by ? nameOf(people.get(m.decided_by)) : '',
     canDecide: canDecide(u, m, people),
@@ -290,7 +297,7 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     const people = await peopleOf(u.org_id);
     const lastImport = (await db.query(`SELECT as_of,created_at FROM wms_imports WHERE org_id=$1 AND kind='import' ORDER BY created_at DESC LIMIT 1`, [u.org_id])).rows[0];
     const all = [...moves, ...pendingOld];
-    const movements = all.map(movementOut(u, people, await batchesOf(u.org_id, all)));
+    const movements = all.map(movementOut(u, people, await batchesOf(u.org_id, all), await catalogNames(u.org_id, all)));
     const level = warehouseLevel(u);
     // Product facts for the filters (family, series, MSRP: all public in the product library) and shelf bins per location.
     const facts = new Map((await db.query(`SELECT lower(c.sku) k, c.family, COALESCE(c.attrs->>'supplyMode','') supply_mode, COALESCE(c.attrs->>'series','') series, COALESCE(c.attrs->>'brand','') brand, c.status, c.msrp, c.name_zh, c.name_en, p.landed_usd
@@ -329,7 +336,7 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     const v = historyQuery.parse(req.query);
     if (isReturnSku(v.sku)) returnSkuDenied([v.sku]);
     const rows = (await db.query('SELECT * FROM wms_movements WHERE org_id=$1 AND lower(sku)=lower($2) ORDER BY created_at DESC, id DESC LIMIT $3', [u.org_id, v.sku, v.limit ?? 1000])).rows;
-    return { sku: v.sku, movements: rows.map(movementOut(u, await peopleOf(u.org_id), await batchesOf(u.org_id, rows))) };
+    return { sku: v.sku, movements: rows.map(movementOut(u, await peopleOf(u.org_id), await batchesOf(u.org_id, rows), await catalogNames(u.org_id, rows))) };
   });
 
   const itemInput = z.object({ sku, name: z.string().trim().min(1).max(200), type: z.string().trim().max(60).optional() }).strict();
