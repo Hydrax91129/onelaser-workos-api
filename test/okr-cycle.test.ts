@@ -50,7 +50,7 @@ test('the cycle job reminds, auto-scores missing self scores as 0, then reminds 
  }finally{await app.close();}
 });
 
-test('status rules: first update starts a task, past due becomes Overdue (not when paused), 15 days silent = Abandoned',async()=>{
+test('status rules: first update starts a task, past due becomes Overdue (not when paused), never abandoned automatically',async()=>{
  const db=await createDatabase();await db.exec(schema);await seedDemo(db);
  const app=await buildApp({db,integrations:{executiveUserIds:['m4']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
  const tokens:Record<string,string>={};
@@ -65,11 +65,18 @@ test('status rules: first update starts a task, past due becomes Overdue (not wh
   assert.equal((await call('m2','POST',`/tasks/${b.id}/board`,{expectedVersion:bv,status:'hold'})).statusCode,200);
   await db.query("UPDATE tasks SET due_at=now()-interval '1 day' WHERE id=ANY($1::text[])",[[a.id,b.id]]);
   assert.equal(await status(a.id),'overdue');assert.equal(await status(b.id),'hold','paused tasks never turn overdue');
-  await db.query("UPDATE tasks SET created_at=now()-interval '16 days' WHERE id=$1",[c.id]);assert.equal(await status(c.id),'abandoned');
+  await db.query("UPDATE tasks SET created_at=now()-interval '16 days' WHERE id=$1",[c.id]);assert.equal(await status(c.id),'not_started','silence alone never abandons a task');
+  await db.query("UPDATE tasks SET due_at=now()+interval '5 days' WHERE id=$1",[a.id]);assert.equal(await status(a.id),'working','a later due date clears overdue');
   const cfg=(await call('m2','GET','/task-board')).json().config.status.map((x:any)=>x.zh);
   for(const z of ['未开始','进行中','被暂停','待审批','完成','延期','放弃'])assert.ok(cfg.includes(z),z);
   const dv=(await call('m2','GET','/task-board')).json().items.find((t:any)=>t.id===d.id).version;
   assert.equal((await call('m2','POST',`/tasks/${d.id}/board`,{expectedVersion:dv,dueAt:new Date(Date.now()+30*864e5).toISOString()})).statusCode,403,'assignees cannot move the due date');
+  // A task from the owner's own key result: the owner moves its due date and priority; past due → later clears 延期 at once.
+  await db.query("UPDATE tasks SET source='okr',due_at=now()-interval '1 day' WHERE id=$1",[c.id]);assert.equal(await status(c.id),'overdue');
+  const cv=(await call('m2','GET','/task-board')).json().items.find((t:any)=>t.id===c.id).version;
+  const moved=await call('m2','POST',`/tasks/${c.id}/board`,{expectedVersion:cv,dueAt:new Date(Date.now()+10*864e5).toISOString(),priority:'high'});
+  assert.equal(moved.statusCode,200,moved.body);assert.equal(moved.json().board_status,'not_started');assert.equal(moved.json().board_priority,'high');
+  assert.equal((await call('m2','POST',`/tasks/${c.id}/board`,{expectedVersion:moved.json().version,title:'改名试试改名'})).statusCode,403,'the KR task name still follows the KR');
  }finally{await app.close();}
 });
 
@@ -91,5 +98,26 @@ test('一键催办: a leader reminds the people in their scope who are behind; o
   assert.equal(n.length,1);assert.equal(n[0].user_id,'m3');assert.match(n[0].message,/催办.*11月 OKR.*已逾期/);
   assert.deepEqual((await call('m1','POST','/okr/nudge',{period:'2026-11'})).json(),{period:'2026-11',sent:0,already:1},'a second click the same day sends nothing');
   assert.deepEqual((await call('m1','POST','/okr/nudge',{period:'2026-11',userIds:['m2']})).json(),{period:'2026-11',sent:0,already:0},'only people who are behind can be nudged');
+ }finally{await app.close();}
+});
+
+test('once: tasks the old 15-day rule abandoned come back; chosen ones and retired KR tasks stay',async()=>{
+ const db=await createDatabase();await db.exec(schema);await seedDemo(db);
+ const app=await buildApp({db,integrations:{executiveUserIds:['m4']},completionModel:null,translationModel:null,mailer:null,nudgeIntervalMs:0});
+ const token=(await issueSession(db,'m1')).accessToken;
+ try{
+  const mk=async(title:string,days:number)=>(await app.inject({method:'POST',url:'/tasks/assign',headers:{authorization:'Bearer '+token},payload:{assigneeId:'m2',title,dueAt:new Date(Date.now()+days*864e5).toISOString(),description:'说明说明说明说明说明',criteria:['完成']}})).json();
+  const auto=await mk('自动放弃的任务',3),late=await mk('自动放弃且过期',3),chosen=await mk('自己选的放弃',3),retired=await mk('KR 已删除',3);
+  await db.query("UPDATE tasks SET board_status='abandoned' WHERE id=ANY($1::text[])",[[auto.id,late.id,chosen.id,retired.id]]);
+  await db.query("UPDATE tasks SET due_at=now()-interval '2 days' WHERE id=$1",[late.id]);
+  await db.query("INSERT INTO audit_events(id,org_id,department_id,owner_id,actor_id,action,object_id,details) SELECT 'ae-fixture',org_id,department_id,'m2','m2','task.board.updated',$1,$2::jsonb FROM users WHERE id='m2'",[chosen.id,JSON.stringify({fields:['status']})]);
+  const kr=(await db.query('SELECT id FROM key_results ORDER BY id LIMIT 1')).rows[0];assert.ok(kr,'seed has a key result');
+  await db.query("UPDATE tasks SET kr_id=$2,source='okr' WHERE id=$1",[retired.id,kr.id]);await db.query('UPDATE key_results SET archived_at=now() WHERE id=$1',[kr.id]);
+  await db.query("DELETE FROM erp_migrations WHERE id='task_auto_abandon_off_v1'");
+  const {migrateAutoAbandoned}=await import('../src/task-board.js');
+  await migrateAutoAbandoned(db);await migrateAutoAbandoned(db);
+  const st=async(id:string)=>(await db.query('SELECT board_status FROM tasks WHERE id=$1',[id])).rows[0].board_status;
+  assert.equal(await st(auto.id),'not_started');assert.equal(await st(late.id),'overdue');
+  assert.equal(await st(chosen.id),'abandoned','set by the person');assert.equal(await st(retired.id),'abandoned','its key result was deleted');
  }finally{await app.close();}
 });

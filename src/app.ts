@@ -1,5 +1,5 @@
 import { registerCaldockStudio, type StudioOptions } from './caldock-studio.js';
-import { registerTaskBoardRoutes, validateBoardCreation, applyAutoStatus } from './task-board.js';
+import { registerTaskBoardRoutes, validateBoardCreation, applyAutoStatus, migrateAutoAbandoned } from './task-board.js';
 import { registerCaldockRoutes, type CaldockOptions } from './caldock.js';
 import { registerDealerRoutes, type DealerOptions } from './dealer.js';
 import { registerDealerAdminRoutes } from './dealer-admin.js';
@@ -325,6 +325,7 @@ export async function buildApp(options:AppOptions) {
   await registerAssignRoutes(app,db,{model:completionModel||null,notify,intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0),isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
   await registerOkrCycle(app,db,{now:options.clock,notify,timeZone:process.env.OKR_TIMEZONE||'America/Los_Angeles',intervalMs:options.nudgeIntervalMs??(environment==='production'?Number(process.env.NUDGE_INTERVAL_MS)||30*60000:0),isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]})});
   await registerProjectRoutes(app,db,{isAdmin:(u:User)=>isOrgAdmin(u as any,{executiveUserIds:integrations.executiveUserIds||[]}),model:options.okrDraftModel===undefined?(aiModel(()=>jsonModel({apiKey:process.env.AI_PROVIDER_API_KEY||process.env.XAI_API_KEY,model:process.env.AI_OKR_MODEL_ID||process.env.AI_MODEL_ID||process.env.AI_TRANSLATION_MODEL_ID||process.env.AI_SCORING_MODEL_ID,baseUrl:process.env.AI_PROVIDER_BASE_URL}))||null):options.okrDraftModel});
+  await migrateAutoAbandoned(db);
   await registerWmsRoutes(app,db,{isAdmin:isExecutive /* sensitive ERP data: only deployment-configured executives bypass grants; in-app admins need grants */});
   await registerFinanceRoutes(app,db,{isAdmin:isExecutive /* finance is sensitive: only deployment-configured main admins bypass grants */,now:options.clock});
   await registerPoliciesRoutes(app,db,{isAdmin:isExecutive,executiveUserIds:integrations.executiveUserIds||[],quality:options.quality,now:options.clock});

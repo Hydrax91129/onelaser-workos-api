@@ -157,6 +157,9 @@ const app = await buildApp({
   const v2 = (await m2('GET', `/tasks/${t2.id}`)).json().version;
   await m2('POST', `/tasks/${t2.id}/complete`, { expectedVersion: v2, result: '400 USD，50–60 天（示例）', attachmentIds: [] });
   await m4('POST', '/tasks/assign', { assigneeId: 'm1', title: '确认示例新员工入职资料', description: '虚构示例任务，用来演示“去领取”。', criteria: ['资料确认完毕'], dueAt: day(6) });
+  // A task from the owner's own key result, past its due date: the owner moves the date and priority themselves (延期 clears).
+  const okr = (await m4('POST', '/tasks/assign', { assigneeId: 'm1', title: '推进 KR：示例官网改版', description: '虚构示例 KR 任务。', criteria: ['改版上线'], dueAt: day(3) })).json();
+  await db.query("UPDATE tasks SET source='okr',due_at=now()-interval '1 day' WHERE id=$1", [okr.id]);
 }
 
 // Sample returns, one at each stage: 等待维修, 等待配件, 完成维修, 完成上架, 售出 (fictional, made through the API).

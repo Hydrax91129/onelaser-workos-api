@@ -152,6 +152,10 @@ test('WMS: SKUs in the product library are warehouse SKUs without adding them ag
   assert.equal(batch.statusCode,201,batch.body);
   assert.equal((await item('LIB-PART-02')).qty.us,4);assert.equal((await item('LIB-HOST-01')).qty.us,3);
   assert.equal((await call('GET','/wms/summary')).json().items.filter((i:any)=>i.sku.startsWith('LIB-')).length,2,'listed once after the first movement');
+  // The movement list shows the product library's Chinese and English names next to the SKU.
+  const mv=(await call('GET','/wms/summary')).json().movements.filter((m:any)=>m.sku.startsWith('LIB-'));
+  assert.ok(mv.length>=3);for(const m of mv){const zh=m.sku==='LIB-HOST-01'?'示例主机':'',en=m.sku==='LIB-HOST-01'?'Demo host':'Demo part';assert.equal(m.nameZh,zh);assert.equal(m.nameEn,en);}
+  const hist=(await call('GET','/wms/movements?sku=LIB-PART-02')).json().movements;assert.equal(hist[0].nameEn,'Demo part');
   assert.equal((await call('POST','/wms/movements/batch',{opDate:'2026-11-05',type:'in',location:'us',reason:'采购到货',lines:[{sku:'NOT-IN-LIBRARY',qty:1}]})).statusCode,400);
   assert.equal((await call('POST','/wms/movements',{type:'in',sku:'NOT-IN-LIBRARY',location:'us',qty:1,reason:'采购到货'})).statusCode,404);
  }finally{await app.close();}
