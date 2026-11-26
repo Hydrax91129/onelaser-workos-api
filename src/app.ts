@@ -105,7 +105,9 @@ async function taskDetail(db:Queryable, task:any) {
   const files=(await db.query('SELECT id,name,mime,size,uploader_id,created_at FROM task_attachments WHERE task_id=$1 ORDER BY created_at,id',[task.id])).rows;
   const submissions=(await db.query('SELECT * FROM submissions WHERE task_id=$1 ORDER BY version',[task.id])).rows.map((s:any)=>({...s,attachments:submissionFiles(s,files)}));
   const reviews=(await db.query('SELECT * FROM reviews WHERE task_id=$1 ORDER BY created_at,id',[task.id])).rows;
-  return {...task,submissions,reviews,currentReview:task.status==='accepted' ? [...reviews].reverse().find(r=>r.submission_version===task.submission_version&&r.decision==='accept') || null : null};
+  // The owner re-plans (due date, priority) only tasks generated from their own key result; see boardPatch in task-board.ts.
+  const own_plan=task.source==='okr'&&!!task.kr_id&&(await db.query('SELECT 1 FROM key_results k JOIN objectives o ON o.id=k.objective_id WHERE k.id=$1 AND o.owner_id=$2',[task.kr_id,task.owner_id])).rows.length>0;
+  return {...task,own_plan,submissions,reviews,currentReview:task.status==='accepted' ? [...reviews].reverse().find(r=>r.submission_version===task.submission_version&&r.decision==='accept') || null : null};
 }
 export async function buildApp(options:AppOptions) {
   const aiReviewConfigured=()=>{const integrations:any=(options as any).integrations||{};return !!(integrations.aiReviewMode==='bot'?integrations.bot:integrations.ai);};

@@ -72,7 +72,14 @@ test('status rules: first update starts a task, past due becomes Overdue (not wh
   const dv=(await call('m2','GET','/task-board')).json().items.find((t:any)=>t.id===d.id).version;
   assert.equal((await call('m2','POST',`/tasks/${d.id}/board`,{expectedVersion:dv,dueAt:new Date(Date.now()+30*864e5).toISOString()})).statusCode,403,'assignees cannot move the due date');
   // A task from the owner's own key result: the owner moves its due date and priority; past due → later clears 延期 at once.
-  await db.query("UPDATE tasks SET source='okr',due_at=now()-interval '1 day' WHERE id=$1",[c.id]);assert.equal(await status(c.id),'overdue');
+  const kr=(await db.query('SELECT k.id,k.objective_id FROM key_results k ORDER BY k.id LIMIT 1')).rows[0];assert.ok(kr,'seed has a key result');
+  // A task someone assigned and merely linked to a KR is not the owner's to re-plan.
+  await db.query("UPDATE tasks SET source=NULL,kr_id=$2 WHERE id=$1",[d.id,kr.id]);
+  const dv2=(await call('m2','GET','/task-board')).json().items.find((t:any)=>t.id===d.id).version;
+  assert.equal((await call('m2','POST',`/tasks/${d.id}/board`,{expectedVersion:dv2,dueAt:new Date(Date.now()+30*864e5).toISOString()})).statusCode,403,'assigned and linked to a KR: still the assigner’s date');
+  await db.query("UPDATE tasks SET kr_id=NULL WHERE id=$1",[d.id]);
+  await db.query("UPDATE objectives SET owner_id='m2' WHERE id=$1",[kr.objective_id]);
+  await db.query("UPDATE tasks SET source='okr',kr_id=$2,due_at=now()-interval '1 day' WHERE id=$1",[c.id,kr.id]);assert.equal(await status(c.id),'overdue');
   const cv=(await call('m2','GET','/task-board')).json().items.find((t:any)=>t.id===c.id).version;
   const moved=await call('m2','POST',`/tasks/${c.id}/board`,{expectedVersion:cv,dueAt:new Date(Date.now()+10*864e5).toISOString(),priority:'high'});
   assert.equal(moved.statusCode,200,moved.body);assert.equal(moved.json().board_status,'not_started');assert.equal(moved.json().board_priority,'high');
@@ -107,17 +114,21 @@ test('once: tasks the old 15-day rule abandoned come back; chosen ones and retir
  const token=(await issueSession(db,'m1')).accessToken;
  try{
   const mk=async(title:string,days:number)=>(await app.inject({method:'POST',url:'/tasks/assign',headers:{authorization:'Bearer '+token},payload:{assigneeId:'m2',title,dueAt:new Date(Date.now()+days*864e5).toISOString(),description:'说明说明说明说明说明',criteria:['完成']}})).json();
-  const auto=await mk('自动放弃的任务',3),late=await mk('自动放弃且过期',3),chosen=await mk('自己选的放弃',3),retired=await mk('KR 已删除',3);
-  await db.query("UPDATE tasks SET board_status='abandoned' WHERE id=ANY($1::text[])",[[auto.id,late.id,chosen.id,retired.id]]);
+  const auto=await mk('自动放弃的任务',3),late=await mk('自动放弃且过期',3),chosen=await mk('自己选的放弃',3),retired=await mk('KR 已删除',3),earlier=await mk('先改过状态后被自动放弃',3);
+  await db.query("UPDATE tasks SET board_status='abandoned' WHERE id=ANY($1::text[])",[[auto.id,late.id,chosen.id,retired.id,earlier.id]]);
+  const ver=async(id:string)=>(await db.query('SELECT version FROM tasks WHERE id=$1',[id])).rows[0].version;
+  const edit=(eid:string,taskId:string,version:number)=>db.query("INSERT INTO audit_events(id,org_id,department_id,owner_id,actor_id,action,object_id,details) SELECT $3,org_id,department_id,'m2','m2','task.board.updated',$1,$2::jsonb FROM users WHERE id='m2'",[taskId,JSON.stringify({fields:['status'],version}),eid]);
+  // A person set a status once, later the old rule abandoned it (one more write): it comes back.
+  await edit('ae-earlier',earlier.id,await ver(earlier.id));await db.query('UPDATE tasks SET version=version+1 WHERE id=$1',[earlier.id]);
   await db.query("UPDATE tasks SET due_at=now()-interval '2 days' WHERE id=$1",[late.id]);
-  await db.query("INSERT INTO audit_events(id,org_id,department_id,owner_id,actor_id,action,object_id,details) SELECT 'ae-fixture',org_id,department_id,'m2','m2','task.board.updated',$1,$2::jsonb FROM users WHERE id='m2'",[chosen.id,JSON.stringify({fields:['status']})]);
+  await edit('ae-chosen',chosen.id,await ver(chosen.id));
   const kr=(await db.query('SELECT id FROM key_results ORDER BY id LIMIT 1')).rows[0];assert.ok(kr,'seed has a key result');
   await db.query("UPDATE tasks SET kr_id=$2,source='okr' WHERE id=$1",[retired.id,kr.id]);await db.query('UPDATE key_results SET archived_at=now() WHERE id=$1',[kr.id]);
   await db.query("DELETE FROM erp_migrations WHERE id='task_auto_abandon_off_v1'");
   const {migrateAutoAbandoned}=await import('../src/task-board.js');
   await migrateAutoAbandoned(db);await migrateAutoAbandoned(db);
   const st=async(id:string)=>(await db.query('SELECT board_status FROM tasks WHERE id=$1',[id])).rows[0].board_status;
-  assert.equal(await st(auto.id),'not_started');assert.equal(await st(late.id),'overdue');
+  assert.equal(await st(auto.id),'not_started');assert.equal(await st(late.id),'overdue');assert.equal(await st(earlier.id),'not_started','an older status edit does not keep it abandoned');
   assert.equal(await st(chosen.id),'abandoned','set by the person');assert.equal(await st(retired.id),'abandoned','its key result was deleted');
  }finally{await app.close();}
 });

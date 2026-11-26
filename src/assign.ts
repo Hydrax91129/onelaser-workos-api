@@ -26,6 +26,7 @@ CREATE INDEX IF NOT EXISTS task_nudges_cc ON task_nudges(cc_user_id,created_at);
 /** SQL fragment: where a task came from, who assigned it and the linked KR title. */
 export const TASK_SOURCE_COLUMNS = `(SELECT json_build_object('zh',u.name_zh,'en',u.name_en,'display',u.display_name) FROM users u WHERE u.id=tasks.owner_id) AS task_owner_names,
   COALESCE(tasks.source, CASE WHEN tasks.kr_id IS NOT NULL THEN 'okr' WHEN tasks.created_by<>tasks.owner_id THEN 'direct' ELSE 'self' END) AS source_kind,
+  (tasks.source='okr' AND EXISTS(SELECT 1 FROM key_results k JOIN objectives o ON o.id=k.objective_id WHERE k.id=tasks.kr_id AND o.owner_id=tasks.owner_id)) AS own_plan,
   COALESCE(tasks.assigned_by, CASE WHEN tasks.created_by<>tasks.owner_id THEN tasks.created_by END) AS assigned_by_id,
   (SELECT u.display_name FROM users u WHERE u.id=COALESCE(tasks.assigned_by, CASE WHEN tasks.created_by<>tasks.owner_id THEN tasks.created_by END)) AS assigned_by_name,
   (SELECT json_build_object('zh',u.name_zh,'en',u.name_en) FROM users u WHERE u.id=COALESCE(tasks.assigned_by, CASE WHEN tasks.created_by<>tasks.owner_id THEN tasks.created_by END)) AS assigned_by_names,

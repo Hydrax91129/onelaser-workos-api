@@ -159,7 +159,9 @@ const app = await buildApp({
   await m4('POST', '/tasks/assign', { assigneeId: 'm1', title: '确认示例新员工入职资料', description: '虚构示例任务，用来演示“去领取”。', criteria: ['资料确认完毕'], dueAt: day(6) });
   // A task from the owner's own key result, past its due date: the owner moves the date and priority themselves (延期 clears).
   const okr = (await m4('POST', '/tasks/assign', { assigneeId: 'm1', title: '推进 KR：示例官网改版', description: '虚构示例 KR 任务。', criteria: ['改版上线'], dueAt: day(3) })).json();
-  await db.query("UPDATE tasks SET source='okr',due_at=now()-interval '1 day' WHERE id=$1", [okr.id]);
+  await db.query("INSERT INTO objectives(id,org_id,department_id,owner_id,level,title) SELECT 'obj-preview-site',org_id,department_id,'m1','personal','示例：官网升级' FROM users WHERE id='m1' ON CONFLICT DO NOTHING");
+  await db.query("INSERT INTO key_results(id,objective_id,title,baseline,target,actual,direction,unit) VALUES('kr-preview-site','obj-preview-site','示例官网改版',0,1,0,'increase','') ON CONFLICT DO NOTHING");
+  await db.query("UPDATE tasks SET source='okr',kr_id='kr-preview-site',due_at=now()-interval '1 day' WHERE id=$1", [okr.id]);
 }
 
 // Sample returns, one at each stage: 等待维修, 等待配件, 完成维修, 完成上架, 售出 (fictional, made through the API).
