@@ -321,9 +321,15 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     // Dropship SKUs are not stocked (owner, 2026-11-13): left out unless some stock is still recorded for them.
     for (let i = items.length - 1; i >= 0; i--) { const it: any = items[i];
       if ((facts.get(it.sku.toLowerCase()) as any)?.supply_mode === 'dropship' && !Object.values(qty.get(it.sku) || {}).some(n => Number(n) !== 0)) items.splice(i, 1); }
-    // Stock value per warehouse: MSRP value for everyone who sees stock; landed-cost value only for cost access and main admins.
-    const costOk = o.isAdmin(u) || grantsOf(u).includes('product_cost_detail'), r2 = (n: number) => Math.round(n * 100) / 100;
-    const value = (k: 'msrp' | 'landed_usd') => Object.fromEntries(LOCATIONS.map(l => [l.id, r2(items.reduce((a: number, it: any) => { const f: any = facts.get(it.sku.toLowerCase()); const unit = f?.[k] == null ? 0 : Number(f[k]); return a + unit * Number(qty.get(it.sku)?.[l.id] || 0); }, 0))]));
+    // Stock value (owner, 2026-11-28): by MSRP or by landed cost, per warehouse and in total, only for warehouse
+    // approvers (审批) and main admins; nobody else gets any value. SKUs in stock without the price are counted apart.
+    const valueOk = o.isAdmin(u) || levelOf(grantsOf(u), 'warehouse') === 'approve', r2 = (n: number) => Math.round(n * 100) / 100;
+    const unitOf = (sku: string, k: 'msrp' | 'landed_usd') => { const f: any = facts.get(sku.toLowerCase()); return f?.[k] == null || f[k] === '' ? null : Number(f[k]); };
+    const value = (k: 'msrp' | 'landed_usd') => Object.fromEntries(LOCATIONS.map(l => [l.id, r2(items.reduce((a: number, it: any) => a + (unitOf(it.sku, k) ?? 0) * Number(qty.get(it.sku)?.[l.id] || 0), 0))]));
+    const unpriced = (k: 'msrp' | 'landed_usd') => Object.fromEntries(LOCATIONS.map(l => [l.id, items.filter((it: any) => Number(qty.get(it.sku)?.[l.id] || 0) > 0 && unitOf(it.sku, k) == null).length]));
+    const sumOf = (o2: Record<string, number>) => r2(Object.values(o2).reduce((a, b) => a + b, 0));
+    const stockValues = valueOk ? (() => { const msrp = value('msrp'), landed = value('landed_usd');
+      return { msrp, landed, total: { msrp: sumOf(msrp), landed: sumOf(landed) }, unpriced: { msrp: unpriced('msrp'), landed: unpriced('landed_usd') } }; })() : undefined;
     // The product's main image (visible to everyone in the product library), shown small next to the SKU.
     const images = new Map((await db.query(`SELECT DISTINCT ON (lower(sku)) lower(sku) k, id FROM product_files WHERE org_id=$1 AND slot='mainImage' ORDER BY lower(sku), created_at DESC`, [u.org_id])).rows.map((r: any) => [r.k, r.id]));
     const bins = new Map<string, Record<string, string[]>>();
@@ -333,7 +339,7 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
       bins.get(k)![r.location] = [r.bin1, r.bin2, r.bin3]; binQty.get(k)![r.location] = [r.qty1, r.qty2, r.qty3].map(Number);
     }
     return {
-      values: { msrp: value('msrp'), ...(costOk ? { cost: value('landed_usd') } : {}) },
+      ...(stockValues ? { values: stockValues } : {}),
       locations: LOCATIONS, families: FAMILIES.map(([key, zh, en]) => ({ key, zh, en })), statuses: STATUSES.map(([key, zh, en]) => ({ key, zh, en })),
       items: items.map((it: any) => { const f: any = facts.get(it.sku.toLowerCase()) || {};
         return { ...it, qty: qty.get(it.sku) || {}, family: f.family || '', series: f.series || '', msrp: f.msrp == null ? null : Number(f.msrp),

@@ -261,7 +261,7 @@ test('WMS bins hold quantities: goods in go to the chosen bin, goods out pick bi
  }finally{await app.close();}
 });
 
-test('WMS stock value per warehouse: MSRP for everyone with stock access, landed cost only for cost access',async()=>{
+test('WMS stock value by MSRP or landed cost, per warehouse and in total: only warehouse approvers and main admins',async()=>{
  const db=await createDatabase();await db.exec(schema);await seedDemo(db);
  const org=(await db.query("SELECT org_id FROM users WHERE id='m1'")).rows[0].org_id;
  await db.query(`INSERT INTO product_catalog(org_id,sku,msrp) VALUES($1,'V-1',100)`,[org]);await db.query(`INSERT INTO product_pricing(org_id,sku,landed_usd) VALUES($1,'V-1',40)`,[org]);
@@ -271,7 +271,17 @@ test('WMS stock value per warehouse: MSRP for everyone with stock access, landed
  const call=async(who:string,method:'GET'|'POST',url:string,payload?:any)=>{tokens[who]??=(await issueSession(db,who)).accessToken;return app.inject({method,url,payload,headers:{authorization:'Bearer '+tokens[who]}});};
  try{
   await call('m1','POST','/wms/import',{asOf:'2026-10-31',rows:[{sku:'V-1',qty:{us:3,dg:2}}]});
-  const a=(await call('m1','GET','/wms/summary')).json().values;assert.equal(a.msrp.us,300);assert.equal(a.msrp.dg,200);assert.equal(a.cost.us,120);
-  const b=(await call('m2','GET','/wms/summary')).json().values;assert.equal(b.msrp.us,300);assert.equal(b.cost,undefined,'no cost without cost access');
+  await db.query(`INSERT INTO product_catalog(org_id,sku,msrp) VALUES($1,'V-2',50)`,[org]);
+  await call('m1','POST','/wms/import',{asOf:'2026-10-31',rows:[{sku:'V-2',qty:{us:1}}]});
+  const a=(await call('m1','GET','/wms/summary')).json().values;
+  assert.equal(a.msrp.us,350);assert.equal(a.msrp.dg,200);assert.equal(a.landed.us,120);assert.equal(a.landed.dg,80);
+  assert.deepEqual([a.total.msrp,a.total.landed],[550,200]);assert.equal(a.unpriced.landed.us,1,'V-2 has no landed cost');assert.equal(a.unpriced.msrp.us,0);
+  assert.equal((await call('m2','GET','/wms/summary')).json().values,undefined,'view only: no value');
+  await db.query(`UPDATE users SET grants='["warehouse","warehouse_manage"]' WHERE id='m2'`);
+  assert.equal((await call('m2','GET','/wms/summary')).json().values,undefined,'manage: no value');
+  await db.query(`UPDATE users SET grants='["product_cost_detail","warehouse"]' WHERE id='m3'`);
+  assert.equal((await call('m3','GET','/wms/summary')).json().values,undefined,'cost access alone does not show warehouse value');
+  await db.query(`UPDATE users SET grants='["warehouse","warehouse_manage","warehouse_approve"]' WHERE id='m2'`);
+  const c=(await call('m2','GET','/wms/summary')).json().values;assert.equal(c.total.landed,200,'approvers see both');
  }finally{await app.close();}
 });
