@@ -99,6 +99,7 @@
 - 后端所有报错文案都要在 i18n.ts 里有中文（有测试检查）。
 - 中英文都要能用（供应链 PIM / WMS / SCM 已全部核对过英文）：页面文字一律 `tr(中文, English)`，英文里用半角标点；服务器写进数据库的系统文字（WMS 流水原因如“移库 / 发柜 / 完工入库 / 到港入仓 / 期初导入”，SCM 发的站内通知）保持固定格式，由前端按语言翻译（wms.js 的 `reasonText`、inbox.js 的 `SYS`），改这些文字时两边一起改；产品资料模板按下载人的语言生成，上传时中英文表头、下拉值和清空标记（`[清空]` / `[clear]`）都认（product-import.ts）。
 - 筛选下拉统一用前端的 `dist/multi-select.js`（`window.WorkOSMulti`，2026-11-14 老板定，供应链运营 PIM / WMS / SCM 已全部改用）：点名称只选这一项并关闭，勾选框可多选、列表不关，“全部”清除；页面把选中值存成数组，空数组 = 不筛选（`WorkOSMulti.pass`）。WMS 的“仓库”切换（决定库位列）仍是单选。
+- HEIC 照片（2026-11-28 老板定）：前端 `dist/heic.js` 在页面上拦住所有上传（选择文件、拖拽、粘贴），把 HEIC / HEIF 在用户自己的浏览器里转成 JPG（`dist/heic-worker.js` + `dist/vendor/libheif.js` / `libheif.wasm`，LGPL-3.0，长边最多 4032 px）再交给原来的上传，各模块的类型、大小和权限检查不变；因此正式站 CSP 的 script-src 带 `'wasm-unsafe-eval'`（只允许 WebAssembly，不允许 eval）。不要改成服务器转换：正式服务只有 512 MB 内存，一张 1200 万像素的照片解码就要约 580 MB。单个文件上限统一至少 10 MB（2026-11-28 老板定，原来 3 / 5 / 8 MB 的都改成 10 MB，本来更大的不变）。
 - 上传文件统一用前端的 `dist/upload-zone.js`（`window.WorkOSUpload`）：一个框同时支持粘贴、拖拽、点击选择和“上传”按钮，
   只负责收文件和检查类型、大小，存储和权限仍由各模块自己的接口负责。新功能不要再自己写一套上传。
 - 打开附件统一用 `dist/file-preview.js`（`window.WorkOSPreview.open`）：PDF、图片、文本、视频直接预览，Word / Excel 等给下载按钮。

@@ -25,7 +25,7 @@ for(const file of files){
   }
   if(!response.ok)throw new Error(`Frontend asset unavailable (${describeStatus(response)}).`);
   const buffer=Buffer.from(await response.arrayBuffer());total+=buffer.length;
-  if(total>5*1024*1024)throw new Error('Frontend package is unexpectedly large.');
+  if(total>12*1024*1024)throw new Error('Frontend package is unexpectedly large.');
   const digest=createHash('sha1').update(`blob ${buffer.length}\0`).update(buffer).digest('hex');
   if(digest!==file.sha)throw new Error('Frontend asset does not match the pinned Git object.');
   const target=path.join(destination,relative);await mkdir(path.dirname(target),{recursive:true});await writeFile(target,buffer);

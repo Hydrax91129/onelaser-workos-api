@@ -34,7 +34,7 @@ http://:{$PORT:10000} {
     @not_wiki not path /wiki/* /api/ai-lab/previews/*
     header @not_wiki {
         X-Frame-Options DENY
-        Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self' https://login.dingtalk.com"
+        Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self' https://login.dingtalk.com"
     }
     # Stored files (project, task, product, RMA, HR and feedback files) open in the WorkOS preview
     # window (dist/file-preview.js): only the app itself may frame them, and the file response runs

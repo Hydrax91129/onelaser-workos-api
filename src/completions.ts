@@ -80,7 +80,7 @@ CREATE INDEX IF NOT EXISTS task_attachment_task_idx ON task_attachments(task_id,
 const ALLOWED_MIME = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'application/pdf', 'text/plain', 'text/csv',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   'application/vnd.openxmlformats-officedocument.presentationml.presentation', 'video/mp4', 'application/zip']);
-const MAX_ATTACHMENT = 8 * 1024 * 1024, MAX_TASK_ATTACHMENTS = 500;
+const MAX_ATTACHMENT = 10 * 1024 * 1024, MAX_TASK_ATTACHMENTS = 500;
 const id = z.string().trim().min(1).max(128);
 const completeInput = z.object({
   result: z.string().trim().min(2, 'Describe the result').max(20000),
@@ -415,7 +415,7 @@ export async function registerCompletionRoutes(app: FastifyInstance, db: Databas
     if (!ALLOWED_MIME.has(v.mime)) deny(400, 'ATTACHMENT_TYPE', 'This file type is not allowed');
     if (!/^[A-Za-z0-9+/]+={0,2}$/.test(v.dataBase64)) deny(400, 'ATTACHMENT_INVALID', 'The file could not be read');
     const data = Buffer.from(v.dataBase64, 'base64');
-    if (!data.length || data.length > MAX_ATTACHMENT) deny(400, 'ATTACHMENT_TOO_LARGE', 'Files must be 8 MB or smaller');
+    if (!data.length || data.length > MAX_ATTACHMENT) deny(400, 'ATTACHMENT_TOO_LARGE', 'Files must be 10 MB or smaller');
     const count = (await db.query('SELECT count(*)::int n FROM task_attachments WHERE task_id=$1', [taskId])).rows[0].n;
     if (count >= MAX_TASK_ATTACHMENTS) deny(400, 'ATTACHMENT_LIMIT', 'A task can have at most 500 attachments');
     const name = v.name.replace(/[\\/\u0000-\u001f]/g, '_');

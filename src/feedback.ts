@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS feedback(id text PRIMARY KEY, org_id text NOT NULL, u
   images jsonb NOT NULL DEFAULT '[]', status text NOT NULL DEFAULT 'new', emailed boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now());
 CREATE INDEX IF NOT EXISTS feedback_org ON feedback(org_id,created_at);
 `;
-const MAX_IMAGES = 6, MAX_IMAGE_BYTES = 3 * 1024 * 1024;
+const MAX_IMAGES = 6, MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] as const;
 const esc = (v: string) => v.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 
@@ -29,7 +29,7 @@ export async function registerFeedbackRoutes(app: FastifyInstance, db: Database,
   app.post('/feedback', { bodyLimit: MAX_IMAGES * Math.ceil(MAX_IMAGE_BYTES * 4 / 3) + 64 * 1024 }, async (req, reply) => {
     const u = actorOf(req), v = input.parse(req.body);
     if (!v.body && !v.images.length) deny(400, 'FEEDBACK_EMPTY', 'Write a few words or add a screenshot');
-    for (const im of v.images) if (Buffer.from(im.data, 'base64').length > MAX_IMAGE_BYTES) deny(400, 'FEEDBACK_IMAGE_TOO_LARGE', 'Each screenshot must be 3 MB or smaller');
+    for (const im of v.images) if (Buffer.from(im.data, 'base64').length > MAX_IMAGE_BYTES) deny(400, 'FEEDBACK_IMAGE_TOO_LARGE', 'Each screenshot must be 10 MB or smaller');
     const id = randomUUID();
     await db.query('INSERT INTO feedback(id,org_id,user_id,body,page,images) VALUES($1,$2,$3,$4,$5,$6)', [id, u.org_id, u.id, v.body, v.page, JSON.stringify(v.images)]);
     let emailed = false;
