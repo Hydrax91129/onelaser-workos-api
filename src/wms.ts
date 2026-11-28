@@ -37,6 +37,11 @@ CREATE INDEX IF NOT EXISTS wms_movements_org ON wms_movements(org_id,created_at)
 CREATE INDEX IF NOT EXISTS wms_movements_sku ON wms_movements(org_id,sku,created_at);
 CREATE INDEX IF NOT EXISTS wms_movements_pending ON wms_movements(org_id,created_at) WHERE status='pending';
 ALTER TABLE wms_movements ADD COLUMN IF NOT EXISTS op_date date;
+ALTER TABLE wms_movements ADD COLUMN IF NOT EXISTS reverses text;
+ALTER TABLE wms_movements ADD COLUMN IF NOT EXISTS reversed_by text;
+ALTER TABLE wms_movements ADD COLUMN IF NOT EXISTS reversed_at timestamptz;
+ALTER TABLE wms_movements ADD COLUMN IF NOT EXISTS reversed_reason text;
+ALTER TABLE wms_movements ADD COLUMN IF NOT EXISTS reversed_actor text;
 CREATE TABLE IF NOT EXISTS wms_bins(org_id text NOT NULL, sku text NOT NULL, location text NOT NULL, bin1 text NOT NULL DEFAULT '', bin2 text NOT NULL DEFAULT '',
   bin3 text NOT NULL DEFAULT '', updated_by text, updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(org_id,sku,location));
 ALTER TABLE wms_bins ADD COLUMN IF NOT EXISTS qty1 integer NOT NULL DEFAULT 0;
@@ -189,6 +194,14 @@ const checkOpDate = (d: string) => {
   if (d < '2000-01-01' || d > max || Number.isNaN(Date.parse(d + 'T00:00:00Z'))) deny(400, 'WMS_OP_DATE', 'Check the operation date', '操作日期不对，请检查（不能早于 2000 年，也不能是未来的日期）。');
 };
 /** How a movement was made, for the log: opening import, dealer shipment, several SKUs in one go, or one by hand. */
+/** Why a movement cannot be undone from the log (null = it can): only applied goods in / out / transfers made in WMS,
+ *  once, within 7 days of being entered (owner, 2026-11-28). Counts are corrected with a new count; dealer shipments and
+ *  supply-chain moves are undone where they were made. */
+export const UNDO_DAYS = 7;
+export const undoBlock = (m: any, now = Date.now()): string | null =>
+  now - new Date(m.created_at).getTime() > UNDO_DAYS * 864e5 && !m.reversed_by && !m.reverses && ['in', 'out', 'transfer'].includes(m.type) && m.status === 'done' ? 'expired'
+  : !['in', 'out', 'transfer'].includes(m.type) ? 'type' : m.status !== 'done' ? 'status' : m.reversed_by ? 'reversed' : m.reverses ? 'reversal'
+    : m.reference === 'IMPORT' ? 'import' : /^Dealer order /.test(m.reason || '') ? 'dealer' : /^(发柜|完工入库|到港入仓) /.test(m.reason || '') ? 'scm' : null;
 const methodOf = (m: any, n: number) => m.reference === 'IMPORT' ? 'import' : /^Dealer order /.test(m.reason || '') ? 'dealer' : n > 1 ? 'batch' : 'manual';
 const sku = z.string().trim().min(1).max(80).regex(/^[A-Za-z0-9][A-Za-z0-9._\-/ ]*$/, 'Use letters, digits, dot, dash, slash or underscore in the SKU');
 const uid = z.string().min(1).max(100);
@@ -276,6 +289,9 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
     reason: m.reason, reference: m.reference || '', status: m.status, createdAt: m.created_at, byName: nameOf(people.get(m.created_by)),
     approvedByName: m.status !== 'pending' && m.decided_by ? nameOf(people.get(m.decided_by)) : '',
     canDecide: canDecide(u, m, people),
+    canUndo: warehouseLevel(u) === 'manage' && !undoBlock(m),
+    ...(m.reverses ? { reverses: m.reverses } : {}),
+    ...(m.reversed_by ? { reversed: { id: m.reversed_by, at: m.reversed_at, reason: m.reversed_reason || '', byName: nameOf(people.get(m.reversed_actor)) } } : {}),
     ...(m.status === 'pending' ? { confirmers: confirmersOf(people, m.created_by).map(id => nameOf(people.get(id))) } : {}),
   }; };
 
@@ -581,6 +597,39 @@ export async function registerWmsRoutes(app: FastifyInstance, db: Database, o: {
       const people = await peopleOf(u.org_id, tx);
       for (const id of ids) await decideOne(tx, u, id, v.decision, people);
       return { ok: true, decided: ids.length };
+    });
+  });
+
+  /* 撤销 (owner, 2026-11-28): a warehouse manager undoes a goods in / out / transfer entered by mistake. Nothing is deleted:
+   * an opposite movement is written (same SKU, warehouse and order number, reason “撤销：…”, today's date) and the
+   * original is marked undone with who, when and why. Stock must allow it (undoing goods in needs the units still there). */
+  const undoInput = z.object({ reason: z.string().trim().min(2).max(160) }).strict();
+  app.post<{ Params: { id: string } }>('/wms/movements/:id/undo', async req => {
+    const u = actorOf(req); requireManage(u);
+    const parsed = undoInput.safeParse(req.body);
+    if (!parsed.success) deny(400, 'WMS_UNDO_REASON', 'Say why this movement is undone', '请写明撤销原因。');
+    const v = parsed.data;
+    return db.transaction(async tx => {
+      const m = (await tx.query('SELECT * FROM wms_movements WHERE id=$1 AND org_id=$2 FOR UPDATE', [uid.parse(req.params.id), u.org_id])).rows[0]
+        || deny(404, 'WMS_MOVEMENT_NOT_FOUND', 'Movement not found', '找不到这条流水。');
+      const why = undoBlock(m);
+      if (why) deny(409, 'WMS_UNDO_NOT_ALLOWED', ({ type: 'Only goods in, goods out and transfers can be undone; correct a count with a new count',
+        status: 'Only applied movements can be undone', expired: `Movements can only be undone within ${UNDO_DAYS} days of being entered; correct it with a new movement`, reversed: 'This movement was already undone', reversal: 'An undo cannot be undone; enter the movement again',
+        import: 'Opening stock cannot be undone here; use a bulk update', dealer: 'Undo a dealer shipment from the dealer order',
+        scm: 'Undo container, finished-goods and arrival moves in Supply chain' } as Record<string, string>)[why],
+        ({ type: '只能撤销入库、出库和调拨；盘点调整请重新盘点更正。', status: '只能撤销已生效的流水。', reversed: '这条流水已经撤销过了。',
+          expired: `只能撤销录入后 ${UNDO_DAYS} 天内的流水；超过 ${UNDO_DAYS} 天请另外录一笔更正。`, reversal: '撤销记录不能再撤销，如需要请重新录入。', import: '期初导入不能在这里撤销，请用批量更新库存。', dealer: '经销商发货请在经销商订单里处理。',
+          scm: '发柜、完工入库和到港入仓请在供应链里处理。' } as Record<string, string>)[why]);
+      const n = Math.abs(Number(m.qty)), id = randomUUID();
+      let type = m.type, from = m.location, to: string | null = null, qty = n;
+      if (m.type === 'in') { await addStock(tx, u.org_id, m.sku, m.location, -n); type = 'out'; qty = -n; }
+      else if (m.type === 'out') { await addStock(tx, u.org_id, m.sku, m.location, n); type = 'in'; }
+      else { await addStock(tx, u.org_id, m.sku, m.to_location, -n); await addStock(tx, u.org_id, m.sku, m.location, n); from = m.to_location; to = m.location; }
+      await tx.query(`INSERT INTO wms_movements(id,org_id,type,sku,location,to_location,qty,reason,reference,status,created_by,op_date,reverses) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'done',$10,$11,$12)`,
+        [id, u.org_id, type, m.sku, from, to, qty, `撤销：${v.reason}`.slice(0, 200), m.reference, u.id, todayIso(), m.id]);
+      await tx.query('UPDATE wms_movements SET reversed_by=$2,reversed_at=now(),reversed_reason=$3,reversed_actor=$4 WHERE id=$1', [m.id, id, v.reason, u.id]);
+      await audit(tx, u, 'wms.movement_undone', m.id, { undo: id, reason: v.reason, type: m.type, sku: m.sku, qty: Number(m.qty) });
+      return { ok: true, id };
     });
   });
 

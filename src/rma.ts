@@ -69,7 +69,7 @@ export async function migrateRmaGrades(db: Database) {
   });
 }
 const PHOTO_MIME = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
-const MAX_PHOTO = 5 * 1024 * 1024, MAX_PHOTOS = 40;
+const MAX_PHOTO = 10 * 1024 * 1024, MAX_PHOTOS = 40;
 const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use a date like 2026-11-02');
 const id = z.string().min(1).max(100).regex(/^[A-Za-z0-9_-]+$/);
 const sku = z.string().trim().min(1).max(80);
@@ -309,7 +309,7 @@ export async function registerRmaRoutes(app: FastifyInstance, db: Database, o: {
     if (!PHOTO_MIME.has(v.mime)) deny(400, 'RMA_PHOTO_TYPE', 'Photos must be PNG, JPEG, WebP or GIF');
     if (!/^[A-Za-z0-9+/]+={0,2}$/.test(v.dataBase64)) deny(400, 'RMA_PHOTO_INVALID', 'The photo could not be read');
     const data = Buffer.from(v.dataBase64, 'base64');
-    if (!data.length || data.length > MAX_PHOTO) deny(400, 'RMA_PHOTO_TOO_LARGE', 'Photos must be 5 MB or smaller');
+    if (!data.length || data.length > MAX_PHOTO) deny(400, 'RMA_PHOTO_TOO_LARGE', 'Photos must be 10 MB or smaller');
     if (Number((await db.query('SELECT count(*)::int n FROM rma_photos WHERE case_id=$1', [caseId])).rows[0].n) >= MAX_PHOTOS) deny(400, 'RMA_PHOTO_LIMIT', 'A case can have at most 40 photos');
     const photoId = randomUUID();
     await db.transaction(async tx => {
